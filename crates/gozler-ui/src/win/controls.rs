@@ -1,6 +1,14 @@
 //! The common controls of the main window, which are created here, and the
 //! wrappers of the dialogs' controls, which their templates create.
 
+mod folder_tree;
+mod list_view;
+mod status_bar;
+
+pub(crate) use folder_tree::{FolderTree, TreeItem};
+pub(crate) use list_view::{ListColumn, ListView, ScrollEdge};
+pub(crate) use status_bar::StatusBar;
+
 use super::gdi::{
     Font, Icon, ImageList, TextMeter, button_images, glyph_icon, glyph_list, icons_shown,
     lone_button_images, system_color,
@@ -13,63 +21,42 @@ use crate::core::commands::Keystroke;
 use crate::core::glyph::Glyph;
 use crate::core::layout::column_sizing;
 use crate::core::layout::{self, Dpi, Px, Size, glyph_gap, icon_glyph_height};
-use gozler_core::include::FolderCheck;
-use std::cell::{Cell, RefCell};
-use std::ops::Range;
-use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, SYSTEMTIME, WPARAM};
-use windows::Win32::Graphics::Gdi::{
-    COLOR_BTNTEXT, COLOR_WINDOWTEXT, ClientToScreen, MapWindowPoints, ScreenToClient,
-};
+use windows::Win32::Foundation::{LPARAM, RECT, SYSTEMTIME, WPARAM};
+use windows::Win32::Graphics::Gdi::COLOR_WINDOWTEXT;
 use windows::Win32::UI::Controls::{
     BCM_GETIMAGELIST, BCM_SETIMAGELIST, BCM_SETSHIELD, BCM_SETSPLITINFO, BCSIF_STYLE, BCSS_NOSPLIT,
     BS_SPLITBUTTON, BST_CHECKED, BUTTON_IMAGELIST, BUTTON_IMAGELIST_ALIGN,
     BUTTON_IMAGELIST_ALIGN_CENTER, BUTTON_IMAGELIST_ALIGN_LEFT, BUTTON_SPLITINFO,
-    DTM_GETSYSTEMTIME, DTM_SETSYSTEMTIME, EM_GETMARGINS, EM_GETSEL, EM_SCROLLCARET,
-    EM_SETCUEBANNER, EM_SETSEL, GDT_NONE, GDT_VALID, HDF_SORTDOWN, HDF_SORTUP, HDHITTESTINFO,
-    HDI_FORMAT, HDITEMW, HDM_GETITEMRECT, HDM_GETITEMW, HDM_HITTEST, HDM_SETITEMW, HIMAGELIST,
-    HKM_GETHOTKEY, HKM_SETHOTKEY, HKM_SETRULES, HOTKEYF_ALT, HOTKEYF_CONTROL, HOTKEYF_EXT,
-    HOTKEYF_SHIFT, HTREEITEM, ICC_BAR_CLASSES, ICC_DATE_CLASSES, ICC_HOTKEY_CLASS, ICC_LINK_CLASS,
-    ICC_LISTVIEW_CLASSES, ICC_STANDARD_CLASSES, ICC_TREEVIEW_CLASSES, INITCOMMONCONTROLSEX,
-    InitCommonControlsEx, LIST_VIEW_ITEM_STATE_FLAGS, LVCF_FMT, LVCF_TEXT, LVCF_WIDTH, LVCFMT_LEFT,
-    LVCFMT_RIGHT, LVCOLUMNW, LVHITTESTINFO, LVIF_IMAGE, LVIF_TEXT, LVIR_BOUNDS, LVIR_LABEL,
-    LVIS_DROPHILITED, LVIS_FOCUSED, LVIS_SELECTED, LVITEMW, LVM_DELETEALLITEMS, LVM_DELETECOLUMN,
-    LVM_ENSUREVISIBLE, LVM_GETCOLUMNORDERARRAY, LVM_GETCOLUMNWIDTH, LVM_GETCOUNTPERPAGE,
-    LVM_GETHEADER, LVM_GETITEMCOUNT, LVM_GETITEMRECT, LVM_GETITEMSTATE, LVM_GETITEMTEXTW,
-    LVM_GETNEXTITEM, LVM_GETSELECTEDCOUNT, LVM_GETTOPINDEX, LVM_HITTEST, LVM_INSERTCOLUMNW,
-    LVM_INSERTITEMW, LVM_REDRAWITEMS, LVM_SETCALLBACKMASK, LVM_SETCOLUMNORDERARRAY, LVM_SETCOLUMNW,
-    LVM_SETCOLUMNWIDTH, LVM_SETEXTENDEDLISTVIEWSTYLE, LVM_SETIMAGELIST, LVM_SETITEMCOUNT,
-    LVM_SETITEMSTATE, LVM_SETITEMTEXTW, LVM_SETSELECTIONMARK, LVNI_FOCUSED, LVNI_SELECTED,
-    LVS_EX_DOUBLEBUFFER, LVS_EX_FULLROWSELECT, LVS_EX_HEADERDRAGDROP, LVS_EX_INFOTIP,
-    LVS_EX_LABELTIP, LVS_NOCOLUMNHEADER, LVS_OWNERDATA, LVS_REPORT, LVS_SHAREIMAGELISTS,
-    LVS_SHOWSELALWAYS, LVS_SINGLESEL, LVSCW_AUTOSIZE, LVSICF_NOSCROLL, LVSIL_SMALL, NMHDR,
-    PBM_SETMARQUEE, PBM_SETPOS, PBM_SETRANGE32, PBS_MARQUEE, PROGRESS_CLASSW, SB_GETICON,
-    SB_GETPARTS, SB_GETRECT, SB_GETTEXTLENGTHW, SB_GETTEXTW, SB_SETICON, SB_SETMINHEIGHT,
-    SB_SETPARTS, SB_SETTEXTW, SB_SETTIPTEXTW, SBARS_SIZEGRIP, SBARS_TOOLTIPS, STATUSCLASSNAMEW,
-    SetWindowTheme, TOOLTIPS_CLASSW, TREE_VIEW_ITEM_STATE_FLAGS, TTF_ABSOLUTE, TTF_IDISHWND,
-    TTF_SUBCLASS, TTF_TRACK, TTM_ADDTOOLW, TTM_NEWTOOLRECTW, TTM_SETMAXTIPWIDTH, TTM_TRACKACTIVATE,
-    TTM_TRACKPOSITION, TTM_UPDATETIPTEXTW, TTS_BALLOON, TTS_NOPREFIX, TTTOOLINFOW, TVE_EXPAND,
-    TVGN_CARET, TVGN_CHILD, TVGN_FIRSTVISIBLE, TVGN_NEXT, TVGN_NEXTVISIBLE, TVGN_ROOT, TVI_LAST,
-    TVI_ROOT, TVIF_CHILDREN, TVIF_PARAM, TVIF_STATE, TVIF_TEXT, TVINSERTSTRUCTW, TVINSERTSTRUCTW_0,
-    TVIS_STATEIMAGEMASK, TVITEMEXW_CHILDREN, TVITEMW, TVM_DELETEITEM, TVM_ENSUREVISIBLE,
-    TVM_EXPAND, TVM_GETITEMSTATE, TVM_GETITEMW, TVM_GETNEXTITEM, TVM_GETVISIBLECOUNT,
-    TVM_INSERTITEMW, TVM_SELECTITEM, TVM_SETEXTENDEDSTYLE, TVM_SETITEMW, TVS_CHECKBOXES,
-    TVS_EX_AUTOHSCROLL, TVS_EX_DOUBLEBUFFER, TVS_EX_PARTIALCHECKBOXES, WC_LISTVIEWW,
+    DTM_GETSYSTEMTIME, DTM_SETSYSTEMTIME, EM_GETCUEBANNER, EM_GETMARGINS, EM_GETSEL,
+    EM_SCROLLCARET, EM_SETCUEBANNER, EM_SETSEL, GDT_NONE, GDT_VALID, HIMAGELIST, HKM_GETHOTKEY,
+    HKM_SETHOTKEY, HKM_SETRULES, HOTKEYF_ALT, HOTKEYF_CONTROL, HOTKEYF_EXT, HOTKEYF_SHIFT,
+    ICC_BAR_CLASSES, ICC_DATE_CLASSES, ICC_HOTKEY_CLASS, ICC_LINK_CLASS, ICC_LISTVIEW_CLASSES,
+    ICC_STANDARD_CLASSES, ICC_TREEVIEW_CLASSES, INITCOMMONCONTROLSEX, InitCommonControlsEx,
+    LIST_VIEW_ITEM_STATE_FLAGS, LVCF_FMT, LVCF_TEXT, LVCF_WIDTH, LVCFMT_LEFT, LVCFMT_RIGHT,
+    LVCOLUMNW, LVIF_IMAGE, LVIF_TEXT, LVIR_BOUNDS, LVIS_FOCUSED, LVIS_SELECTED, LVITEMW,
+    LVM_DELETEALLITEMS, LVM_ENSUREVISIBLE, LVM_GETCOLUMNWIDTH, LVM_GETCOUNTPERPAGE,
+    LVM_GETITEMCOUNT, LVM_GETITEMRECT, LVM_GETITEMTEXTW, LVM_GETNEXTITEM, LVM_INSERTCOLUMNW,
+    LVM_INSERTITEMW, LVM_SETCOLUMNWIDTH, LVM_SETEXTENDEDLISTVIEWSTYLE, LVM_SETIMAGELIST,
+    LVM_SETITEMSTATE, LVM_SETITEMTEXTW, LVNI_SELECTED, LVS_EX_DOUBLEBUFFER, LVS_EX_FULLROWSELECT,
+    LVS_EX_INFOTIP, LVS_EX_LABELTIP, LVS_NOCOLUMNHEADER, LVS_REPORT, LVS_SHAREIMAGELISTS,
+    LVS_SHOWSELALWAYS, LVS_SINGLESEL, LVSCW_AUTOSIZE, LVSIL_SMALL, PBM_SETMARQUEE, PBM_SETPOS,
+    PBM_SETRANGE32, PBS_MARQUEE, PROGRESS_CLASSW, SetWindowTheme, TOOLTIPS_CLASSW, TTF_ABSOLUTE,
+    TTF_IDISHWND, TTF_SUBCLASS, TTF_TRACK, TTM_ADDTOOLW, TTM_GETTEXTW, TTM_NEWTOOLRECTW,
+    TTM_SETMAXTIPWIDTH, TTM_TRACKACTIVATE, TTM_TRACKPOSITION, TTM_UPDATETIPTEXTW, TTS_BALLOON,
+    TTS_NOPREFIX, TTTOOLINFOW, WC_LISTVIEWW,
 };
 use windows::Win32::UI::HiDpi::GetSystemMetricsForDpi;
 use windows::Win32::UI::Input::KeyboardAndMouse::{EnableWindow, IsWindowEnabled};
-use windows::Win32::UI::Shell::{DefSubclassProc, RemoveWindowSubclass, SetWindowSubclass};
 use windows::Win32::UI::WindowsAndMessaging::{
     BM_GETCHECK, BM_SETCHECK, BN_CLICKED, BS_AUTOCHECKBOX, BS_ICON, BS_PUSHBUTTON, CB_ADDSTRING,
     CB_GETCOUNT, CB_GETCURSEL, CB_GETDROPPEDSTATE, CB_GETLBTEXT, CB_GETLBTEXTLEN, CB_RESETCONTENT,
     CB_SETCURSEL, CBN_CLOSEUP, CBN_SELCHANGE, CBN_SELENDCANCEL, CBN_SELENDOK, CBS_DROPDOWNLIST,
-    CreateWindowExW, DestroyWindow, EN_CHANGE, EN_KILLFOCUS, EN_SETFOCUS, ES_AUTOHSCROLL,
-    ES_READONLY, GWL_STYLE, GetParent, GetWindowLongPtrW, GetWindowRect, HICON, HMENU,
-    HWND_MESSAGE, IMAGE_ICON, IsChild, KillTimer, LB_ADDSTRING, LB_GETCOUNT, LB_GETCURSEL,
-    LB_GETTEXT, LB_GETTEXTLEN, LB_RESETCONTENT, LB_SETCURSEL, SB_LINEDOWN, SB_LINEUP, SM_CXVSCROLL,
-    STM_GETIMAGE, STM_SETIMAGE, SendMessageW, SetParent, SetTimer, SetWindowLongPtrW,
-    WINDOW_EX_STYLE, WINDOW_STYLE, WM_COMMAND, WM_COPY, WM_NCDESTROY, WM_NOTIFY, WM_SIZE,
-    WM_VSCROLL, WS_CHILD, WS_CLIPCHILDREN, WS_CLIPSIBLINGS, WS_EX_CLIENTEDGE, WS_EX_CONTROLPARENT,
-    WS_EX_TOPMOST, WS_POPUP, WS_TABSTOP, WS_VISIBLE, WS_VSCROLL,
+    CreateWindowExW, EN_CHANGE, EN_KILLFOCUS, EN_SETFOCUS, ES_AUTOHSCROLL, ES_READONLY, GWL_STYLE,
+    GetWindowLongPtrW, HICON, HMENU, IMAGE_ICON, LB_ADDSTRING, LB_GETCOUNT, LB_GETCURSEL,
+    LB_GETTEXT, LB_GETTEXTLEN, LB_RESETCONTENT, LB_SETCURSEL, SM_CXVSCROLL, STM_GETIMAGE,
+    STM_SETIMAGE, SendMessageW, SetWindowLongPtrW, WINDOW_EX_STYLE, WINDOW_STYLE, WM_COPY,
+    WS_CHILD, WS_CLIPSIBLINGS, WS_EX_CLIENTEDGE, WS_EX_TOPMOST, WS_POPUP, WS_TABSTOP, WS_VISIBLE,
+    WS_VSCROLL,
 };
 use windows::core::{PCWSTR, PWSTR, w};
 
@@ -259,6 +246,19 @@ impl Edit {
     /// The grey hint the empty box shows, also while it has the focus.
     pub(crate) fn set_cue(self, text: &str) {
         let text = wide(text);
+        let mut shown = vec![0u16; text.len() + 1];
+        // SAFETY: `shown` is writable for the character count in lparam.
+        let read = unsafe {
+            SendMessageW(
+                self.0.0,
+                EM_GETCUEBANNER,
+                Some(WPARAM(shown.as_mut_ptr() as usize)),
+                Some(LPARAM(shown.len() as isize)),
+            )
+        };
+        if read.0 != 0 && shown.starts_with(&text) {
+            return;
+        }
         // SAFETY: `text` is a NUL-terminated string that outlives the call.
         unsafe { send_pointer(self.0, EM_SETCUEBANNER, 1, text.as_ptr()) };
     }
@@ -1073,6 +1073,9 @@ impl DatePicker {
 
     /// Shows `day` with its check box set, or clears the check box.
     pub(crate) fn set_day(self, day: Option<jiff::civil::Date>) {
+        if self.day() == day {
+            return;
+        }
         match day {
             Some(day) => {
                 let time = SYSTEMTIME {
@@ -1155,6 +1158,7 @@ impl Balloon {
     /// Shows `text` pointing at the bottom of `control`, until
     /// [`Balloon::hide`].
     pub(crate) fn show(&self, control: Hwnd, text: &str) {
+        set_tool_text(self.tip, self.tool(&mut []), text);
         let mut text = wide(text);
         let tool = self.tool(&mut text);
         let rect = control.screen_rect();
@@ -1164,7 +1168,6 @@ impl Balloon {
         let point = (x as u16 as u32 | (y as u16 as u32) << 16) as isize;
         // SAFETY: `tool` and its text outlive each call, which copies them.
         unsafe {
-            send_pointer(self.tip, TTM_UPDATETIPTEXTW, 0, &raw const tool);
             send(self.tip, TTM_TRACKPOSITION, 0, point);
             send_pointer(self.tip, TTM_TRACKACTIVATE, 1, &raw const tool);
         }
@@ -1229,10 +1232,7 @@ impl Tooltip {
     /// Shows `text` while the mouse rests on `control`, one of the
     /// tooltip's controls; an empty text shows no tip.
     pub(crate) fn set(&self, control: Hwnd, text: &str) {
-        let mut text = wide(text);
-        let tool = self.tool(control, &mut text);
-        // SAFETY: `tool` and its text outlive the call, which copies them.
-        unsafe { send_pointer(self.tip, TTM_UPDATETIPTEXTW, 0, &raw const tool) };
+        set_tool_text(self.tip, self.tool(control, &mut []), text);
     }
 
     /// A tooltip for `areas` places in `parent`, numbered from 0, such as
@@ -1261,10 +1261,11 @@ impl Tooltip {
     /// Shows `text` while the mouse rests on area `area`; an empty text
     /// shows no tip.
     pub(crate) fn set_area(&self, area: usize, text: &str) {
-        let mut text = wide(text);
-        let tool = self.area_tool(area, RECT::default(), &mut text);
-        // SAFETY: `tool` and its text outlive the call, which copies them.
-        unsafe { send_pointer(self.tip, TTM_UPDATETIPTEXTW, 0, &raw const tool) };
+        set_tool_text(
+            self.tip,
+            self.area_tool(area, RECT::default(), &mut []),
+            text,
+        );
     }
 
     /// The tool of area `area`, which the tooltip knows by its number.
@@ -1291,6 +1292,21 @@ impl Tooltip {
             ..TTTOOLINFOW::default()
         }
     }
+}
+
+fn set_tool_text(tip: Hwnd, mut tool: TTTOOLINFOW, text: &str) {
+    let mut text = wide(text);
+    let mut shown = vec![0u16; text.len() + 1];
+    tool.lpszText = PWSTR(shown.as_mut_ptr());
+    // SAFETY: `tool` identifies a registered tool and points to `shown`,
+    // which holds the character count in wparam.
+    unsafe { send_pointer(tip, TTM_GETTEXTW, shown.len(), &raw const tool) };
+    if shown.starts_with(&text) {
+        return;
+    }
+    tool.lpszText = PWSTR(text.as_mut_ptr());
+    // SAFETY: `tool` and its text outlive the call, which copies the text.
+    unsafe { send_pointer(tip, TTM_UPDATETIPTEXTW, 0, &raw const tool) };
 }
 
 /// A check box.
@@ -1332,702 +1348,6 @@ impl CheckBox {
     pub(crate) fn is_checked(self) -> bool {
         send(self.0, BM_GETCHECK, 0, 0) == BST_CHECKED.0 as isize
     }
-}
-
-/// The results list: a list view in report and virtual mode, drawn as File
-/// Explorer draws its virtual list (DESIGN.md: Look).
-#[derive(Clone, Copy)]
-pub(crate) struct ListView(Hwnd);
-
-/// The edge of the results list that it scrolls toward during a drag.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum ScrollEdge {
-    Top,
-    Bottom,
-}
-
-/// One column as the list shows it.
-pub(crate) struct ListColumn<'a> {
-    pub(crate) header: &'a str,
-    pub(crate) width: Px,
-    pub(crate) right_aligned: bool,
-}
-
-impl ListView {
-    pub(crate) fn show_info_tips(self) {
-        send(
-            self.0,
-            LVM_SETEXTENDEDLISTVIEWSTYLE,
-            LVS_EX_INFOTIP as usize,
-            LVS_EX_INFOTIP as isize,
-        );
-    }
-
-    /// The controls created before the list lie above it, such as the
-    /// message in its empty area. It shares the system image list, which it
-    /// must not destroy.
-    pub(crate) fn create(parent: Hwnd, id: u16) -> windows::core::Result<ListView> {
-        let list = child(
-            parent,
-            WC_LISTVIEWW,
-            WS_TABSTOP.0 | LVS_REPORT | LVS_OWNERDATA | LVS_SHOWSELALWAYS | LVS_SHAREIMAGELISTS,
-            WINDOW_EX_STYLE(0),
-            id,
-        )?;
-        Self::initialize(list);
-        Ok(ListView(list))
-    }
-
-    pub(crate) fn of_dialog(dialog: Hwnd, id: u16) -> Option<ListView> {
-        let list = super::dialog::item(dialog, id)?;
-        Self::initialize(list);
-        Some(ListView(list))
-    }
-
-    fn initialize(list: Hwnd) {
-        // LVS_EX_LABELTIP shows a cut-off cell's whole text in a tooltip.
-        let extended =
-            LVS_EX_DOUBLEBUFFER | LVS_EX_FULLROWSELECT | LVS_EX_HEADERDRAGDROP | LVS_EX_LABELTIP;
-        send(
-            list,
-            LVM_SETEXTENDEDLISTVIEWSTYLE,
-            extended as usize,
-            extended as isize,
-        );
-        // A virtual list keeps only the selection and the focus, so it asks
-        // the window which row a drop would go to (DispInfo::set_drop_target).
-        send(list, LVM_SETCALLBACKMASK, LVIS_DROPHILITED.0 as usize, 0);
-        // SAFETY: plain values; a missing theme leaves the classic look.
-        let _ = unsafe { SetWindowTheme(list.0, w!("Explorer"), PCWSTR::null()) };
-    }
-
-    pub(crate) fn hwnd(self) -> Hwnd {
-        self.0
-    }
-
-    pub(crate) fn insert_column(self, index: usize, column: &ListColumn) {
-        self.column_message(LVM_INSERTCOLUMNW, index, column.header, Some(column));
-    }
-
-    /// Sets a column's header text and keeps its width and order.
-    pub(crate) fn set_header(self, index: usize, header: &str) {
-        self.column_message(LVM_SETCOLUMNW, index, header, None);
-    }
-
-    fn column_message(self, message: u32, index: usize, header: &str, column: Option<&ListColumn>) {
-        let mut header = wide(header);
-        let mut item = LVCOLUMNW {
-            mask: LVCF_TEXT,
-            pszText: PWSTR(header.as_mut_ptr()),
-            ..Default::default()
-        };
-        if let Some(column) = column {
-            item.mask |= LVCF_WIDTH | LVCF_FMT;
-            item.cx = column.width.0;
-            item.fmt = if column.right_aligned {
-                LVCFMT_RIGHT
-            } else {
-                LVCFMT_LEFT
-            };
-        }
-        // SAFETY: `item` and the header text it points to outlive the call,
-        // which copies them.
-        unsafe { send_pointer(self.0, message, index, &raw const item) };
-    }
-
-    pub(crate) fn column_width(self, index: usize) -> Px {
-        Px(send(self.0, LVM_GETCOLUMNWIDTH, index, 0) as i32)
-    }
-
-    pub(crate) fn set_column_width(self, index: usize, width: Px) {
-        send(self.0, LVM_SETCOLUMNWIDTH, index, width.0 as isize);
-    }
-
-    pub(crate) fn delete_column(self, index: usize) {
-        send(self.0, LVM_DELETECOLUMN, index, 0);
-    }
-
-    /// The column indexes in the order the header shows them, of `count`
-    /// columns.
-    pub(crate) fn column_order(self, count: usize) -> Vec<usize> {
-        let mut order = vec![0i32; count];
-        // SAFETY: `order` holds the `count` integers the message writes.
-        unsafe { send_pointer(self.0, LVM_GETCOLUMNORDERARRAY, count, order.as_mut_ptr()) };
-        order
-            .into_iter()
-            .map(|i| usize::try_from(i).unwrap_or(0))
-            .collect()
-    }
-
-    pub(crate) fn set_column_order(self, order: &[usize]) {
-        let order: Vec<i32> = order.iter().map(|&i| i as i32).collect();
-        // SAFETY: `order` holds the `order.len()` integers the message reads.
-        unsafe { send_pointer(self.0, LVM_SETCOLUMNORDERARRAY, order.len(), order.as_ptr()) };
-    }
-
-    /// The header control above the rows.
-    pub(crate) fn header(self) -> Hwnd {
-        Hwnd(windows::Win32::Foundation::HWND(
-            send(self.0, LVM_GETHEADER, 0, 0) as *mut _,
-        ))
-    }
-
-    /// Shows the sort arrow on the column `sorted` of `count` columns,
-    /// pointing up when `ascending`, and on no other.
-    pub(crate) fn show_sort(self, count: usize, sorted: Option<(usize, bool)>) {
-        let header = self.header();
-        for index in 0..count {
-            let mut item = HDITEMW {
-                mask: HDI_FORMAT,
-                ..Default::default()
-            };
-            // SAFETY: `item` is a local that the header fills in, then reads.
-            unsafe { send_pointer(header, HDM_GETITEMW, index, &raw mut item) };
-            let shown = item.fmt.0;
-            item.fmt.0 &= !(HDF_SORTUP.0 | HDF_SORTDOWN.0);
-            match sorted {
-                Some((column, true)) if column == index => item.fmt.0 |= HDF_SORTUP.0,
-                Some((column, false)) if column == index => item.fmt.0 |= HDF_SORTDOWN.0,
-                _ => {}
-            }
-            // The window shows the sort after every reply, and a header
-            // given its own format still repaints.
-            if item.fmt.0 != shown {
-                // SAFETY: as above.
-                unsafe { send_pointer(header, HDM_SETITEMW, index, &raw const item) };
-            }
-        }
-    }
-
-    pub(crate) fn set_small_images(self, images: &ImageList) {
-        send(
-            self.0,
-            LVM_SETIMAGELIST,
-            LVSIL_SMALL as usize,
-            images.handle(),
-        );
-    }
-
-    /// Sets the number of rows and redraws them, keeping the scroll
-    /// position.
-    pub(crate) fn set_count(self, count: u64) {
-        send(
-            self.0,
-            LVM_SETITEMCOUNT,
-            usize::try_from(count).unwrap_or(usize::MAX),
-            LVSICF_NOSCROLL as isize,
-        );
-    }
-
-    pub(crate) fn count(self) -> u64 {
-        send(self.0, LVM_GETITEMCOUNT, 0, 0).max(0) as u64
-    }
-
-    /// How many rows are selected, in one message.
-    pub(crate) fn selected_count(self) -> u64 {
-        send(self.0, LVM_GETSELECTEDCOUNT, 0, 0).max(0) as u64
-    }
-
-    pub(crate) fn ensure_visible(self, row: u64) {
-        send(self.0, LVM_ENSUREVISIBLE, row as usize, 0);
-    }
-
-    /// Sets the states `mask` of the row `index`, or of every row for
-    /// `usize::MAX`, which is -1, to `state`.
-    fn set_state(
-        self,
-        index: usize,
-        mask: LIST_VIEW_ITEM_STATE_FLAGS,
-        state: LIST_VIEW_ITEM_STATE_FLAGS,
-    ) {
-        let item = LVITEMW {
-            stateMask: mask,
-            state,
-            ..Default::default()
-        };
-        // SAFETY: `item` outlives the call, which reads it.
-        unsafe { send_pointer(self.0, LVM_SETITEMSTATE, index, &raw const item) };
-    }
-
-    /// Selects and focuses `row` alone, or clears the selection and the
-    /// focus for `None`.
-    pub(crate) fn select_only(self, row: Option<u64>) {
-        let both = LIST_VIEW_ITEM_STATE_FLAGS(LVIS_SELECTED.0 | LVIS_FOCUSED.0);
-        self.set_state(usize::MAX, both, LIST_VIEW_ITEM_STATE_FLAGS(0));
-        if let Some(row) = row {
-            self.set_state(row as usize, both, both);
-        }
-    }
-
-    /// Selects every row (DESIGN.md: C11).
-    pub(crate) fn select_all(self) {
-        self.set_state(usize::MAX, LVIS_SELECTED, LVIS_SELECTED);
-    }
-
-    /// Deselects every row with one message, which notifies the window once.
-    pub(crate) fn deselect_all(self) {
-        self.set_state(usize::MAX, LVIS_SELECTED, LIST_VIEW_ITEM_STATE_FLAGS(0));
-    }
-
-    pub(crate) fn deselect(self, row: u64) {
-        self.set_state(row as usize, LVIS_SELECTED, LIST_VIEW_ITEM_STATE_FLAGS(0));
-    }
-
-    /// The focused row, which a panel moves without the selection
-    /// (DESIGN.md: Selecting entries).
-    pub(crate) fn focused(self) -> Option<u64> {
-        u64::try_from(send(
-            self.0,
-            LVM_GETNEXTITEM,
-            usize::MAX,
-            LVNI_FOCUSED as isize,
-        ))
-        .ok()
-    }
-
-    /// Focuses `row` and keeps the selection, or takes the focus from every
-    /// row for `None`, and scrolls the row into view. The row is also where
-    /// a `Shift`+click starts.
-    pub(crate) fn set_focused(self, row: Option<u64>) {
-        self.focus_in_place(row);
-        if let Some(row) = row {
-            self.ensure_visible(row);
-        }
-    }
-
-    /// As [`ListView::set_focused`], without scrolling, so the rows stay
-    /// where the person sees them.
-    pub(crate) fn focus_in_place(self, row: Option<u64>) {
-        // A virtual list does not draw again the row that loses the focus
-        // to another row, which keeps its focus rectangle on the screen;
-        // taking the focus from every row first draws it again.
-        self.set_state(usize::MAX, LVIS_FOCUSED, LIST_VIEW_ITEM_STATE_FLAGS(0));
-        if let Some(row) = row {
-            self.set_state(row as usize, LVIS_FOCUSED, LVIS_FOCUSED);
-            send(self.0, LVM_SETSELECTIONMARK, 0, row as isize);
-        }
-    }
-
-    /// Whether `row` is focused, and whether it is selected.
-    pub(crate) fn row_state(self, row: u64) -> (bool, bool) {
-        let mask = LVIS_FOCUSED.0 | LVIS_SELECTED.0;
-        let state = send(self.0, LVM_GETITEMSTATE, row as usize, mask as isize) as u32;
-        (state & LVIS_FOCUSED.0 != 0, state & LVIS_SELECTED.0 != 0)
-    }
-
-    pub(crate) fn select(self, row: u64, selected: bool) {
-        let state = if selected {
-            LVIS_SELECTED
-        } else {
-            LIST_VIEW_ITEM_STATE_FLAGS(0)
-        };
-        self.set_state(row as usize, LVIS_SELECTED, state);
-    }
-
-    pub(crate) fn next_selected(self, after: Option<u64>) -> Option<u64> {
-        u64::try_from(send(
-            self.0,
-            LVM_GETNEXTITEM,
-            after.map_or(usize::MAX, |row| row as usize),
-            LVNI_SELECTED as isize,
-        ))
-        .ok()
-    }
-
-    /// The row at `point`, in screen coordinates, if one is there.
-    pub(crate) fn row_at(self, point: (i32, i32)) -> Option<u64> {
-        let mut hit = LVHITTESTINFO {
-            pt: POINT {
-                x: point.0,
-                y: point.1,
-            },
-            ..Default::default()
-        };
-        // SAFETY: `hit.pt` is a local the call converts in place.
-        if !unsafe { ScreenToClient(self.0.0, &mut hit.pt) }.as_bool() {
-            return None;
-        }
-        // SAFETY: `hit` is a local that the list reads and fills in.
-        let row = unsafe { send_pointer(self.0, LVM_HITTEST, 0, &raw mut hit) };
-        u64::try_from(row).ok()
-    }
-
-    /// The edge that the list scrolls toward while dragged files rest at
-    /// `point`, in screen coordinates, as File Explorer's list does: the
-    /// header and the row height below it, or the last row height above the
-    /// bottom.
-    pub(crate) fn drag_scroll_edge(self, point: (i32, i32)) -> Option<ScrollEdge> {
-        let mut client = POINT {
-            x: point.0,
-            y: point.1,
-        };
-        // SAFETY: `client` is a local the call converts in place.
-        if !unsafe { ScreenToClient(self.0.0, &mut client) }.as_bool() {
-            return None;
-        }
-        let size = self.0.client_size();
-        if client.x < 0 || client.x >= size.width.0 || client.y < 0 || client.y >= size.height.0 {
-            return None;
-        }
-        let mut rect = RECT {
-            left: LVIR_BOUNDS as i32,
-            ..RECT::default()
-        };
-        // SAFETY: `rect` is a local that the list reads the part from and
-        // fills in; a list without rows fails, and nothing scrolls.
-        if unsafe { send_pointer(self.0, LVM_GETITEMRECT, 0, &raw mut rect) } == 0 {
-            return None;
-        }
-        let row = rect.bottom - rect.top;
-        if client.y < self.header().client_size().height.0 + row {
-            Some(ScrollEdge::Top)
-        } else if client.y >= size.height.0 - row {
-            Some(ScrollEdge::Bottom)
-        } else {
-            None
-        }
-    }
-
-    /// Scrolls the list one row toward `edge`.
-    pub(crate) fn scroll_row(self, edge: ScrollEdge) {
-        let code = match edge {
-            ScrollEdge::Top => SB_LINEUP,
-            ScrollEdge::Bottom => SB_LINEDOWN,
-        };
-        send(self.0, WM_VSCROLL, code.0 as usize, 0);
-    }
-
-    /// Takes the focus for the row the person left in this list of `count`
-    /// rows: the focused row, else the first selected one, else the first
-    /// row. With no row selected, that row is selected too, so the row with
-    /// the focus shows filled (DESIGN.md: window rule 8).
-    pub(crate) fn focus_left_row(self, count: u64) {
-        self.hwnd().focus();
-        let Some(row) = self
-            .focused_or_first_selected()
-            .or((count > 0).then_some(0))
-        else {
-            return;
-        };
-        if self.selected_count() == 0 {
-            self.select_only(Some(row));
-            self.ensure_visible(row);
-        } else {
-            self.set_focused(Some(row));
-        }
-    }
-
-    /// The focused row, or the first selected one without a focused row,
-    /// because Select all selects rows without focusing one.
-    pub(crate) fn focused_or_first_selected(self) -> Option<u64> {
-        [LVNI_FOCUSED, LVNI_SELECTED].into_iter().find_map(|flag| {
-            u64::try_from(send(self.0, LVM_GETNEXTITEM, usize::MAX, flag as isize)).ok()
-        })
-    }
-
-    /// Where a context menu for the focused row
-    /// ([`Self::focused_or_first_selected`]) opens, in screen coordinates:
-    /// the bottom left of the row, as File Explorer opens it for Shift+F10.
-    /// The row is scrolled into view first.
-    pub(crate) fn focused_row_point(self) -> Option<(i32, i32)> {
-        let row = self.focused_or_first_selected()?;
-        self.ensure_visible(row);
-        let mut rect = RECT {
-            left: LVIR_BOUNDS as i32,
-            ..RECT::default()
-        };
-        // SAFETY: `rect` is a local that the list reads the part from and
-        // fills in.
-        if unsafe { send_pointer(self.0, LVM_GETITEMRECT, row as usize, &raw mut rect) } == 0 {
-            return None;
-        }
-        let mut point = POINT {
-            x: rect.left,
-            y: rect.bottom,
-        };
-        // SAFETY: `point` is a local the call converts in place.
-        unsafe { ClientToScreen(self.0.0, &mut point) }
-            .as_bool()
-            .then_some((point.x, point.y))
-    }
-
-    /// Redraws `rows`, whose cells have changed.
-    pub(crate) fn redraw_rows(self, rows: Range<u64>) {
-        if rows.is_empty() {
-            return;
-        }
-        send(
-            self.0,
-            LVM_REDRAWITEMS,
-            rows.start as usize,
-            (rows.end - 1) as isize,
-        );
-    }
-
-    /// The rows the list shows now, a partly shown last row included.
-    pub(crate) fn visible_rows(self) -> Range<u64> {
-        let top = send(self.0, LVM_GETTOPINDEX, 0, 0).max(0) as u64;
-        let page = send(self.0, LVM_GETCOUNTPERPAGE, 0, 0).max(0) as u64;
-        top..top + page + 1
-    }
-
-    /// Whether the last of [`Self::visible_rows`] shows in part, and is not
-    /// the row below the whole rows.
-    pub(crate) fn shows_part_row(self) -> bool {
-        let row = self.visible_rows().end - 1;
-        let mut rect = RECT {
-            left: LVIR_BOUNDS as i32,
-            ..RECT::default()
-        };
-        // SAFETY: `rect` is a local that the list reads the part from and
-        // fills in.
-        let held = unsafe { send_pointer(self.0, LVM_GETITEMRECT, row as usize, &raw mut rect) };
-        held != 0 && rect.top < self.0.client_size().height.0
-    }
-
-    /// The width the columns fill: the list's inside less a vertical scroll
-    /// bar, whether the bar shows or not, so rows that bring the bar never
-    /// push the columns past the right edge.
-    pub(crate) fn fill_width(self) -> Px {
-        let inside = self.0.client_size().width;
-        // SAFETY: plain values.
-        let style = unsafe { GetWindowLongPtrW(self.0.0, GWL_STYLE) } as u32;
-        if style & WS_VSCROLL.0 != 0 {
-            inside
-        } else {
-            inside - scroll_bar_width(self.0.dpi())
-        }
-    }
-
-    /// How far the first column's text area starts after the column's left
-    /// edge, past the row's icon, measured on `row`; `None` when the list
-    /// does not hold it.
-    pub(crate) fn first_label_offset(self, row: u64) -> Option<Px> {
-        let mut label = RECT {
-            left: LVIR_LABEL as i32,
-            ..RECT::default()
-        };
-        // SAFETY: `label` is a local that the list reads the part from and
-        // fills in.
-        if unsafe { send_pointer(self.0, LVM_GETITEMRECT, row as usize, &raw mut label) } == 0 {
-            return None;
-        }
-        let header = self.header();
-        let mut column = RECT::default();
-        // SAFETY: `column` is a local that the header fills in.
-        if unsafe { send_pointer(header, HDM_GETITEMRECT, 0, &raw mut column) } == 0 {
-            return None;
-        }
-        // The header's coordinates differ from the list's while the list
-        // scrolls sideways.
-        let mut left = [POINT {
-            x: column.left,
-            y: 0,
-        }];
-        // SAFETY: `left` is a local the call converts in place.
-        unsafe { MapWindowPoints(Some(header.0), Some(self.0.0), &mut left) };
-        Some(Px(label.left - left[0].x))
-    }
-
-    /// The column whose header is at `point`, in screen coordinates.
-    pub(crate) fn column_at(self, point: (i32, i32)) -> Option<usize> {
-        let header = self.header();
-        let mut hit = HDHITTESTINFO {
-            pt: POINT {
-                x: point.0,
-                y: point.1,
-            },
-            ..Default::default()
-        };
-        // SAFETY: `hit.pt` is a local the call converts in place.
-        if !unsafe { ScreenToClient(header.0, &mut hit.pt) }.as_bool() {
-            return None;
-        }
-        // SAFETY: `hit` is a local that the header reads and fills in.
-        let column = unsafe { send_pointer(header, HDM_HITTEST, 0, &raw mut hit) };
-        usize::try_from(column).ok()
-    }
-}
-
-/// The status bar, which sizes itself to its font at the window's bottom.
-#[derive(Clone, Copy)]
-pub(crate) struct StatusBar(Hwnd);
-
-impl StatusBar {
-    pub(crate) fn hwnd(self) -> Hwnd {
-        self.0
-    }
-
-    /// Creates the status bar as the parent of the controls in its parts,
-    /// whose notifications it passes to `parent`. `Tab` and the access keys
-    /// reach them, as `WS_EX_CONTROLPARENT` lets `IsDialogMessageW` look
-    /// inside it. A parent that the person resizes gets the size grip. A
-    /// part's tooltip shows only while its text is cut off.
-    pub(crate) fn create(
-        parent: Hwnd,
-        id: u16,
-        size_grip: bool,
-    ) -> windows::core::Result<StatusBar> {
-        let grip = if size_grip { SBARS_SIZEGRIP } else { 0 };
-        let bar = child(
-            parent,
-            STATUSCLASSNAMEW,
-            grip | SBARS_TOOLTIPS | WS_CLIPCHILDREN.0,
-            WS_EX_CONTROLPARENT,
-            id,
-        )?;
-        // SAFETY: the procedure uses no data, and removes itself on
-        // WM_NCDESTROY, the status bar's last message.
-        if !unsafe { SetWindowSubclass(bar.0, Some(status_bar_procedure), 0, 0) }.as_bool() {
-            return Err(windows::core::Error::from_thread());
-        }
-        Ok(StatusBar(bar))
-    }
-
-    /// Sets the height of the drawing area, which Windows makes at least
-    /// as tall as the font; [`Self::fit`] applies it.
-    pub(crate) fn set_min_height(self, height: Px) {
-        send(self.0, SB_SETMINHEIGHT, height.0.max(0) as usize, 0);
-    }
-
-    /// Fits the status bar to the parent's new size and returns its height.
-    pub(crate) fn fit(self) -> Px {
-        send(self.0, WM_SIZE, 0, 0);
-        let mut rect = windows::Win32::Foundation::RECT::default();
-        // SAFETY: `rect` is a local the call fills in.
-        let _ = unsafe { GetWindowRect(self.0.0, &mut rect) };
-        Px(rect.bottom - rect.top)
-    }
-
-    /// Sets the widths of the first parts; the last part takes the rest.
-    /// A part keeps the text and icon of the part that had its index.
-    pub(crate) fn set_parts(self, widths: &[Px]) {
-        let mut right = 0;
-        let mut edges: Vec<i32> = widths
-            .iter()
-            .map(|w| {
-                right += w.0;
-                right
-            })
-            .collect();
-        edges.push(-1);
-        let mut current = vec![0; edges.len()];
-        // SAFETY: `current` has room for the `current.len()` integers the
-        // message writes at most, and outlives the call.
-        let count =
-            unsafe { send_pointer(self.0, SB_GETPARTS, current.len(), current.as_mut_ptr()) };
-        // Setting the parts draws the whole bar again, which the status
-        // updates would make flicker.
-        if count == edges.len() as isize && current == edges {
-            return;
-        }
-        // SAFETY: `edges` holds the `edges.len()` integers the message reads,
-        // and outlives the call.
-        unsafe { send_pointer(self.0, SB_SETPARTS, edges.len(), edges.as_ptr()) };
-    }
-
-    /// Sets the text of `part`. A text it shows already is not set again,
-    /// because the bar erases and draws the part for every text it is
-    /// given, also an unchanged one (DESIGN.md: Painting).
-    pub(crate) fn set_text(self, part: usize, text: &str) {
-        if self.text(part) == text {
-            return;
-        }
-        let text = wide(text);
-        // SAFETY: `text` is NUL-terminated and outlives the call, which
-        // copies it.
-        unsafe { send_pointer(self.0, SB_SETTEXTW, part, text.as_ptr()) };
-    }
-
-    pub(crate) fn text(self, part: usize) -> String {
-        // The low word is the length; the high word says how it is drawn.
-        let length = (send(self.0, SB_GETTEXTLENGTHW, part, 0) & 0xFFFF) as usize;
-        let mut text = vec![0u16; length + 1];
-        // SAFETY: `text` has room for the part's text and its NUL, and
-        // outlives the call, which fills it in.
-        unsafe { send_pointer(self.0, SB_GETTEXTW, part, text.as_mut_ptr()) };
-        String::from_utf16_lossy(&text[..length])
-    }
-
-    /// Shows `glyph` before the text of `part`, at the bar's DPI, in the
-    /// system colours of now and only while icons show, or no icon for
-    /// `None`, so the owner calls this again when any of them changes.
-    pub(crate) fn set_icon(self, part: usize, glyph: Option<Glyph>) {
-        let side = icon_glyph_height(self.0.dpi());
-        let icon = glyph
-            .filter(|_| icons_shown())
-            .and_then(|glyph| glyph_icon(glyph, side, system_color(COLOR_BTNTEXT)))
-            .unwrap_or_default();
-        // The bar keeps the icon without owning it, and `glyph_icon` keeps
-        // it alive; one that it shows already is not set again, because each
-        // setting draws the part again.
-        if send(self.0, SB_GETICON, part, 0) != icon.0 as isize {
-            send(self.0, SB_SETICON, part, icon.0 as isize);
-        }
-    }
-
-    /// The width of a part that shows `text` whole, after `glyph`'s icon
-    /// while icons show, as [`Self::set_icon`] shows it.
-    pub(crate) fn part_width(self, text: &str, glyph: Option<Glyph>) -> Px {
-        let text = Font::of(self.0).map_or(Px(0), |font| TextMeter::new(&font).width(text));
-        layout::status_part_width(text, glyph.is_some() && icons_shown(), self.0.dpi())
-    }
-
-    /// Where `part` is, in the bar's client coordinates, after
-    /// [`Self::set_parts`].
-    pub(crate) fn part_rect(self, part: usize) -> layout::Rect {
-        let mut rect = RECT::default();
-        // SAFETY: `rect` is a local the message fills in.
-        unsafe { send_pointer(self.0, SB_GETRECT, part, &raw mut rect) };
-        super::from_rect(rect)
-    }
-
-    /// Sets the tooltip of `part`, which shows while its text is cut off.
-    pub(crate) fn set_tip(self, part: usize, text: &str) {
-        let text = wide(text);
-        // SAFETY: `text` is NUL-terminated and outlives the call, which
-        // copies it.
-        unsafe { send_pointer(self.0, SB_SETTIPTEXTW, part, text.as_ptr()) };
-    }
-}
-
-/// The procedure of the status bar, before its own: it passes the
-/// notifications of the controls in its parts to its parent, which handles
-/// them as its own controls'.
-unsafe extern "system" fn status_bar_procedure(
-    hwnd: HWND,
-    msg: u32,
-    wparam: WPARAM,
-    lparam: LPARAM,
-    _id: usize,
-    _data: usize,
-) -> LRESULT {
-    let forwarded = match msg {
-        WM_COMMAND => true,
-        // SAFETY: a WM_NOTIFY's lparam points to an NMHDR. The bar's own
-        // tooltips are popups, not children, and their notifications stay
-        // the bar's, which answers them.
-        WM_NOTIFY => unsafe { IsChild(hwnd, (*(lparam.0 as *const NMHDR)).hwndFrom) }.as_bool(),
-        _ => false,
-    };
-    match msg {
-        _ if forwarded => {
-            // SAFETY: the parameters are the ones Windows passed, and the
-            // parent decodes them as its own controls'.
-            unsafe {
-                if let Ok(parent) = GetParent(hwnd) {
-                    return SendMessageW(parent, msg, Some(wparam), Some(lparam));
-                }
-            }
-        }
-        WM_NCDESTROY => {
-            // SAFETY: the status bar gets no message after this one.
-            let _ = unsafe { RemoveWindowSubclass(hwnd, Some(status_bar_procedure), 0) };
-        }
-        _ => {}
-    }
-    // SAFETY: the parameters are the ones Windows passed.
-    unsafe { DefSubclassProc(hwnd, msg, wparam, lparam) }
 }
 
 /// A progress bar that shows that work runs, without saying how much of it
@@ -2295,248 +1615,7 @@ impl ReportList {
 }
 
 /// The width of a vertical scroll bar at `dpi`.
-fn scroll_bar_width(dpi: Dpi) -> Px {
+pub(super) fn scroll_bar_width(dpi: Dpi) -> Px {
     // SAFETY: plain values.
     Px(unsafe { GetSystemMetricsForDpi(SM_CXVSCROLL, dpi.get()) })
-}
-
-/// An item of a [`FolderTree`].
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct TreeItem(pub(crate) HTREEITEM);
-
-/// A tree view with a check box on each item, which a dialog's template
-/// declares, such as Indexed folders' folders. Each item carries a number,
-/// which the dialog gives it, and a check box that shows a [`FolderCheck`].
-///
-/// Each item that the tree adds, removes or checks raises an accessibility
-/// event, which costs up to a few tenths of a millisecond while another
-/// program listens for them, so a folder such as `C:\Windows\WinSxS`, with
-/// tens of thousands of subfolders, takes seconds.
-#[derive(Clone, Copy)]
-pub(crate) struct FolderTree(Hwnd);
-
-impl FolderTree {
-    /// The tree view `id` of a dialog.
-    pub(crate) fn of_dialog(dialog: Hwnd, id: u16) -> Option<FolderTree> {
-        super::dialog::item(dialog, id).map(FolderTree)
-    }
-
-    pub(crate) fn hwnd(self) -> Hwnd {
-        self.0
-    }
-
-    /// Gives the tree check boxes that can show [`FolderCheck::Partial`],
-    /// and File Explorer's look: no horizontal scroll bar, which the dialog
-    /// template turns off. With `TVS_EX_AUTOHSCROLL` as well, opening
-    /// `C:\Windows\WinSxS` took 2 ms instead of 22. Call it before the first
-    /// item is added.
-    pub(crate) fn show_check_boxes(self) {
-        // Windows makes the check boxes' images only when the style is set
-        // after the control exists and before it holds an item.
-        // SAFETY: plain values on a window of this thread.
-        unsafe {
-            let style = GetWindowLongPtrW(self.0.0, GWL_STYLE);
-            SetWindowLongPtrW(self.0.0, GWL_STYLE, style | TVS_CHECKBOXES as isize);
-        }
-        let extended = TVS_EX_PARTIALCHECKBOXES | TVS_EX_DOUBLEBUFFER | TVS_EX_AUTOHSCROLL;
-        send(
-            self.0,
-            TVM_SETEXTENDEDSTYLE,
-            extended as usize,
-            extended as isize,
-        );
-        // SAFETY: plain values; a missing theme leaves the classic look.
-        let _ = unsafe { SetWindowTheme(self.0.0, w!("Explorer"), PCWSTR::null()) };
-    }
-
-    /// Adds the item `text`, carrying `data` and showing `check`, as the
-    /// last child of `parent`, or as the last top item. With
-    /// `may_have_children`, it shows the button that expands it, before its
-    /// children are added. The check box is set with the item, because
-    /// setting it afterwards costs one more accessibility event.
-    pub(crate) fn insert(
-        self,
-        parent: Option<TreeItem>,
-        text: &str,
-        data: usize,
-        may_have_children: bool,
-        check: FolderCheck,
-    ) -> Option<TreeItem> {
-        let mut text = wide(text);
-        let insert = TVINSERTSTRUCTW {
-            hParent: parent.map_or(TVI_ROOT, |p| p.0),
-            hInsertAfter: TVI_LAST,
-            Anonymous: TVINSERTSTRUCTW_0 {
-                item: TVITEMW {
-                    mask: TVIF_TEXT | TVIF_PARAM | TVIF_CHILDREN | TVIF_STATE,
-                    pszText: PWSTR(text.as_mut_ptr()),
-                    cChildren: TVITEMEXW_CHILDREN(i32::from(may_have_children)),
-                    lParam: LPARAM(data as isize),
-                    state: check_state(check),
-                    stateMask: TVIS_STATEIMAGEMASK,
-                    ..Default::default()
-                },
-            },
-        };
-        // SAFETY: `insert` and its text outlive the call, which copies them.
-        let item = unsafe { send_pointer(self.0, TVM_INSERTITEMW, 0, &raw const insert) };
-        (item != 0).then_some(TreeItem(HTREEITEM(item)))
-    }
-
-    /// Shows that `item` has no children, after a listing found none.
-    pub(crate) fn set_childless(self, item: TreeItem) {
-        let change = TVITEMW {
-            mask: TVIF_CHILDREN,
-            hItem: item.0,
-            ..Default::default()
-        };
-        // SAFETY: `change` outlives the call, which reads it.
-        unsafe { send_pointer(self.0, TVM_SETITEMW, 0, &raw const change) };
-    }
-
-    /// Shows `check` on `item`'s check box, unless it shows it already,
-    /// because each change raises an accessibility event.
-    pub(crate) fn set_check(self, item: TreeItem, check: FolderCheck) {
-        let shown = send(
-            self.0,
-            TVM_GETITEMSTATE,
-            item.0.0 as usize,
-            TVIS_STATEIMAGEMASK.0 as isize,
-        );
-        let state = check_state(check);
-        if shown as u32 == state.0 {
-            return;
-        }
-        let change = TVITEMW {
-            mask: TVIF_STATE,
-            hItem: item.0,
-            state,
-            stateMask: TVIS_STATEIMAGEMASK,
-            ..Default::default()
-        };
-        // SAFETY: `change` outlives the call, which reads it.
-        unsafe { send_pointer(self.0, TVM_SETITEMW, 0, &raw const change) };
-    }
-
-    /// The number the item carries.
-    pub(crate) fn data(self, item: TreeItem) -> usize {
-        let mut read = TVITEMW {
-            mask: TVIF_PARAM,
-            hItem: item.0,
-            ..Default::default()
-        };
-        // SAFETY: `read` outlives the call, which fills it in.
-        unsafe { send_pointer(self.0, TVM_GETITEMW, 0, &raw mut read) };
-        read.lParam.0 as usize
-    }
-
-    /// The children of `parent`, or the top items, in their order.
-    pub(crate) fn children(self, parent: Option<TreeItem>) -> Vec<TreeItem> {
-        let mut children = Vec::new();
-        let mut next = match parent {
-            Some(parent) => send(self.0, TVM_GETNEXTITEM, TVGN_CHILD as usize, parent.0.0),
-            None => send(self.0, TVM_GETNEXTITEM, TVGN_ROOT as usize, 0),
-        };
-        while next != 0 {
-            children.push(TreeItem(HTREEITEM(next)));
-            next = send(self.0, TVM_GETNEXTITEM, TVGN_NEXT as usize, next);
-        }
-        children
-    }
-
-    /// The items in view, top to bottom, with the one that the bottom edge
-    /// cuts.
-    pub(crate) fn visible_items(self) -> Vec<TreeItem> {
-        let count = send(self.0, TVM_GETVISIBLECOUNT, 0, 0) as usize + 1;
-        let mut items = Vec::with_capacity(count);
-        let mut item = send(self.0, TVM_GETNEXTITEM, TVGN_FIRSTVISIBLE as usize, 0);
-        while item != 0 && items.len() < count {
-            items.push(TreeItem(HTREEITEM(item)));
-            item = send(self.0, TVM_GETNEXTITEM, TVGN_NEXTVISIBLE as usize, item);
-        }
-        items
-    }
-
-    pub(crate) fn expand(self, item: TreeItem) {
-        send(self.0, TVM_EXPAND, TVE_EXPAND.0 as usize, item.0.0);
-    }
-
-    /// Selects `item` and scrolls it into view.
-    pub(crate) fn select(self, item: TreeItem) {
-        send(self.0, TVM_SELECTITEM, TVGN_CARET as usize, item.0.0);
-        send(self.0, TVM_ENSUREVISIBLE, 0, item.0.0);
-    }
-
-    /// Takes the tree out of its dialog, which can then close at once, and
-    /// removes its items a slice at a time on a timer of this thread before
-    /// it destroys it, because removing them all at once would stop the
-    /// thread for seconds.
-    pub(crate) fn destroy_later(self) {
-        // SAFETY: plain values on a window of this thread; a message-only
-        // window is never shown.
-        let _ = unsafe { SetParent(self.0.0, Some(HWND_MESSAGE)) };
-        DYING_TREES.with_borrow_mut(|trees| trees.push(self));
-        // SAFETY: plain values; one thread timer serves every tree, and an
-        // id that names none makes a new one.
-        let timer = unsafe { SetTimer(None, DYING_TIMER.get(), TREE_SLICE_MS, Some(remove_slice)) };
-        DYING_TIMER.set(timer);
-    }
-
-    /// The first item that has no children, if the tree holds any item.
-    fn first_leaf(self) -> Option<TreeItem> {
-        let mut item = send(self.0, TVM_GETNEXTITEM, TVGN_ROOT as usize, 0);
-        if item == 0 {
-            return None;
-        }
-        loop {
-            match send(self.0, TVM_GETNEXTITEM, TVGN_CHILD as usize, item) {
-                0 => return Some(TreeItem(HTREEITEM(item))),
-                child => item = child,
-            }
-        }
-    }
-}
-
-/// The time a slice of a dying tree's removal takes at most, and its
-/// timer's period.
-const TREE_SLICE_MS: u32 = 15;
-
-thread_local! {
-    /// The trees that [`FolderTree::destroy_later`] removes.
-    static DYING_TREES: RefCell<Vec<FolderTree>> = const { RefCell::new(Vec::new()) };
-    /// The id of the thread timer that removes them, which the first
-    /// `SetTimer` gives.
-    static DYING_TIMER: Cell<usize> = const { Cell::new(0) };
-}
-
-/// The dying trees' timer: removes their items for one slice, leaves first,
-/// so each removal is one item, and destroys each tree once it is empty.
-unsafe extern "system" fn remove_slice(_: HWND, _: u32, timer: usize, _: u32) {
-    let end = std::time::Instant::now() + std::time::Duration::from_millis(TREE_SLICE_MS.into());
-    DYING_TREES.with_borrow_mut(|trees| {
-        while let Some(&tree) = trees.last() {
-            while let Some(leaf) = tree.first_leaf() {
-                send(tree.0, TVM_DELETEITEM, 0, leaf.0.0);
-                if std::time::Instant::now() >= end {
-                    return;
-                }
-            }
-            // SAFETY: a window of this thread that no dialog holds any more.
-            let _ = unsafe { DestroyWindow(tree.0.0) };
-            trees.pop();
-        }
-        // SAFETY: the thread timer this call runs for.
-        let _ = unsafe { KillTimer(None, timer) };
-        DYING_TIMER.set(0);
-    });
-}
-
-/// The state image of `check`, of those of `TVS_EX_PARTIALCHECKBOXES`.
-fn check_state(check: FolderCheck) -> TREE_VIEW_ITEM_STATE_FLAGS {
-    let image: u32 = match check {
-        FolderCheck::Unchecked => 1,
-        FolderCheck::Checked => 2,
-        FolderCheck::Partial => 3,
-    };
-    TREE_VIEW_ITEM_STATE_FLAGS(image << 12)
 }

@@ -1,7 +1,7 @@
 //! Drag feedback may be replaced; accepted source intake keeps its operation id.
 
 use super::*;
-use crate::app::work::drops::{Answer, Evaluated, Evaluation};
+use crate::app::work::drops::{Answer, Evaluated, Evaluation, Expired};
 
 pub(super) struct Dropping {
     destination: PathBuf,
@@ -28,7 +28,60 @@ struct EffectKey {
     allowed: SourceEffects,
 }
 
+impl DragIn {
+    fn expire(&mut self, expired: Expired) -> bool {
+        if self.landed {
+            return false;
+        }
+        match expired {
+            Expired::Preview(id) if self.preview == Some(id) => self.preview = None,
+            Expired::Evaluation(id)
+                if self
+                    .evaluation
+                    .as_ref()
+                    .is_some_and(|(current, _)| *current == id) =>
+            {
+                self.evaluation = None
+            }
+            _ => return false,
+        }
+        self.over = None;
+        self.evaluated = None;
+        true
+    }
+}
+
 impl MainWindow {
+    pub(super) fn expire_hover(&self, expired: &[Expired]) {
+        let changed = {
+            let mut drag_in = self.drag_in.borrow_mut();
+            drag_in.as_mut().and_then(|drag| {
+                let mut changed = false;
+                for &expired in expired {
+                    changed |= drag.expire(expired);
+                }
+                changed.then(|| {
+                    (
+                        drag.target.take().map(|target| target.row),
+                        drag.scrolling.take().is_some(),
+                    )
+                })
+            })
+        };
+        let Some((row, scrolled)) = changed else {
+            return;
+        };
+        if scrolled {
+            self.created()
+                .controls
+                .list
+                .hwnd()
+                .parent()
+                .kill_timer(timer::DROP_SCROLL);
+        }
+        self.redraw_drop_rows(row);
+    }
+
     pub(super) fn abandon_drop(&self, id: OperationId) {
         let source = self.dropping.borrow_mut().remove(&id);
         drop(source);
@@ -327,5 +380,47 @@ impl DropHandler for MainWindow {
 
     fn run_until(&self, window: Hwnd, done: &dyn Fn() -> bool) {
         win::window::run_messages_until(window, &|| self.accelerators(), done);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::work::{Replacement, Slot};
+
+    #[test]
+    fn hover_expiry_preserves_newer_intent_and_stops_replay() {
+        let mut slot = Slot::new(Replacement::Cancel);
+        let old = slot.submit((), |_, _| ()).unwrap().id;
+        slot.submit((), |_, _| ());
+        let current = slot.current().unwrap();
+        let mut drag = DragIn {
+            landed: false,
+            preview: Some(current),
+            dragged: None,
+            evaluation: None,
+            evaluated: None,
+            target: None,
+            over: Some((
+                (10, 20),
+                DropKeys {
+                    ctrl: false,
+                    shift: false,
+                    alt: false,
+                },
+                SourceEffects {
+                    copy: true,
+                    moves: true,
+                },
+            )),
+            scrolling: None,
+        };
+        assert!(!drag.expire(Expired::Preview(old)));
+        assert!(drag.over.is_some());
+        assert_eq!(drag.preview, Some(current));
+        assert!(drag.expire(Expired::Preview(current)));
+        assert!(drag.over.is_none());
+        assert!(drag.preview.is_none());
+        assert!(!drag.expire(Expired::Preview(current)));
     }
 }

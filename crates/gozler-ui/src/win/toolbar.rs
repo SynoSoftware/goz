@@ -18,11 +18,12 @@ use windows::Win32::Graphics::Gdi::{COLOR_BTNTEXT, COLOR_WINDOW};
 use windows::Win32::UI::Controls::{
     BTNS_AUTOSIZE, BTNS_BUTTON, BTNS_CHECK, BTNS_SEP, BTNS_SHOWTEXT, CCS_NODIVIDER,
     CCS_NOPARENTALIGN, CCS_NORESIZE, I_IMAGENONE, NMTBGETINFOTIPW, TB_ADDBUTTONSW, TB_BUTTONCOUNT,
-    TB_BUTTONSTRUCTSIZE, TB_CHECKBUTTON, TB_ENABLEBUTTON, TB_GETBUTTON, TB_GETBUTTONSIZE,
-    TB_GETIDEALSIZE, TB_ISBUTTONCHECKED, TB_ISBUTTONENABLED, TB_MAPACCELERATORW, TB_SETBUTTONINFOW,
-    TB_SETBUTTONSIZE, TB_SETDISABLEDIMAGELIST, TB_SETEXTENDEDSTYLE, TB_SETIMAGELIST, TBBUTTON,
-    TBBUTTONINFOW, TBIF_IMAGE, TBIF_STYLE, TBIF_TEXT, TBN_GETINFOTIPW, TBSTATE_ENABLED,
-    TBSTYLE_EX_MIXEDBUTTONS, TBSTYLE_FLAT, TBSTYLE_LIST, TBSTYLE_TOOLTIPS, TOOLBARCLASSNAMEW,
+    TB_BUTTONSTRUCTSIZE, TB_CHECKBUTTON, TB_ENABLEBUTTON, TB_GETBUTTON, TB_GETBUTTONINFOW,
+    TB_GETBUTTONSIZE, TB_GETIDEALSIZE, TB_ISBUTTONCHECKED, TB_ISBUTTONENABLED, TB_MAPACCELERATORW,
+    TB_SETBUTTONINFOW, TB_SETBUTTONSIZE, TB_SETDISABLEDIMAGELIST, TB_SETEXTENDEDSTYLE,
+    TB_SETIMAGELIST, TBBUTTON, TBBUTTONINFOW, TBIF_IMAGE, TBIF_STYLE, TBIF_TEXT, TBN_GETINFOTIPW,
+    TBSTATE_ENABLED, TBSTYLE_EX_MIXEDBUTTONS, TBSTYLE_FLAT, TBSTYLE_LIST, TBSTYLE_TOOLTIPS,
+    TOOLBARCLASSNAMEW,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     BN_CLICKED, EnumChildWindows, GetClassNameW, SendMessageW, WINDOW_EX_STYLE, WM_COMMAND,
@@ -209,6 +210,20 @@ impl Toolbar {
     /// screen readers say for every button.
     pub(crate) fn set_text(self, id: u16, text: &str) {
         let mut text = wide(text);
+        let mut shown = vec![0u16; text.len() + 1];
+        let mut current = TBBUTTONINFOW {
+            cbSize: size_of::<TBBUTTONINFOW>() as u32,
+            dwMask: TBIF_TEXT,
+            pszText: PWSTR(shown.as_mut_ptr()),
+            cchText: shown.len() as i32,
+            ..Default::default()
+        };
+        // SAFETY: `current` points to `shown`, which holds cchText units.
+        let read =
+            unsafe { send_pointer(self.0, TB_GETBUTTONINFOW, usize::from(id), &raw mut current) };
+        if read >= 0 && shown.starts_with(&text) {
+            return;
+        }
         let info = TBBUTTONINFOW {
             cbSize: size_of::<TBBUTTONINFOW>() as u32,
             dwMask: TBIF_TEXT,

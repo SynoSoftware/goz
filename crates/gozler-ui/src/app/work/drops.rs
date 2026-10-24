@@ -1,7 +1,7 @@
 //! One preview, one effect pass and serialized accepted source calls.
 
 use crate::core::drop_target::{Dragged, DropEffect, DropKeys, DropMenu, SourceEffects};
-use crate::core::work::{INLINE_ITEMS, Id, Replacement, Retirement};
+use crate::core::work::{INLINE_ITEMS, Id, Replacement, Retirement, Waiting};
 use crate::win::drop_target::{Completion, CompletionSender, DropData, Prepared, Setup};
 use crate::win::wake::OpenWaker;
 use crate::win::work::{OffThread, Task};
@@ -11,6 +11,13 @@ use gozler_fileops::OperationId;
 use std::collections::LinkedList;
 use std::path::PathBuf;
 use std::sync::{Arc, mpsc::Receiver};
+use std::time::Instant;
+
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum Expired {
+    Preview(Id),
+    Evaluation(Id),
+}
 
 pub(crate) struct Evaluation {
     pub(crate) dragged: Arc<Dragged>,
@@ -54,7 +61,8 @@ impl Work {
                 Replacement::Cancel,
                 |data: DropData, worker, _| Arc::new(Dragged::new(data.read(worker))),
             )
-            .with_size(|data| data.items().max(INLINE_ITEMS + 1)),
+            .with_size(|data| data.items().max(INLINE_ITEMS + 1))
+            .background(),
             effect: Task::pass(
                 waker.clone(),
                 Replacement::Cancel,
@@ -68,7 +76,8 @@ impl Work {
                         .map(|effect| input.dragged.menu(&input.folder, effect, input.allowed));
                     Evaluated { effect, menu }
                 },
-            ),
+            )
+            .background(),
             calls: Task::new(waker.clone(), Replacement::Finish, call),
             pending: LinkedList::new(),
             finishing: Task::new(
@@ -84,6 +93,32 @@ impl Work {
             completions,
             waker,
         }
+    }
+
+    pub(in crate::app) fn tick(&mut self, now: Instant) -> (bool, Vec<Expired>) {
+        let mut active = false;
+        let mut expired = Vec::new();
+        let preview = self.preview.current();
+        match self.preview.tick(now) {
+            Some(Waiting::Expired) => {
+                if let Some(id) = preview {
+                    expired.push(Expired::Preview(id));
+                }
+            }
+            Some(_) => active = true,
+            None => {}
+        }
+        let evaluation = self.effect.current();
+        match self.effect.tick(now) {
+            Some(Waiting::Expired) => {
+                if let Some(id) = evaluation {
+                    expired.push(Expired::Evaluation(id));
+                }
+            }
+            Some(_) => active = true,
+            None => {}
+        }
+        (active, expired)
     }
 
     pub(in crate::app) fn preview(&mut self, data: DropData) -> Id {

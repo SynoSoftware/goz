@@ -138,8 +138,39 @@ Current milestone:
   formatting, clippy, all workspace tests (268 UI passed, 14 ignored) and docs:
   `V:/temp/gozler-window-stage3-waiting-build39.log`. No focused test of product
   code or benchmark was added; native evidence attempt 3 is separately recorded.
-  Remaining Stage 3 work includes native shell/clipboard/path/location/pairing
-  waits, selection preparation waits and valid watchdog OLE-loop evidence.
+  Committed as `74128aa`.
+- The next retained batch covers native shell, clipboard, path, pairing and
+  selection preparation waits, exact cancellation ownership, initial folder
+  preparation and background drag-hover expiry. Location checks are background
+  observations; accepted drops and source completion retain their existing queue
+  progress and cancellation owner. Review found Settings could cancel hidden
+  auxiliary work and a main auxiliary wait could obscure an active noncancelable
+  fix. Both corrections are source-reviewed clean at
+  `V:/temp/gozler-window-stage3-native-wait-review2.md`.
+- Settled owner decision: all UAC, approvals and interactive checks are deferred
+  until the end. Continue independent implementation. The prepared physical-drag
+  harness is `V:/temp/gozler-native-watchdog-interactive.rs`, with instructions in
+  `V:/temp/gozler-native-watchdog-interactive.md`; it has not been included or run.
+  The watchdog remains unwired until valid native OLE-loop evidence passes.
+- Independent native-control work takes Stage 4's unconditional native getter
+  comparisons together with Stage 6's substantial control split: ListView,
+  FolderTree and StatusBar each own their implementation and private resources.
+  Retained review is clean at
+  `V:/temp/gozler-window-native-controls-review1.md`. No painting behavior changed; any
+  conditional flicker work still requires the deferred before/after evidence,
+  whose unchanged baseline is `74128aa`. Unreadable shield and marquee state
+  remains with the later control-owner migration; no generic cache was added.
+- The combined native-wait/control batch passed its first full run, Build 40:
+  formatting, clippy, all workspace tests (269 UI passed, 14 ignored) and docs.
+  Log: `V:/temp/gozler-window-native-wait-controls-build40.log`. Its one new test
+  watches hover expiry rejecting stale IDs and stopping replay without clearing
+  newer drag intent. No focused test, benchmark, UI or UAC check ran. Platform
+  cfg, Ubuntu, MSRV and core-purity checks remain with CI; no dependencies changed.
+- Next coherent batch: Stage 5 state ownership/types, with the independent
+  feature-caption split from Stage 6. Lead owns Model/MainWindow and shared
+  contracts; the caption implementer owns only `core/captions.rs` and its new
+  children, retaining the existing reader interface. One consolidated retained
+  review and integrated build follow stable implementation.
 - Stage 2 settled interfaces: persistent Viewer session and fixed panel slots
   retain blocked work until actual resource cleanup. `Task::interrupt_io` only
   interrupts a native call, preserving session lifetime; Cancel also ends it.

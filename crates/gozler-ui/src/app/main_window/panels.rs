@@ -430,7 +430,7 @@ impl MainWindow {
             .folders
             .waiting(side, Instant::now())
             == Some(Waiting::Slow);
-        let slow_request = self.slow_request(List::Panel(side));
+        let slow_request = self.slow_list_work(List::Panel(side));
         let slow = folder_slow || slow_request.is_some();
         let (message, button, key, caption, shown) = {
             let model = self.model.borrow();
@@ -440,7 +440,11 @@ impl MainWindow {
                 let all_drives = panel
                     .search()
                     .is_some_and(|search| search.look_in == LookIn::AllDrives);
-                let path = (folder_slow || !all_drives).then(|| panel.path_box());
+                let scoped = matches!(
+                    slow_request,
+                    Some(super::Awaited::Request(_) | super::Awaited::Selection(_))
+                );
+                let path = (folder_slow || scoped && !all_drives).then(|| panel.path_box());
                 message = Some(crate::core::work::waiting(model.strings(), path));
             }
             let key = if slow { "button.cancel" } else { "panel.retry" };
@@ -501,8 +505,8 @@ impl MainWindow {
             }
             return;
         }
-        if let Some(purpose) = self.slow_request(List::Panel(side)) {
-            self.cancel_list_read(hwnd, purpose);
+        if let Some(awaited) = self.slow_list_work(List::Panel(side)) {
+            self.cancel_list_work(hwnd, List::Panel(side), awaited);
             return;
         }
         let retry = {

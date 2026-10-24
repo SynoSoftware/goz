@@ -208,6 +208,12 @@ impl MainWindow {
         self.native_selection(list).borrow_mut().action = None;
     }
 
+    pub(super) fn native_selection_waiting(&self, list: List) -> bool {
+        let count = self.list_control(list).count();
+        let native = self.native_selection(list).borrow();
+        native.reading.is_some() || native.capture.selected(count).is_none()
+    }
+
     fn selection_waiting(&self, list: List) -> bool {
         if self.native_deselection_pending(list) {
             return true;

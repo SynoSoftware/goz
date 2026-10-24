@@ -13,8 +13,8 @@ use super::settings::SettingsDialog;
 use super::status_bar::{Entry as StatusEntry, Slot as StatusSlot, StatusBar};
 use super::viewer::Viewers;
 use super::work::{
-    CopyFailure, CopyNotice, OpenTarget, Opened, PathAction, PathPurpose, PreparedPaths,
-    QueueReady, RegistryAnswer, ReleaseAnswer, ReleasePurpose, ShellPurpose, ShellTarget,
+    Awaited, CopyFailure, CopyNotice, OpenTarget, Opened, PathAction, PathPurpose, PreparedPaths,
+    QueueReady, RegistryAnswer, ReleaseAnswer, ReleasePurpose, ShellPurpose, ShellTarget, Surface,
 };
 use crate::core::captions::{
     self, ButtonIcon, DialogCaptions, DialogItem, FilterCaptions, IndexCaptions, Inspected,
@@ -1667,6 +1667,12 @@ impl MainWindow {
                 }
                 _ => {}
             }
+            if let Some(awaited) = self.main_waiting() {
+                job.text = crate::core::work::waiting(model.strings(), None);
+                job.progress = captions::JobProgress::Unmeasured;
+                job.cancel = awaited.can_cancel();
+                job.transfer_only = false;
+            }
         }
         let cancel = self
             .model
@@ -1730,7 +1736,72 @@ impl MainWindow {
         if follows && self.fix_waiting(Instant::now()) == Some(Waiting::Slow) {
             job.text = crate::core::work::waiting(strings, None);
         }
+        if let Some(awaited) = self.settings_auxiliary() {
+            job.text = crate::core::work::waiting(strings, None);
+            job.progress = captions::JobProgress::Unmeasured;
+            job.cancel = awaited.can_cancel();
+        }
         job
+    }
+
+    fn work_surface(&self) -> Surface {
+        if self.settings.get().is_some() {
+            Surface::Settings
+        } else {
+            Surface::Main
+        }
+    }
+
+    fn slow_global(&self, surface: Surface) -> Option<Awaited> {
+        self.created()
+            .work
+            .borrow()
+            .global_waiting(surface, Instant::now())
+            .and_then(|(awaited, waiting)| (waiting == Waiting::Slow).then_some(awaited))
+    }
+
+    fn main_waiting(&self) -> Option<Awaited> {
+        {
+            let model = self.model.borrow();
+            if model.can_cancel_job()
+                || model.fix().running()
+                || matches!(
+                    model.operation(),
+                    Some(crate::core::file_operations::StatusOperation::Pending {
+                        phase: crate::core::file_operations::Pending::Cancelling,
+                        ..
+                    })
+                )
+            {
+                return None;
+            }
+        }
+        self.slow_global(Surface::Main)
+    }
+
+    fn settings_auxiliary(&self) -> Option<Awaited> {
+        if self.model.borrow().fix().running() || self.fix_waiting(Instant::now()).is_some() {
+            return None;
+        }
+        self.slow_global(Surface::Settings)
+    }
+
+    pub(super) fn settings_waiting(&self, now: Instant) -> bool {
+        self.created()
+            .work
+            .borrow()
+            .global_waiting(Surface::Settings, now)
+            .is_some()
+    }
+
+    pub(super) fn cancel_settings_waiting(&self) -> bool {
+        let Some(awaited) = self.settings_auxiliary() else {
+            return false;
+        };
+        if awaited.can_cancel() {
+            self.created().work.borrow_mut().cancel_awaited(awaited);
+        }
+        true
     }
 
     pub(super) fn request_waiting(&self, purpose: Purpose, now: Instant) -> Option<Waiting> {
@@ -1746,7 +1817,7 @@ impl MainWindow {
     }
 
     pub(super) fn fix_waiting(&self, now: Instant) -> Option<Waiting> {
-        self.created().work.borrow().fixes.waiting(now)
+        self.created().work.borrow().fix_waiting(now)
     }
 
     pub(super) fn cancel_settings_request(&self, hwnd: Hwnd, purpose: Purpose) {
@@ -1791,7 +1862,21 @@ impl MainWindow {
     /// The main window's status bar's Cancel: stops the job
     /// that the bar shows, as File > Cancel does.
     pub(super) fn cancel_job(&self, hwnd: Hwnd) {
+        if self.cancel_main_waiting(hwnd) {
+            return;
+        }
         self.run(hwnd, MenuItem::Run(CommandId::Cancel));
+    }
+
+    fn cancel_main_waiting(&self, hwnd: Hwnd) -> bool {
+        let Some(awaited) = self.main_waiting() else {
+            return false;
+        };
+        if awaited.can_cancel() {
+            self.created().work.borrow_mut().cancel_awaited(awaited);
+            self.poll_work(hwnd);
+        }
+        true
     }
 
     /// Runs a failure's fix (DESIGN.md: Service fixes). The list's button
@@ -1801,7 +1886,11 @@ impl MainWindow {
         self.created().work.borrow_mut().cancel_pairing();
         match &fix {
             Fix::OpenServices => {
-                self.created().work.borrow_mut().open(ShellTarget::Services);
+                self.created()
+                    .work
+                    .borrow_mut()
+                    .open(ShellTarget::Services, self.work_surface());
+                self.post_settings_reply();
                 return;
             }
             Fix::UseLocal(local) => {
@@ -1812,7 +1901,8 @@ impl MainWindow {
                 self.created()
                     .work
                     .borrow_mut()
-                    .check_pairing(local.clone());
+                    .check_pairing(local.clone(), self.work_surface());
+                self.post_settings_reply();
                 return;
             }
             Fix::Repair(_) | Fix::Update => {}
@@ -1871,7 +1961,11 @@ impl MainWindow {
     }
 
     fn run_setup(&self, setup: PathBuf) {
-        self.created().work.borrow_mut().start_setup(setup);
+        self.created()
+            .work
+            .borrow_mut()
+            .start_setup(setup, self.work_surface());
+        self.post_settings_reply();
     }
 
     /// Closes the window after its message loop has ended, when the setup
@@ -1896,11 +1990,16 @@ impl MainWindow {
     }
 
     fn update_message(&self) {
-        let slow = self.slow_request(List::Search);
+        let slow = self.slow_list_work(List::Search);
         let message = if slow.is_some() && self.model.borrow().mode() == Mode::Search {
             let model = self.model.borrow();
-            let text =
-                crate::core::work::waiting(model.strings(), model.filters().location.as_deref());
+            let path = match slow {
+                Some(Awaited::Request(_) | Awaited::Selection(_)) => {
+                    model.filters().location.as_deref()
+                }
+                _ => None,
+            };
+            let text = crate::core::work::waiting(model.strings(), path);
             Some(ListCaption {
                 text,
                 buttons: vec![captions::MessageButton {
@@ -1916,39 +2015,88 @@ impl MainWindow {
         self.show_message(message.as_ref());
     }
 
-    pub(super) fn slow_request(&self, list: List) -> Option<Purpose> {
-        let now = Instant::now();
+    pub(super) fn slow_list_work(&self, list: List) -> Option<Awaited> {
+        let selecting = {
+            let model = self.model.borrow();
+            model.list(list).is_some_and(|list| {
+                matches!(
+                    list.selection(),
+                    Selection::Reading { .. } | Selection::Filtering { .. }
+                )
+            })
+        };
+        let selection = selecting
+            || self.selection_command_pending(list)
+            || self.native_selection_waiting(list);
         let work = self.created().work.borrow();
-        [Purpose::Selection(list), Purpose::Results(list)]
-            .into_iter()
-            .find(|purpose| work.requests.waiting(*purpose, now) == Some(Waiting::Slow))
+        let now = Instant::now();
+        if let List::Panel(side) = list
+            && self
+                .model
+                .borrow()
+                .panels()
+                .panel(side)
+                .reading_generation()
+                .is_some()
+            && work.listing_waiting(side, now) == Some(Waiting::Slow)
+        {
+            return Some(Awaited::Listing(side));
+        }
+        work.slow(list, selection, now)
     }
 
-    pub(super) fn cancel_list_read(&self, hwnd: Hwnd, purpose: Purpose) {
-        let list = match purpose {
-            Purpose::Selection(list) | Purpose::Results(list) => list,
-            _ => return,
-        };
-        if self.slow_request(list) != Some(purpose) {
+    pub(super) fn cancel_list_work(&self, hwnd: Hwnd, list: List, awaited: Awaited) {
+        if self.slow_list_work(list) != Some(awaited) {
             return;
         }
-        let accepted = match purpose {
-            Purpose::Selection(_) => {
+        if !matches!(awaited, Awaited::Request(_)) {
+            self.created().work.borrow_mut().cancel_awaited(awaited);
+        }
+        let selection = matches!(
+            awaited,
+            Awaited::Request(Purpose::Selection(_)) | Awaited::Selection(_)
+        );
+        let accepted = match awaited {
+            Awaited::Request(Purpose::Selection(_)) | Awaited::Selection(_) => {
                 let empty: RowSelection = Vec::new().into();
                 self.forget_selection_action(list);
                 self.model.borrow_mut().set_selection(list, empty)
             }
-            Purpose::Results(_) => self.model.borrow_mut().cancel_results(list),
-            _ => return,
+            Awaited::Request(Purpose::Results(_)) => self.model.borrow_mut().cancel_results(list),
+            Awaited::Listing(side) => {
+                let mut model = self.model.borrow_mut();
+                if let Some(generation) = model.panels().panel(side).reading_generation() {
+                    model.panels_mut().cancel_read(side, generation);
+                }
+                Accepted {
+                    change: Change::Nothing,
+                    then: None,
+                }
+            }
+            _ => Accepted {
+                change: Change::Nothing,
+                then: None,
+            },
         };
         self.apply(hwnd, accepted);
-        if matches!(purpose, Purpose::Selection(_)) {
+        if selection {
             self.list_control(list).select_only(None);
             self.seed_native_selection(list, Vec::new().into());
+            if let List::Panel(side) = list {
+                self.panel_changed[side.index()].set(panels::ListChanged::Selection);
+                self.read_selection(side, true);
+            }
+        }
+        if awaited == Awaited::Clipboard {
+            hwnd.kill_timer(timer::CLIPBOARD);
         }
         self.update_message();
         if let List::Panel(side) = list {
-            self.show_panel_message(side);
+            if matches!(awaited, Awaited::Listing(_)) {
+                self.show_panel(side);
+            } else {
+                self.show_panel_message(side);
+            }
         }
         self.poll_work(hwnd);
     }
@@ -2569,6 +2717,7 @@ impl MainWindow {
         let focus = context.focus;
         let model = self.model.borrow();
         let pending = self.selection_command_pending(context.list);
+        let global_cancel = self.main_waiting().is_some_and(Awaited::can_cancel);
         let state = State {
             model: &model,
             focus,
@@ -2579,7 +2728,8 @@ impl MainWindow {
             .map(|item| {
                 (
                     item.id(),
-                    item.enabled(&state)
+                    (item.enabled(&state)
+                        || (*item == MenuItem::Run(CommandId::Cancel) && global_cancel))
                         && !(pending
                             && (item.reads_selection(focus) || item.writes_selection(focus))),
                     item.checked(&state),
@@ -2642,7 +2792,8 @@ impl MainWindow {
                 model: &model,
                 focus,
                 list,
-            })
+            }) || (item == MenuItem::Run(CommandId::Cancel)
+                && self.main_waiting().is_some_and(Awaited::can_cancel))
         };
         if !enabled {
             return;
@@ -2684,7 +2835,9 @@ impl MainWindow {
                 }
                 CommandId::ExportResults => return self.export(hwnd),
                 CommandId::Cancel => {
-                    self.created().work.borrow_mut().cancel_pairing();
+                    if self.cancel_main_waiting(hwnd) {
+                        return;
+                    }
                     self.model.borrow_mut().cancel_job()
                 }
                 CommandId::Copy => match focus {
@@ -3767,8 +3920,9 @@ impl MainWindow {
         if self.shutdown.borrow().is_some() {
             return;
         }
-        let (active, expired) = self.created().work.borrow_mut().tick(Instant::now());
-        for (purpose, generation) in expired {
+        let polled = self.created().work.borrow_mut().tick(Instant::now());
+        self.expire_hover(&polled.expired_hover);
+        for (purpose, generation) in polled.expired_requests {
             let accepted = self.model.borrow_mut().expire_request(purpose, generation);
             self.apply(hwnd, accepted);
         }
@@ -3779,7 +3933,7 @@ impl MainWindow {
                 self.show_panel_message(side);
             }
         }
-        if active {
+        if polled.active {
             hwnd.set_timer(timer::WORK, 250);
         } else {
             hwnd.kill_timer(timer::WORK);
@@ -3873,9 +4027,9 @@ impl MainWindow {
             .position(|button| button.clicked(event))
         {
             if index == 0
-                && let Some(purpose) = self.slow_request(List::Search)
+                && let Some(awaited) = self.slow_list_work(List::Search)
             {
-                self.cancel_list_read(hwnd, purpose);
+                self.cancel_list_work(hwnd, List::Search, awaited);
                 return;
             }
             let button = self.model.borrow().list_buttons().get(index).cloned();
@@ -4381,8 +4535,8 @@ impl MainWindow {
                     self.panel_message_clicked(hwnd, side);
                     return true;
                 }
-                if let Some(purpose) = self.slow_request(list) {
-                    self.cancel_list_read(hwnd, purpose);
+                if let Some(awaited) = self.slow_list_work(list) {
+                    self.cancel_list_work(hwnd, list, awaited);
                     return true;
                 }
             }
@@ -5190,7 +5344,7 @@ impl MainWindow {
         self.created()
             .work
             .borrow_mut()
-            .prepare_paths(action, entries);
+            .prepare_paths(list, action, entries);
     }
 
     fn retire_paths(&self, paths: Vec<PathBuf>) {
@@ -5832,7 +5986,8 @@ impl MainWindow {
         self.created()
             .work
             .borrow_mut()
-            .open(ShellTarget::Repository);
+            .open(ShellTarget::Repository, self.work_surface());
+        self.post_settings_reply();
     }
 
     /// Settings' Reset all, which the person confirmed: Gozler exits as

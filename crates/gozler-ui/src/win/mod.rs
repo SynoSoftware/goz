@@ -79,6 +79,9 @@ fn from_rect(rect: RECT) -> Rect {
 
 impl Hwnd {
     pub(crate) fn set_text(self, text: &str) {
+        if self.text() == text {
+            return;
+        }
         // SAFETY: the text is a NUL-terminated copy that outlives the call.
         let _ = unsafe { SetWindowTextW(self.0, &HSTRING::from(text)) };
     }

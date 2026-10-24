@@ -97,14 +97,45 @@ impl ShellTarget {
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum Surface {
+    Main,
+    Settings,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum ShellPurpose {
-    Target(ShellTarget),
+    Target(Surface, ShellTarget),
     Entries(List, EntryAction),
     Setup,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum Awaited {
+    Request(Purpose),
+    Selection(List),
+    Shell(ShellPurpose),
+    Paths(PathPurpose),
+    Clipboard,
+    Pairing,
+    Settings,
+    Recovery,
+    Listing(Side),
+}
+
+impl Awaited {
+    pub(super) fn can_cancel(self) -> bool {
+        !matches!(self, Self::Shell(ShellPurpose::Setup) | Self::Recovery)
+    }
+}
+
+pub(super) struct Poll {
+    pub(super) active: bool,
+    pub(super) expired_requests: Vec<(Purpose, Generation)>,
+    pub(super) expired_hover: Vec<drops::Expired>,
+}
+
 enum Invocation {
-    Target(ShellTarget),
+    Target(Surface, ShellTarget),
     Setup(PathBuf),
     Entries {
         list: List,
@@ -118,13 +149,13 @@ impl Invocation {
     fn items(&self) -> usize {
         match self {
             Self::Entries { entries, .. } => entries.items(),
-            Self::Target(_) | Self::Setup(_) => 0,
+            Self::Target(..) | Self::Setup(_) => 0,
         }
     }
 
     fn purpose(&self) -> ShellPurpose {
         match self {
-            Self::Target(target) => ShellPurpose::Target(*target),
+            Self::Target(surface, target) => ShellPurpose::Target(*surface, *target),
             Self::Setup(_) => ShellPurpose::Setup,
             Self::Entries { list, action, .. } => ShellPurpose::Entries(*list, *action),
         }
@@ -154,11 +185,17 @@ pub(super) struct Saved {
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum PathPurpose {
-    Copy,
-    Move,
-    PanelCopy,
-    PanelMove,
-    Delete,
+    Copy(List),
+    Move(List),
+    Delete(List),
+}
+
+impl PathPurpose {
+    fn list(self) -> List {
+        match self {
+            Self::Copy(list) | Self::Move(list) | Self::Delete(list) => list,
+        }
+    }
 }
 
 pub(super) enum PathAction {
@@ -177,13 +214,15 @@ pub(super) enum PathAction {
 }
 
 impl PathAction {
-    fn purpose(&self) -> PathPurpose {
+    fn purpose(&self, list: List) -> PathPurpose {
         match self {
-            Self::Transfer { moves: false } => PathPurpose::Copy,
-            Self::Transfer { moves: true } => PathPurpose::Move,
-            Self::PanelTransfer { moves: false, .. } => PathPurpose::PanelCopy,
-            Self::PanelTransfer { moves: true, .. } => PathPurpose::PanelMove,
-            Self::Delete { .. } => PathPurpose::Delete,
+            Self::Transfer { moves: false } | Self::PanelTransfer { moves: false, .. } => {
+                PathPurpose::Copy(list)
+            }
+            Self::Transfer { moves: true } | Self::PanelTransfer { moves: true, .. } => {
+                PathPurpose::Move(list)
+            }
+            Self::Delete { .. } => PathPurpose::Delete(list),
         }
     }
 }
@@ -278,6 +317,8 @@ pub(super) struct Work {
     scope: ScopeCheck,
     saving: Option<Task<Save, Saved>>,
     pairing: Task<LocalService, (LocalService, bool)>,
+    pairing_surface: Surface,
+    setup_surface: Surface,
     labels: Task<Vec<String>, Vec<(String, Option<String>)>>,
     label_prefixes: Vec<String>,
     volume_labels: Vec<(String, Option<String>)>,
@@ -323,11 +364,13 @@ impl Work {
                 Task::new(waker.clone(), Replacement::Cancel, check_release).background(),
                 Task::new(waker.clone(), Replacement::Cancel, check_release),
             ],
-            location: Task::new(waker.clone(), Replacement::Cancel, check_location),
+            location: Task::new(waker.clone(), Replacement::Cancel, check_location).background(),
             checked_location: None,
             scope: ScopeCheck::Exists,
             saving: Some(Task::new(waker.clone(), Replacement::Finish, save)),
             pairing: Task::new(waker.clone(), Replacement::Cancel, check_pairing),
+            pairing_surface: Surface::Main,
+            setup_surface: Surface::Main,
             labels: Task::new(waker.clone(), Replacement::Cancel, read_labels).background(),
             label_prefixes: Vec::new(),
             volume_labels: Vec::new(),
@@ -414,30 +457,38 @@ impl Work {
                     })
                 },
             ),
-            paths: [
-                PathPurpose::Copy,
-                PathPurpose::Move,
-                PathPurpose::PanelCopy,
-                PathPurpose::PanelMove,
-                PathPurpose::Delete,
-            ]
-            .into_iter()
-            .map(|purpose| {
-                (
-                    purpose,
-                    Task::pass(
-                        waker.clone(),
-                        Replacement::Cancel,
-                        PreparingPaths::items,
-                        prepare_paths,
-                    ),
-                )
-            })
-            .collect(),
+            paths: List::ALL
+                .into_iter()
+                .flat_map(|list| {
+                    [
+                        PathPurpose::Copy(list),
+                        PathPurpose::Move(list),
+                        PathPurpose::Delete(list),
+                    ]
+                })
+                .map(|purpose| {
+                    (
+                        purpose,
+                        Task::pass(
+                            waker.clone(),
+                            Replacement::Cancel,
+                            PreparingPaths::items,
+                            prepare_paths,
+                        ),
+                    )
+                })
+                .collect(),
             shell: List::ALL
                 .into_iter()
                 .flat_map(|list| EntryAction::ALL.map(|action| ShellPurpose::Entries(list, action)))
-                .chain([ShellTarget::Repository, ShellTarget::Services].map(ShellPurpose::Target))
+                .chain(
+                    [Surface::Main, Surface::Settings]
+                        .into_iter()
+                        .flat_map(|surface| {
+                            [ShellTarget::Repository, ShellTarget::Services]
+                                .map(|target| ShellPurpose::Target(surface, target))
+                        }),
+                )
                 .chain([ShellPurpose::Setup])
                 .map(|purpose| {
                     let replacement = if purpose == ShellPurpose::Setup {
@@ -486,7 +537,7 @@ impl Work {
         changed
     }
 
-    pub(super) fn tick(&mut self, now: Instant) -> (bool, Vec<(Purpose, Generation)>) {
+    pub(super) fn tick(&mut self, now: Instant) -> Poll {
         let requests = self.requests.tick(now);
         let expired = requests
             .iter()
@@ -495,6 +546,8 @@ impl Work {
             })
             .collect();
         let mut active = self.location.tick(now).is_some();
+        let (hover, expired_hover) = self.drops.tick(now);
+        active |= hover;
         active |= requests
             .iter()
             .any(|(_, _, waiting)| *waiting != Waiting::Expired);
@@ -538,7 +591,143 @@ impl Work {
             active |= list.keeping.tick(now).is_some();
             active |= list.filtering.tick(now).is_some();
         }
-        (active, expired)
+        Poll {
+            active,
+            expired_requests: expired,
+            expired_hover,
+        }
+    }
+
+    pub(super) fn slow(&self, list: List, selection: bool, now: Instant) -> Option<Awaited> {
+        let slow = |waiting| waiting == Some(Waiting::Slow);
+        if let Some(purpose) = [Purpose::Selection(list), Purpose::Results(list)]
+            .into_iter()
+            .find(|purpose| slow(self.requests.waiting(*purpose, now)))
+        {
+            return Some(Awaited::Request(purpose));
+        }
+        if selection
+            && self.lists.iter().any(|work| {
+                work.list == list
+                    && (slow(work.telling.waiting(now)) || slow(work.filtering.waiting(now)))
+            })
+        {
+            return Some(Awaited::Selection(list));
+        }
+        if let Some((purpose, _)) = self.shell.iter().find(|(purpose, task)| {
+            matches!(purpose, ShellPurpose::Entries(source, _) if *source == list)
+                && slow(task.waiting(now))
+        }) {
+            return Some(Awaited::Shell(*purpose));
+        }
+        if let Some((purpose, _)) = self
+            .paths
+            .iter()
+            .find(|(purpose, task)| purpose.list() == list && slow(task.waiting(now)))
+        {
+            return Some(Awaited::Paths(*purpose));
+        }
+        (list == List::Search && slow(self.copying.waiting(now))).then_some(Awaited::Clipboard)
+    }
+
+    pub(super) fn cancel_awaited(&mut self, awaited: Awaited) {
+        match awaited {
+            Awaited::Request(purpose) => self.requests.cancel(purpose),
+            Awaited::Selection(list) => {
+                let work = self
+                    .lists
+                    .iter_mut()
+                    .find(|work| work.list == list)
+                    .expect("each list has a work slot");
+                work.telling.cancel();
+                work.filtering.cancel();
+            }
+            Awaited::Shell(purpose) => self
+                .shell
+                .iter_mut()
+                .find(|(source, _)| *source == purpose)
+                .expect("every shell purpose has a slot")
+                .1
+                .cancel(),
+            Awaited::Paths(purpose) => self
+                .paths
+                .iter_mut()
+                .find(|(source, _)| *source == purpose)
+                .expect("each path command has a slot")
+                .1
+                .cancel(),
+            Awaited::Clipboard => self.cancel_copy(),
+            Awaited::Pairing => self.cancel_pairing(),
+            Awaited::Settings => {
+                if self.registry_write.is_none()
+                    && let Some(task) = &mut self.registry
+                {
+                    task.cancel();
+                }
+            }
+            Awaited::Recovery => {}
+            Awaited::Listing(side) => {
+                self.panels[side.index()].cancel();
+                self.folders.cancel_read(side);
+            }
+        }
+    }
+
+    pub(super) fn global_waiting(
+        &self,
+        surface: Surface,
+        now: Instant,
+    ) -> Option<(Awaited, Waiting)> {
+        if self.pairing_surface == surface
+            && let Some(waiting) = self.pairing.waiting(now)
+        {
+            return Some((Awaited::Pairing, waiting));
+        }
+        let shell = self.shell.iter().find_map(|(purpose, task)| {
+            let owner = match purpose {
+                ShellPurpose::Target(owner, _) => *owner,
+                ShellPurpose::Setup => self.setup_surface,
+                ShellPurpose::Entries(..) => return None,
+            };
+            (owner == surface)
+                .then(|| {
+                    task.waiting(now)
+                        .map(|waiting| (Awaited::Shell(*purpose), waiting))
+                })
+                .flatten()
+        });
+        if shell.is_some() {
+            return shell;
+        }
+        if surface == Surface::Main {
+            if self.registry_write.is_none()
+                && let Some(waiting) = self.registry.as_ref().and_then(|task| task.waiting(now))
+            {
+                return Some((Awaited::Settings, waiting));
+            }
+            return self
+                .queue
+                .waiting(now)
+                .map(|waiting| (Awaited::Recovery, waiting));
+        }
+        None
+    }
+
+    pub(super) fn listing_waiting(&self, side: Side, now: Instant) -> Option<Waiting> {
+        self.panels[side.index()].waiting(now)
+    }
+
+    pub(super) fn fix_waiting(&self, now: Instant) -> Option<Waiting> {
+        self.fixes
+            .waiting(now)
+            .or_else(|| self.releases[ReleasePurpose::ServiceVersion.slot()].waiting(now))
+            .or_else(|| {
+                self.shell.iter().find_map(|(purpose, task)| {
+                    (*purpose == ShellPurpose::Setup)
+                        .then(|| task.waiting(now))
+                        .flatten()
+                })
+            })
     }
 
     pub(super) fn check_release(&mut self, purpose: ReleasePurpose) {
@@ -574,7 +763,8 @@ impl Work {
         self.saving.as_mut()?.take().map(|(_, saved)| saved)
     }
 
-    pub(super) fn check_pairing(&mut self, local: LocalService) {
+    pub(super) fn check_pairing(&mut self, local: LocalService, surface: Surface) {
+        self.pairing_surface = surface;
         self.pairing.submit(local, |_, new| new);
     }
 
@@ -620,11 +810,12 @@ impl Work {
         changed
     }
 
-    pub(super) fn open(&mut self, target: ShellTarget) {
-        self.invoke(Invocation::Target(target));
+    pub(super) fn open(&mut self, target: ShellTarget, surface: Surface) {
+        self.invoke(Invocation::Target(surface, target));
     }
 
-    pub(super) fn start_setup(&mut self, path: PathBuf) {
+    pub(super) fn start_setup(&mut self, path: PathBuf, surface: Surface) {
+        self.setup_surface = surface;
         self.invoke(Invocation::Setup(path));
     }
 
@@ -973,8 +1164,8 @@ impl Work {
         answers
     }
 
-    pub(super) fn prepare_paths(&mut self, action: PathAction, entries: Entries) {
-        let purpose = action.purpose();
+    pub(super) fn prepare_paths(&mut self, list: List, action: PathAction, entries: Entries) {
+        let purpose = action.purpose(list);
         let task = &mut self
             .paths
             .iter_mut()
@@ -1353,7 +1544,7 @@ fn invoke(
             }),
             missing: None,
         },
-        Invocation::Target(target) => Opened {
+        Invocation::Target(_, target) => Opened {
             failure: session
                 .open(target.address())
                 .err()

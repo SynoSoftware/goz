@@ -207,6 +207,10 @@ impl<I: Send + 'static, O: Send + 'static> Task<I, O> {
         self.slot.is_current(id)
     }
 
+    pub(crate) fn current(&self) -> Option<Id> {
+        self.slot.current()
+    }
+
     pub(crate) fn is_running(&self) -> bool {
         self.slot.is_running()
     }

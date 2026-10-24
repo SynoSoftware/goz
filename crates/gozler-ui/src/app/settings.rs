@@ -1194,9 +1194,7 @@ impl<'a> SettingsDialog<'a> {
                 }
                 None => {
                     let mut job = self.main.settings_job(&self.strings);
-                    if fixing.is_none()
-                        && request.is_some_and(|(_, waiting)| waiting == Waiting::Slow)
-                    {
+                    if self.status_request(now).is_some() {
                         job = JobCaption {
                             text: work::waiting(&self.strings, None),
                             progress: JobProgress::Unmeasured,
@@ -1204,7 +1202,10 @@ impl<'a> SettingsDialog<'a> {
                             ..JobCaption::default()
                         };
                     }
-                    (job, fixing.is_some() || request.is_some())
+                    (
+                        job,
+                        fixing.is_some() || request.is_some() || self.main.settings_waiting(now),
+                    )
                 }
             }
         };
@@ -1245,14 +1246,24 @@ impl<'a> SettingsDialog<'a> {
             return;
         }
         let now = Instant::now();
-        if self.main.fix_waiting(now).is_some() {
+        if let Some(purpose) = self.status_request(now) {
+            self.main.cancel_settings_request(self.window, purpose);
+        } else if self.main.fix_waiting(now).is_some() {
             if self.main.settings_job(&self.strings).cancel {
                 self.main.cancel_settings_fix(self.window);
             }
-        } else if let Some((purpose, Waiting::Slow)) = self.request_waiting(now) {
-            self.main.cancel_settings_request(self.window, purpose);
+        } else {
+            self.main.cancel_settings_waiting();
         }
         self.show_status(dialog);
+    }
+
+    fn status_request(&self, now: Instant) -> Option<Purpose> {
+        if self.main.fix_waiting(now).is_some() {
+            return None;
+        }
+        self.request_waiting(now)
+            .and_then(|(purpose, waiting)| (waiting == Waiting::Slow).then_some(purpose))
     }
 
     /// Makes `page`, unless it was made: its controls, their lists and
