@@ -290,11 +290,15 @@ impl MainWindow {
                 controls.search.list.insert_column(
                     index,
                     &ListColumn {
-                        header: &header,
+                        header: &header.full,
                         width,
                         right_aligned: column.row().right_aligned,
                     },
                 );
+                controls
+                    .search
+                    .list
+                    .set_header(index, controls.search.list.fitting_text(index, &header));
             }
             Effect::HideColumn { index, column } => {
                 let width = controls.search.list.column_width(index);

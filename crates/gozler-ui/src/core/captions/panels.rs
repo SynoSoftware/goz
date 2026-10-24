@@ -197,15 +197,17 @@ pub(crate) fn panel_cell(
     panel: &Panel,
     row: Row,
     column: PanelColumn,
-) -> String {
+) -> text::Text {
     let entry = match row {
-        Row::Up if column == PanelColumn::Name => return "..".to_owned(),
-        Row::Up => return String::new(),
+        Row::Up if column == PanelColumn::Name => return "..".to_owned().into(),
+        Row::Up => return text::Text::default(),
         Row::Result(item) => {
             let this_folder =
                 panel.search().map(|search| search.look_in) == Some(LookIn::ThisFolder);
             if column == PanelColumn::Folder && this_folder {
-                return relative_folder(panel.folder(), &item.path).to_owned();
+                return relative_folder(panel.folder(), &item.path)
+                    .to_owned()
+                    .into();
             }
             return text::cell(strings, numbers, sizes, dates, column.search_column(), item);
         }
@@ -220,8 +222,9 @@ pub(crate) fn panel_cell(
             (true, Some(size)) | (false, Some(size)) => sizes.text(strings, numbers, size),
             (false, None) => sizes.text(strings, numbers, entry.size),
         },
-        PanelColumn::DateModified => dates.text(strings, numbers, entry.modified),
+        PanelColumn::DateModified => return dates.text(strings, numbers, entry.modified),
     }
+    .into()
 }
 
 /// A Look in list's item.
@@ -234,17 +237,18 @@ pub(crate) fn look_in_item(strings: &Strings, look_in: LookIn) -> String {
 }
 
 /// The headers of a panel's `columns`, in their order.
-pub(crate) fn panel_headers(strings: &Strings, columns: &[PanelColumn]) -> Vec<String> {
-    let header = |column: &PanelColumn| match column {
-        PanelColumn::Name => "header.name",
-        PanelColumn::Ext => "panel.ext",
-        PanelColumn::Folder => "header.folder",
-        PanelColumn::Size => "header.size",
-        PanelColumn::DateModified => "header.date_modified",
-    };
+pub(crate) fn panel_headers(strings: &Strings, columns: &[PanelColumn]) -> Vec<text::Text> {
     (columns.iter())
-        .map(|column| strings.text(header(column)).to_owned())
+        .map(|column| panel_header(strings, *column))
         .collect()
+}
+
+pub(crate) fn panel_header(strings: &Strings, column: PanelColumn) -> text::Text {
+    match column {
+        PanelColumn::Ext => strings.text("panel.ext").to_owned().into(),
+        PanelColumn::Folder => strings.text("header.folder").to_owned().into(),
+        _ => super::header(strings, column.search_column()),
+    }
 }
 
 /// The key bar's buttons: each key and its word, and the tooltip where the

@@ -1,5 +1,6 @@
 use super::{child, scroll_bar_width, send, send_pointer};
-use crate::core::layout::Px;
+use crate::core::layout::{Px, column_sizing::cell_width};
+use crate::core::text::Text;
 use crate::win::gdi::ImageList;
 use crate::win::{Hwnd, wide};
 use std::ops::Range;
@@ -12,13 +13,13 @@ use windows::Win32::UI::Controls::{
     LVIS_FOCUSED, LVIS_SELECTED, LVITEMW, LVM_DELETECOLUMN, LVM_ENSUREVISIBLE,
     LVM_GETCOLUMNORDERARRAY, LVM_GETCOLUMNW, LVM_GETCOLUMNWIDTH, LVM_GETCOUNTPERPAGE,
     LVM_GETHEADER, LVM_GETITEMCOUNT, LVM_GETITEMRECT, LVM_GETITEMSTATE, LVM_GETNEXTITEM,
-    LVM_GETSELECTEDCOUNT, LVM_GETTOPINDEX, LVM_HITTEST, LVM_INSERTCOLUMNW, LVM_REDRAWITEMS,
-    LVM_SETCALLBACKMASK, LVM_SETCOLUMNORDERARRAY, LVM_SETCOLUMNW, LVM_SETCOLUMNWIDTH,
-    LVM_SETEXTENDEDLISTVIEWSTYLE, LVM_SETIMAGELIST, LVM_SETITEMCOUNT, LVM_SETITEMSTATE,
-    LVM_SETSELECTIONMARK, LVNI_FOCUSED, LVNI_SELECTED, LVS_EX_DOUBLEBUFFER, LVS_EX_FULLROWSELECT,
-    LVS_EX_HEADERDRAGDROP, LVS_EX_INFOTIP, LVS_EX_LABELTIP, LVS_OWNERDATA, LVS_REPORT,
-    LVS_SHAREIMAGELISTS, LVS_SHOWSELALWAYS, LVSICF_NOSCROLL, LVSIL_SMALL, SetWindowTheme,
-    WC_LISTVIEWW,
+    LVM_GETSELECTEDCOUNT, LVM_GETSTRINGWIDTHW, LVM_GETTOPINDEX, LVM_HITTEST, LVM_INSERTCOLUMNW,
+    LVM_REDRAWITEMS, LVM_SETCALLBACKMASK, LVM_SETCOLUMNORDERARRAY, LVM_SETCOLUMNW,
+    LVM_SETCOLUMNWIDTH, LVM_SETEXTENDEDLISTVIEWSTYLE, LVM_SETIMAGELIST, LVM_SETITEMCOUNT,
+    LVM_SETITEMSTATE, LVM_SETSELECTIONMARK, LVNI_FOCUSED, LVNI_SELECTED, LVS_EX_DOUBLEBUFFER,
+    LVS_EX_FULLROWSELECT, LVS_EX_HEADERDRAGDROP, LVS_EX_INFOTIP, LVS_EX_LABELTIP, LVS_OWNERDATA,
+    LVS_REPORT, LVS_SHAREIMAGELISTS, LVS_SHOWSELALWAYS, LVSICF_NOSCROLL, LVSIL_SMALL,
+    SetWindowTheme, WC_LISTVIEWW,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     GWL_STYLE, GetWindowLongPtrW, SB_LINEDOWN, SB_LINEUP, WINDOW_EX_STYLE, WM_VSCROLL, WS_TABSTOP,
@@ -142,6 +143,17 @@ impl ListView {
 
     pub(crate) fn column_width(self, index: usize) -> Px {
         Px(send(self.0, LVM_GETCOLUMNWIDTH, index, 0) as i32)
+    }
+
+    pub(crate) fn fitting_text(self, index: usize, text: &Text) -> &str {
+        text.fitting(|full| self.text_fits(index, full))
+    }
+
+    fn text_fits(self, index: usize, text: &str) -> bool {
+        let text = wide(text);
+        // SAFETY: the NUL-terminated text outlives the synchronous measurement.
+        let width = unsafe { send_pointer(self.0, LVM_GETSTRINGWIDTHW, 0, text.as_ptr()) };
+        cell_width(Px(width as i32), Px(0), index == 0, self.0.dpi()) <= self.column_width(index)
     }
 
     pub(crate) fn set_column_width(self, index: usize, width: Px) {
@@ -549,5 +561,101 @@ impl ListView {
         // SAFETY: `hit` is a local that the header reads and fills in.
         let column = unsafe { send_pointer(header, HDM_HITTEST, 0, &raw mut hit) };
         usize::try_from(column).ok()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::win::notify::ListNotify;
+    use crate::win::window::{self, Background, Message, WindowProc};
+    use std::cell::Cell;
+    use std::rc::Rc;
+    use windows::Win32::Foundation::LRESULT;
+    use windows::Win32::UI::Controls::HDI_WIDTH;
+
+    struct HeaderProbe {
+        list: Cell<Option<ListView>>,
+        header: Text,
+    }
+
+    impl WindowProc for HeaderProbe {
+        fn message(&self, _: Hwnd, message: Message<'_>) -> Option<LRESULT> {
+            if let Message::Notify(notification) = message {
+                let list = self.list.get()?;
+                if let Some(ListNotify::ColumnWidthChanged(1)) = list.notification(notification) {
+                    list.set_header(1, list.fitting_text(1, &self.header));
+                }
+            }
+            None
+        }
+    }
+
+    fn header_text(list: ListView) -> String {
+        let mut buffer = [0u16; 64];
+        let mut column = LVCOLUMNW {
+            mask: LVCF_TEXT,
+            pszText: PWSTR(buffer.as_mut_ptr()),
+            cchTextMax: buffer.len() as i32,
+            ..Default::default()
+        };
+        // SAFETY: the item points to the local buffer and gives its capacity.
+        unsafe { send_pointer(list.hwnd(), LVM_GETCOLUMNW, 1, &raw mut column) };
+        let length = buffer
+            .iter()
+            .position(|&unit| unit == 0)
+            .unwrap_or(buffer.len());
+        String::from_utf16_lossy(&buffer[..length])
+    }
+
+    #[test]
+    fn a_column_resize_reselects_the_full_or_short_header() {
+        crate::win::controls::initialize();
+        let class = "gozler.test.short-header";
+        window::register_class::<HeaderProbe>(class, 0, Background::Window).unwrap();
+        let probe = Rc::new(HeaderProbe {
+            list: Cell::new(None),
+            header: Text {
+                full: "Date modified".to_owned(),
+                short: Some("Modified".to_owned()),
+            },
+        });
+        let hwnd = window::create_window(class, Rc::clone(&probe), None).unwrap();
+        let list = ListView::create(hwnd, 1).unwrap();
+        probe.list.set(Some(list));
+        for index in 0..2 {
+            list.insert_column(
+                index,
+                &ListColumn {
+                    header: "",
+                    width: Px(100),
+                    right_aligned: false,
+                },
+            );
+        }
+        let full = wide(&probe.header.full);
+        // SAFETY: the NUL-terminated text outlives the synchronous measurement.
+        let width = unsafe { send_pointer(list.hwnd(), LVM_GETSTRINGWIDTHW, 0, full.as_ptr()) };
+        let needed = cell_width(Px(width as i32), Px(0), false, list.hwnd().dpi());
+        let shown = [false, true].map(|from_header| {
+            [needed, needed - Px(1), needed].map(|width| {
+                if from_header {
+                    let item = HDITEMW {
+                        mask: HDI_WIDTH,
+                        cxy: width.0,
+                        ..Default::default()
+                    };
+                    // SAFETY: the header copies the local item's width.
+                    unsafe { send_pointer(list.header(), HDM_SETITEMW, 1, &raw const item) };
+                } else {
+                    list.set_column_width(1, width);
+                }
+                header_text(list)
+            })
+        });
+        hwnd.destroy();
+        for shown in shown {
+            assert_eq!(shown, ["Date modified", "Modified", "Date modified"]);
+        }
     }
 }

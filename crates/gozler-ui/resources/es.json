@@ -77,6 +77,8 @@
     "size": "Tamaño",
     "date_modified": "Fecha de modificación",
     "date_created": "Fecha de creación",
+    "modified": "Modificación",
+    "created": "Creación",
     "extension": "Extensión",
     "attributes": "Atributos",
     "folder": "Carpeta"

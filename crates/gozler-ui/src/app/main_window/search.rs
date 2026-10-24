@@ -54,7 +54,8 @@ impl Search {
         let modes = captions.match_modes.each_ref().map(String::as_str);
         self.row.match_mode.set_items(&modes, mode);
         for (index, header) in captions.headers.iter().enumerate() {
-            self.list.set_header(index, header);
+            self.list
+                .set_header(index, self.list.fitting_text(index, header));
         }
     }
 }
@@ -304,7 +305,8 @@ impl Search {
                                     &window.dates.borrow(),
                                     column,
                                     item,
-                                ),
+                                )
+                                .full,
                                 model.matched_in_cell(row, column),
                             )
                         })
@@ -338,8 +340,14 @@ impl Search {
                 let texts = (cells.iter())
                     .filter(|(text, _)| !text.is_empty())
                     .map(|(text, parts)| matched_width(&plain, &bold, text, parts));
-                ColumnFit::of(plain.plain_width(header), texts, label, first, dpi)
-                    .for_column(column)
+                ColumnFit::of(
+                    plain.plain_width(header.compact()),
+                    texts,
+                    label,
+                    first,
+                    dpi,
+                )
+                .for_column(column)
             })
             .collect()
     }
@@ -462,6 +470,20 @@ impl Search {
                 }
                 None
             }
+            ListNotify::ColumnWidthChanged(index) => {
+                let header = {
+                    let model = window.model.borrow();
+                    model
+                        .columns()
+                        .get(index)
+                        .map(|column| captions::header(model.strings(), *column))
+                };
+                if let Some(header) = header {
+                    self.list
+                        .set_header(index, self.list.fitting_text(index, &header));
+                }
+                None
+            }
             ListNotify::Focused
             | ListNotify::Unfocused
             | ListNotify::Clicked
@@ -502,7 +524,7 @@ impl Search {
         };
         if info.wants_text() {
             let text = text.unwrap_or_default();
-            info.set_text(&text);
+            info.set_text(self.list.fitting_text(info.column(), &text));
         }
         if info.wants_image() {
             info.set_image(icon.map(|(name, is_folder)| window.icons.index(&name, is_folder)));

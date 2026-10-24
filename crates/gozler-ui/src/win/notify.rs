@@ -18,13 +18,13 @@ use windows::Win32::Graphics::Gdi::{
 use windows::Win32::UI::Controls::{
     BCN_DROPDOWN, CDDS_ITEMPOSTPAINT, CDDS_ITEMPREPAINT, CDDS_PREPAINT, CDDS_SUBITEM,
     CDRF_DODEFAULT, CDRF_NEWFONT, CDRF_NOTIFYITEMDRAW, CDRF_NOTIFYPOSTPAINT,
-    CDRF_NOTIFYSUBITEMDRAW, CDRF_SKIPDEFAULT, HDN_DIVIDERDBLCLICKW, HDN_ENDDRAG, LVIF_IMAGE,
-    LVIF_STATE, LVIF_TEXT, LVIR_ICON, LVIR_LABEL, LVIS_DROPHILITED, LVIS_FOCUSED, LVIS_SELECTED,
-    LVM_GETITEMRECT, LVM_GETSUBITEMRECT, LVN_BEGINDRAG, LVN_BEGINRDRAG, LVN_COLUMNCLICK,
-    LVN_GETDISPINFOW, LVN_GETINFOTIPW, LVN_ITEMACTIVATE, LVN_ITEMCHANGED, LVN_ODCACHEHINT,
-    LVN_ODSTATECHANGED, NM_CLICK, NM_CUSTOMDRAW, NM_DBLCLK, NM_KILLFOCUS, NM_RCLICK, NM_SETFOCUS,
-    NMHDR, NMHEADERW, NMLISTVIEW, NMLVCACHEHINT, NMLVCUSTOMDRAW, NMLVDISPINFOW, NMLVGETINFOTIPW,
-    NMLVODSTATECHANGE, NMMOUSE,
+    CDRF_NOTIFYSUBITEMDRAW, CDRF_SKIPDEFAULT, HDI_WIDTH, HDN_DIVIDERDBLCLICKW, HDN_ENDDRAG,
+    HDN_ITEMCHANGEDW, LVIF_IMAGE, LVIF_STATE, LVIF_TEXT, LVIR_ICON, LVIR_LABEL, LVIS_DROPHILITED,
+    LVIS_FOCUSED, LVIS_SELECTED, LVM_GETITEMRECT, LVM_GETSUBITEMRECT, LVN_BEGINDRAG,
+    LVN_BEGINRDRAG, LVN_COLUMNCLICK, LVN_GETDISPINFOW, LVN_GETINFOTIPW, LVN_ITEMACTIVATE,
+    LVN_ITEMCHANGED, LVN_ODCACHEHINT, LVN_ODSTATECHANGED, NM_CLICK, NM_CUSTOMDRAW, NM_DBLCLK,
+    NM_KILLFOCUS, NM_RCLICK, NM_SETFOCUS, NMHDR, NMHEADERW, NMLISTVIEW, NMLVCACHEHINT,
+    NMLVCUSTOMDRAW, NMLVDISPINFOW, NMLVGETINFOTIPW, NMLVODSTATECHANGE, NMMOUSE,
 };
 use windows::Win32::UI::WindowsAndMessaging::SendMessageW;
 
@@ -131,6 +131,7 @@ pub(crate) enum ListNotify<'a> {
     /// The person dropped a header they dragged. The header takes its new
     /// order after this notification, so the handler reads it later.
     ColumnDragEnded,
+    ColumnWidthChanged(usize),
     Other,
 }
 
@@ -143,6 +144,19 @@ impl ListView {
     pub(crate) fn notification<'a>(self, notification: Notification<'a>) -> Option<ListNotify<'a>> {
         let header = notification.header();
         let pointer = notification.header;
+        if header.hwndFrom == self.header().0 && header.code == HDN_ITEMCHANGEDW {
+            // SAFETY: HDN_ITEMCHANGEDW carries an NMHEADERW and its optional
+            // item for the notification's lifetime.
+            let index = unsafe {
+                let change = &*pointer.cast::<NMHEADERW>();
+                change
+                    .pitem
+                    .as_ref()
+                    .filter(|item| item.mask.contains(HDI_WIDTH))
+                    .and_then(|_| usize::try_from(change.iItem).ok())
+            };
+            return index.map(ListNotify::ColumnWidthChanged);
+        }
         if header.hwndFrom == self.header().0 && header.code == HDN_ENDDRAG {
             return Some(ListNotify::ColumnDragEnded);
         }

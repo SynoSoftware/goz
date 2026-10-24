@@ -21,7 +21,7 @@ mod status;
 pub(crate) use filters::{FilterCaptions, location_items};
 pub(crate) use inspector::{Inspected, InspectorCaptions, MODIFIED_ROW, age};
 pub(crate) use panels::{
-    PanelCaptions, key_bar, look_in_item, panel_cell, panel_headers, panel_message,
+    PanelCaptions, key_bar, look_in_item, panel_cell, panel_header, panel_headers, panel_message,
 };
 pub(crate) use search::{ListCaption, header, list_message};
 pub(crate) use settings::{
@@ -72,7 +72,7 @@ pub(crate) struct WindowCaptions {
     pub(crate) match_path: String,
     pub(crate) filters: FilterCaptions,
     /// In [`Model::columns`]' order.
-    pub(crate) headers: Vec<String>,
+    pub(crate) headers: Vec<text::Text>,
     /// The inspector's buttons, in [`INSPECTOR_BUTTONS`]' order.
     pub(crate) inspector_buttons: [ButtonCaption; INSPECTOR_BUTTONS.len()],
     pub(crate) copy_path: ButtonCaption,

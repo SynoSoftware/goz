@@ -77,6 +77,8 @@
     "size": "Size",
     "date_modified": "Date modified",
     "date_created": "Date created",
+    "modified": "Modified",
+    "created": "Created",
     "extension": "Extension",
     "attributes": "Attributes",
     "folder": "Folder"

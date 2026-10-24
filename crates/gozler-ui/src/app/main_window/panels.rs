@@ -660,7 +660,7 @@ impl Panels {
                     c.list.insert_column(
                         FOLDER_COLUMN,
                         &ListColumn {
-                            header: &header[0],
+                            header: &header[0].full,
                             width: column_sizing::column_width(Column::Path, dpi),
                             right_aligned: false,
                         },
@@ -701,7 +701,7 @@ impl Panels {
                 captions::panel_headers(model.strings(), c.columns())
             };
             for (index, header) in headers.iter().enumerate() {
-                c.list.set_header(index, header);
+                c.list.set_header(index, c.list.fitting_text(index, header));
             }
             c.retry.hwnd().set_text(&captions.retry);
             c.look_in_label.hwnd().set_text(&captions.look_in_label);
@@ -747,6 +747,7 @@ impl Panels {
                                 row,
                                 *column,
                             )
+                            .full
                         })
                         .collect();
                     if *column == PanelColumn::Size {
@@ -765,7 +766,14 @@ impl Panels {
                 .zip(&headers)
                 .map(|(column, header)| {
                     let texts = column.iter().map(|sample| plain.width(sample));
-                    ColumnFit::of(plain.plain_width(header), texts, Px(0), false, dpi).widest
+                    ColumnFit::of(
+                        plain.plain_width(header.compact()),
+                        texts,
+                        Px(0),
+                        false,
+                        dpi,
+                    )
+                    .widest
                 })
                 .collect()
         };
@@ -1807,6 +1815,20 @@ impl Panels {
                 self.activate_panel(window, side, false);
                 None
             }
+            ListNotify::ColumnWidthChanged(index) => {
+                let c = self.panel(side);
+                let header = {
+                    let model = window.model.borrow();
+                    c.columns()
+                        .get(index)
+                        .map(|column| captions::panel_header(model.strings(), *column))
+                };
+                if let Some(header) = header {
+                    c.list
+                        .set_header(index, c.list.fitting_text(index, &header));
+                }
+                None
+            }
             ListNotify::BeginDrag
             | ListNotify::DividerDoubleClick(_)
             | ListNotify::ColumnDragEnded
@@ -2188,7 +2210,7 @@ impl Panels {
         };
         if info.wants_text() {
             let text = text.unwrap_or_default();
-            info.set_text(&text);
+            info.set_text(self.panel(side).list.fitting_text(info.column(), &text));
         }
         if info.wants_image() {
             info.set_image(icon.map(|icon| match icon {

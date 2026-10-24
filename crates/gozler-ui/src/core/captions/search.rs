@@ -2,7 +2,7 @@ use super::{MessageButton, failure_text};
 use crate::core::model::{Column, Model};
 use crate::core::results::{ListMessage, Shown};
 use crate::core::settings::Mode;
-use crate::core::text::Strings;
+use crate::core::text::{Strings, Text};
 use gozler_core::query::{Malformed, QueryError};
 
 /// What the list's empty area says instead of rows: the message, and its
@@ -14,8 +14,12 @@ pub(crate) struct ListCaption {
 }
 
 /// A column's header.
-pub(crate) fn header(strings: &Strings, column: Column) -> String {
-    strings.text(column.row().header).to_owned()
+pub(crate) fn header(strings: &Strings, column: Column) -> Text {
+    let row = column.row();
+    Text {
+        full: strings.text(row.header).to_owned(),
+        short: row.short_header.map(|key| strings.text(key).to_owned()),
+    }
 }
 
 /// What the list's empty area says instead of rows, if anything. Two panels

@@ -2980,6 +2980,7 @@ impl Column {
         match self {
             Column::Name => ColumnRow {
                 header: "header.name",
+                short_header: None,
                 menu_label: "column.name",
                 width: Dip(320),
                 shown_by_default: true,
@@ -2993,6 +2994,7 @@ impl Column {
             },
             Column::Path => ColumnRow {
                 header: "header.path",
+                short_header: None,
                 menu_label: "column.path",
                 width: Dip(380),
                 shown_by_default: true,
@@ -3004,6 +3006,7 @@ impl Column {
             },
             Column::Size => ColumnRow {
                 header: "header.size",
+                short_header: None,
                 menu_label: "column.size",
                 width: Dip(90),
                 shown_by_default: true,
@@ -3016,6 +3019,7 @@ impl Column {
             },
             Column::DateModified => ColumnRow {
                 header: "header.date_modified",
+                short_header: Some("header.modified"),
                 menu_label: "column.date_modified",
                 width: Dip(130),
                 shown_by_default: true,
@@ -3027,6 +3031,7 @@ impl Column {
             },
             Column::DateCreated => ColumnRow {
                 header: "header.date_created",
+                short_header: Some("header.created"),
                 menu_label: "column.date_created",
                 width: Dip(130),
                 // Its index setting, Dates created, is off by default.
@@ -3039,6 +3044,7 @@ impl Column {
             },
             Column::Extension => ColumnRow {
                 header: "header.extension",
+                short_header: Some("panel.ext"),
                 menu_label: "column.extension",
                 width: Dip(80),
                 shown_by_default: false,
@@ -3050,6 +3056,7 @@ impl Column {
             },
             Column::Attributes => ColumnRow {
                 header: "header.attributes",
+                short_header: None,
                 menu_label: "column.attributes",
                 width: Dip(80),
                 shown_by_default: false,
@@ -3067,6 +3074,7 @@ impl Column {
 /// What the window knows of a [`Column`].
 pub(crate) struct ColumnRow {
     pub(crate) header: &'static str,
+    pub(crate) short_header: Option<&'static str>,
     /// Its item in View > Columns.
     pub(crate) menu_label: &'static str,
     /// Its default width.
@@ -3174,7 +3182,8 @@ pub(crate) mod tests {
                 ),
                 Column::Name,
                 row
-            ),
+            )
+            .full,
             "row1"
         );
     }

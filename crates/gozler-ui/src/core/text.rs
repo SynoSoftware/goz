@@ -507,6 +507,32 @@ impl SizeFormat {
     }
 }
 
+/// A label or value with an optional short form for a narrow column.
+#[derive(Default)]
+pub(crate) struct Text {
+    pub(crate) full: String,
+    pub(crate) short: Option<String>,
+}
+
+impl Text {
+    pub(crate) fn compact(&self) -> &str {
+        self.short.as_deref().unwrap_or(&self.full)
+    }
+
+    pub(crate) fn fitting(&self, fits: impl FnOnce(&str) -> bool) -> &str {
+        match self.short.as_deref() {
+            Some(short) if !fits(&self.full) => short,
+            _ => &self.full,
+        }
+    }
+}
+
+impl From<String> for Text {
+    fn from(full: String) -> Self {
+        Self { full, short: None }
+    }
+}
+
 /// One cell of the results list, as File Explorer shows its columns, with
 /// sizes in `sizes` (DESIGN.md: Results list).
 pub(crate) fn cell(
@@ -516,13 +542,14 @@ pub(crate) fn cell(
     dates: &super::dates::Dates,
     column: Column,
     row: &ResultItem,
-) -> String {
+) -> Text {
     if row.is_gone() {
         // A result snapshot's row whose file is gone has no other value.
         return match column {
             Column::Name => strings.text("cell.gone").to_owned(),
             _ => String::new(),
-        };
+        }
+        .into();
     }
     let name = name_of(&row.path);
     match column {
@@ -533,19 +560,24 @@ pub(crate) fn cell(
             Some(size) => sizes.text(strings, numbers, size),
             None => strings.text("cell.unknown").to_owned(),
         },
-        Column::DateModified => row
-            .mtime_ft
-            .map(|ft| dates.text(strings, numbers, ft))
-            .unwrap_or_default(),
-        Column::DateCreated => row
-            .created_ft
-            .map(|ft| dates.text(strings, numbers, ft))
-            .unwrap_or_default(),
+        Column::DateModified => {
+            return row
+                .mtime_ft
+                .map(|ft| dates.text(strings, numbers, ft))
+                .unwrap_or_default();
+        }
+        Column::DateCreated => {
+            return row
+                .created_ft
+                .map(|ft| dates.text(strings, numbers, ft))
+                .unwrap_or_default();
+        }
         Column::Extension => gozler_core::query::extension(name.as_bytes(), row.is_dir)
             .map(|ext| String::from_utf8_lossy(ext).into_owned())
             .unwrap_or_default(),
         Column::Attributes => row.attributes.map(|a| a.letters()).unwrap_or_default(),
     }
+    .into()
 }
 
 /// `text` without its access key's `&`, as a caption reads where it names a

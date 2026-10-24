@@ -77,6 +77,8 @@
     "size": "Grootte",
     "date_modified": "Gewijzigd op",
     "date_created": "Gemaakt op",
+    "modified": "Gewijzigd",
+    "created": "Gemaakt",
     "extension": "Extensie",
     "attributes": "Kenmerken",
     "folder": "Map"

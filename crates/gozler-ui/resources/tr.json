@@ -77,6 +77,8 @@
     "size": "Boyut",
     "date_modified": "Değiştirme tarihi",
     "date_created": "Oluşturma tarihi",
+    "modified": "Değiştirme",
+    "created": "Oluşturma",
     "extension": "Uzantı",
     "attributes": "Öznitelikler",
     "folder": "Klasör"
