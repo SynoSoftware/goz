@@ -44,84 +44,84 @@ runtime verification.
 
 ### Execution status
 
-**Resumed unattended; no owner questions are queued.** The architectural
-refactoring is implemented and reviewed. Full50 passed formatting, clippy,
-workspace tests and documentation (UI:282 passed,14 ignored), including the
-retained structural redraw batch. Full attempts completed:50.
-This continuation used three full runs:48 hit known restricted-token pipe,
-ACL and working-set failures;49 and50 passed outside that restriction.
-Root should have reused that environment first.
+**Stages1–3 and5–7 are complete;4 and8–9 remain incomplete.** The architecture
+is implemented and independently reviewed, but the visual gate is open.
+Retained commits:5fc49ca (architecture),7e0bfb1 (native layout),570711d
+(idle caption and structural mode/card redraw). Full50 is green: formatting,
+clippy, workspace tests and docs; UI282 passed,14 ignored. Full attempts:50.
 Log: `V:/temp/gozler-window-integrated-build50.log`.
-Architecture commit:5fc49ca; native layout commit:7e0bfb1.
-All disposable current-tree probe includes are removed.
+Previous resumption used three full runs:48 failed only under the restricted
+token;49 and50 passed outside it. No further full build has run.
 
-**Stages1–3 and5–7 are complete; stages4 and8–9 remain incomplete.**
-Native layout changes are reviewed and built: column fits before shrinking/
-after growing, actual post-move panel client widths, redraw only for changed
-columns, no layout-wide invalidation, and changed-child NOCOPYBITS with
-fallback parity. Review3 resolved the scrollbar-width finding:
-`V:/temp/gozler-window-stage4-layout-delta-review3.md`.
-No display tests, painted surfaces, compositor or framework.
+**Causal investigation completed.** Three disposable focused attempts:
+cause1 stopped before READY because keyboard foreground was refused;
+cause2 completed the sequence/copy but exposed a recorder-stop deadlock;
+cause3 passed17.22seconds, including a real8MiB copy. The corrected fixture
+uses only its own temporary topmost HWND, verifies crop ownership/bounds at
+96DPI, and stops desktop recording before that window closes. No foreground
+policy, service or installation changed. The trace is saved before stdout.
 
-**Native attempt6 passed** in1.91seconds: Ctrl+click selected2; Shift+End
-selected100,000 in native/model state; an ended move reached its successful
-Summary, correct destination and no progress bar.
-Log: `V:/temp/gozler-window-final-native-proof6.log`.
-Handler samples: status2.068ms, key1.482ms, resize58.959ms, splitter70.031ms,
-Ctrl+click150.166ms, Shift+End49.049ms; move receipt0.167ms and Wake sum6.589ms
-over2wakes. Different fixture/boundaries from8db8f37; no speedup claim.
-Attempt5's nonreturning native boundary remains unknown; its in-thread deadline
-could not interrupt native nesting. Later success does not explain that run.
-Remaining suspected shell-icon waits are in#148, separate from closed#87.
+Cause3 records163 HWND-WGC frames and570 independent screen-DC frames,
+135 exact-pixel duplicate groups, across the same finite resize/splitter/
+typing/status/mode/copy sequence. All changing frames were inspected.
+Desktop ROI confirms partial publication: toolbar fragments30/37, duplicate
+panel counts327/333, shared-pane opening414, completion caption clearing502.
+These are not explained solely by WGC frame-pool resize. WGC alone still does
+not prove monitor scanout; the bounded desktop ROI does not cover Clear.
+No claim of atomic capture, physical scanout or a speedup is made.
+Reports:
+- `V:/temp/gozler-window-paint-cause/paired-media-audit.md`
+- `V:/temp/gozler-window-paint-cause/native-state-audit.md`
+- `V:/temp/gozler-window-presentation-constraints.md`
+- `V:/temp/gozler-window-cause-visual-wgc-cause3.log`
 
-**The visual acceptance gate remains open.** Historical74128aa and current
-real-window hosts completed the same finite border/splitter/typing/status/
-mode/copy sequence. Each copied8MiB and verified Summary and destination.
-GDI outside-client artifacts are excluded; WGC is authoritative. Saved runs:
-95 baseline frames,97 initial current,105 correction1,113 correction2,
-113 structural1 and115 structural2. Reports and all frames remain in
-`V:/temp/gozler-window-*`.
-
-Structural1 visibly fixes the hidden idle caption and removes the prior
-Clear-with-blank-completion-card interval. It substantially reduces mixed
-mode publication, but old inspector commands remain for one mode frame;
-Search resize/splitter and panel bottom-control fragments remain.
-Audit: `V:/temp/gozler-window-stage4-8-wgc-structural1-audit.md`.
-Root independently expanded15/52/62 and inspected completion sheets.
-
-A source-supported experiment flushed only already-pending native paints
-at layout return, without new invalidation or suppression. Structural2 still
-shows the same artifact classes; no benefit is demonstrated. Its helper,
-call and extraction are removed, restoring the exact reviewed structural1
-source (verified against the saved two-file snapshot). Do not retain
-unproven synchronous work or claim the strict all-frame criterion passed.
-The structural2 audit records exact remaining frames:
-`V:/temp/gozler-window-stage4-8-wgc-structural2-audit.md`. All115 frames were
-inspected, including20 expanded originals; root independently expanded50/63/107.
-That run includes an idle/partial/Clear publication before the settled completed
-card, so structural1's clean completion is run-specific evidence, not a
-universal paint guarantee. No further renderer experiment is in progress.
+All164 native snapshots/1,393 HWND records were parsed,0 dropped. Sampled
+structural mode/view exits are native-correct and clean; ordinary layout/
+progress can return with dirty regions. The81ms cardNone state is a genuine
+model transition with a correctly shown idle caption. No persistent native/
+model corruption is demonstrated. Earlier pending-only paint flush gave no
+overall correction and remains removed. Before this new production batch,
+all448 Full50 input hashes matched again except this plan; no probe hook
+remains in the product source. Historical capture artifacts remain saved.
 
 #### Current batch and ownership
 
-Lead owns contracts, permanent docs, integration and the only build. The
-retained native-control implementer returned the idle visibility fix and
-structural mode/card redraw batch. Root and the retained flow reviewer read
-the affected contracts; all six delta perspectives were clean:
-`V:/temp/gozler-window-native-structural-review1.md`.
-One native redraw implementation adds UPDATENOW only for actual mode/card
-structure changes; ordinary resizing/progress retain their existing path.
-No model state, renderer, custom paint or display tests are added. Foreign
-status changes are preserved. The pending-paint experiment's clean safety
-review does not establish a visual benefit; that source slice is removed.
+**Settled lead contract:** combine desired geometry and visibility in one
+per-parent DeferWindowPos application, using native SHOWWINDOW/HIDEWINDOW.
+A visibility change must survive unchanged-rectangle filtering. There is one
+positioning implementation; existing move_children delegates to it. Feature
+owners compute visibility once and MainWindow coordinates layout. No stored
+presentation, model copy, dispatcher, compositor, custom paint or display
+test is added. NOREDRAW is conditional on a demonstrated positioning paint
+cause and complete affected-region restoration, never an unowned bit change.
+Also restore WS_CLIPSIBLINGS on the transfer child-window constructor,
+consistent with the other child windows.
 
-Remaining work is the visual acceptance gate, followed by plan closure.
-No claim is made that independent HWND painting makes it impossible; the
-remaining transient publication needs a demonstrated cause and remedy,
-rather than another speculative rendering change. This plan prohibits
-WS_EX_COMPOSITED; no new renderer is silently substituted. Environment-
-specific checks remain in ui-after-install.md. Do not delete this plan or
-call the full refactoring finished while this gate remains open.
+The retained native-control implementer owns the coupled batch in win/mod.rs,
+win/window.rs child creation, MainWindow layout, required Panel/Inspector
+visibility helpers, Search's message placement, and app/file_operations.rs
+placement/view code. MainWindow's existing message geometry gains a collection
+form reused by its callers; no message/focus rules are duplicated. Native pane
+WM_SIZE reentry and readiness before reveal remain required contracts. Root owns
+shared contracts, docs, integration and the only build. Foreign status work
+must remain intact. Expected round: one coherent implementation, one retained
+adversarial affected-contract review, the existing finite paired observation,
+then the consolidated required build. No further diagnostic expansion is
+planned. Do not review paths scheduled for replacement inside this batch.
+
+Existing proofs remain reusable within their scope: native attempt6 selected2
+by Ctrl+click and100,000 by Shift+End, and verified an ended move's Summary,
+destination and absent progress bar
+(`V:/temp/gozler-window-final-native-proof6.log`). Its layout handler timings
+are not a claim about the upcoming batch. The earlier successful physical OLE
+drag/watchdog evidence remains valid; do not repeat it. Attempt5's nonreturning
+native boundary remains unknown. Suspected shell-icon waits remain in#148.
+
+Stages4/8 still need the visual criterion satisfied. Stage9 permanent ownership
+rules are already recorded; delete this plan only after all required proof,
+review, build and stage commits pass. Environment checks remain explicitly in
+ui-after-install.md; installation is a separate owner decision. No owner
+question or UAC step is needed for the current batch.
 All six final specialist
 reviews finished: five clean; flow found one Panel cancellation defect. Its owner
 fixed recovery after navigation cancellation and explicit Retry after cancelling
