@@ -560,8 +560,9 @@ impl Button {
     }
 
     /// Shows `glyph` before the caption, or no image for `None` and while
-    /// icons are hidden.
-    fn set_glyph(self, glyph: Option<Glyph>) {
+    /// icons are hidden. Does not clear an administrator shield; use
+    /// [`Self::set_icon`] when changing that decoration.
+    pub(crate) fn set_glyph(self, glyph: Option<Glyph>) {
         let dpi = self.0.dpi();
         let images = glyph.and_then(|glyph| button_images(glyph, icon_glyph_height(dpi)));
         let gap = glyph_gap(dpi).0;

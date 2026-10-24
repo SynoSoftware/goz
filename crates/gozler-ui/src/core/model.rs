@@ -5,7 +5,9 @@
 //! while the next pass runs. The fields are private to the core: service replies
 //! pass through [`Model::accept`], operation answers through
 //! [`Model::accept_followed`], and user changes through their own methods.
-//! Each transition says what changed and which request is necessary.
+//! Each transition returns the areas whose values changed and ordered effects.
+//! Native structure precedes those values; tasks, focus and modal intents
+//! follow them. The app delivers effects without holding a model borrow.
 
 use super::fetch::{
     Ask, ChunkAsk, DaemonFailure, ExportAsk, Fetch, Fetched, FromSnapshot, Generation, List, Local,
@@ -13,6 +15,7 @@ use super::fetch::{
 };
 use super::file_operations::{self, StatusOperation};
 use super::fixer::{FixEvent, FixWork, Fixer};
+pub(crate) use super::inspector::AgeTimer;
 use super::layout::{Dip, Panes};
 use super::open::{TOTAL_COMMANDER_SEARCH, newest_total_commander};
 use super::operations::{OperationSteps, QueueStep, Source};
@@ -48,7 +51,9 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
 
+mod accepted;
 mod following;
+pub(crate) use accepted::{Accepted, Areas, Effect, may_apply};
 
 /// Which Gozler of the session a window is (DESIGN.md: Window lifetime).
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -90,7 +95,11 @@ pub(crate) struct Model {
     app_working_set: Option<u64>,
     pub(super) export: Export,
     fix: Fixer,
+    /// Work and replies retain the accepted fix's identity before its launch.
+    fix_generation: Option<Generation>,
     following: following::OperationFollow,
+    inspector: super::inspector::Inspector,
+    location_observed: Option<(String, ScopeCheck)>,
     inspector_content: super::layout::InspectorContent,
     /// The file operation the middle group shows.
     operation: Option<StatusOperation>,
@@ -136,13 +145,6 @@ enum LatestRelease {
     },
 }
 
-/// What a reply or an input changed, and what it makes necessary.
-#[derive(Debug, PartialEq)]
-pub(crate) struct Accepted {
-    pub(crate) change: Change,
-    pub(crate) then: Option<Then>,
-}
-
 /// What new taken entries change in the lists ([`Model::set_taken`]).
 #[derive(Debug, PartialEq)]
 pub(crate) struct TakenShown {
@@ -163,121 +165,6 @@ pub(crate) enum SearchBoxEnter {
     Enter,
     /// The search in flight gives its first row `Enter` when it answers.
     Wait,
-}
-
-#[derive(Debug, PartialEq)]
-pub(crate) enum Then {
-    Fetch(Fetch),
-    /// The search of each list again, with the clock of the moment it
-    /// starts: the person changed a match control or the sort, the service
-    /// answers again, or every volume in scope became complete.
-    SearchAgain(Vec<List>),
-    /// The list's search, once the person has stopped typing for a moment.
-    SearchSoon(List),
-    /// [`Model::read_selection`] of the list, once the selection has
-    /// stopped changing for a moment, so one request serves a run of
-    /// Shift+Down presses. The list's live `Selection` request ends now,
-    /// because it reads an older selection (DESIGN.md: T6).
-    ReadSelectionSoon(List),
-    /// Ends the live request of the purpose; its reply would be stale.
-    Cancel(Purpose),
-    /// Asks GitHub whether its latest release is older than the window.
-    AskLatestRelease,
-    /// Runs the work on the fix's thread.
-    RunFix(FixWork),
-    /// Asks the person whether to download the setup the fix found.
-    ConfirmSetup,
-    /// Tells the person that the latest release gives no setup to install.
-    ExplainNoSetup,
-    /// Ends the fix's thread.
-    StopFix,
-    /// Cancels the running file operation, which the window's queue runs.
-    CancelOperation(OperationId),
-    /// Starts the checked setup, and closes the window for it.
-    RunSetup(PathBuf),
-}
-
-#[derive(Debug, PartialEq, Eq)]
-pub(crate) enum Change {
-    Nothing,
-    /// The typed text, which the title shows.
-    Typed,
-    /// A match control or the sort, which their controls show.
-    Choice,
-    /// A filter, which the filter pane shows.
-    Filters,
-    /// A pane was shown or hidden, or the inspector's height changed.
-    Panes,
-    /// Search or Two panels now shows, which every control, the menus and
-    /// the accelerators follow.
-    Mode,
-    /// The column at `index` of [`Model::columns`] was added.
-    ColumnShown {
-        index: usize,
-    },
-    /// `column`, which was at `index` of [`Model::columns`], was removed.
-    ColumnHidden {
-        index: usize,
-        column: Column,
-    },
-    /// A new search of the list runs; the list keeps its rows.
-    Searching(List),
-    /// A new search's first rows replace the list's old ones, and nothing
-    /// is selected; `enter_first` when `Enter` in Search's search box waited
-    /// for them to give the first row `Enter`. The list's live `Selection`
-    /// request ends, because it reads the old rows (DESIGN.md: T2).
-    NewSearch {
-        list: List,
-        count: u64,
-        enter_first: bool,
-    },
-    /// Rows of the list's shown search arrived, and the count is `count`.
-    Rows {
-        list: List,
-        rows: Range<u64>,
-        count: u64,
-    },
-    /// The list is empty and shows a message. The list's live `Selection`
-    /// request ends, because nothing is selected (DESIGN.md: T3).
-    Message(List),
-    /// The service's state changed, which the status bar's right group,
-    /// the status poll and every list's failure message follow.
-    Status,
-    /// The list's selection changed.
-    Selection(List),
-    /// The list's selected files arrived, and its cached rows in `rows`
-    /// are now the ones of their moment.
-    SelectionRead {
-        list: List,
-        rows: Range<u64>,
-    },
-    SelectionFiltered {
-        list: List,
-        deselect: Deselect,
-    },
-    /// The folder selected in Search's list was counted, which only the
-    /// inspector shows.
-    FolderCounted,
-    /// The export started, wrote more rows, ended or was cancelled.
-    Export,
-    /// The fix started, moved to another step, ended or was cancelled,
-    /// which the status bars and the fix buttons follow.
-    Fix,
-    /// The export to `path` failed and its partial file is deleted.
-    ExportFailed {
-        path: PathBuf,
-        error: ExportError,
-    },
-    /// Settings applied new choices, which the menus, the accelerators and
-    /// the tray icon follow.
-    Settings,
-    /// The Use Total Commander link's search answered: the path of the Total
-    /// Commander it takes, none, or why the service could not search.
-    TotalCommander(Result<Option<String>, DaemonFailure>),
-    /// Settings > Include's count answered ([`Model::included_count`]).
-    IncludedCount,
-    /// gozlerd answered a panel's folder sizes.
-    FolderSizes(Side),
 }
 
 /// Why an export failed.
@@ -369,12 +256,6 @@ impl ExportFormat {
 /// them.
 const PROGRAM_ROWS: u64 = 1_000;
 
-impl Accepted {
-    fn only(change: Change) -> Accepted {
-        Accepted { change, then: None }
-    }
-}
-
 /// The latest background observation of Location; the core never reads a disk.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ScopeCheck {
@@ -415,7 +296,10 @@ impl Model {
             app_working_set: None,
             export: Export::Idle,
             fix: Fixer::Idle,
+            fix_generation: None,
             following: following::OperationFollow::new(),
+            inspector: super::inspector::Inspector::default(),
+            location_observed: None,
             inspector_content: super::layout::InspectorContent::Selection,
             operation: None,
             started_jobs: Vec::new(),
@@ -449,6 +333,60 @@ impl Model {
         self.instance
     }
 
+    pub(crate) fn inspect_age(&mut self) -> Accepted {
+        let timer = self.inspector.refresh(&self.search.list);
+        Accepted {
+            touched: Areas::NONE,
+            effects: vec![Effect::Age(timer)],
+        }
+    }
+
+    pub(crate) fn awaits(&self, purpose: Purpose, generation: Generation) -> bool {
+        match purpose {
+            Purpose::Results(list) => self
+                .list(list)
+                .is_some_and(|shown| shown.results.awaits(generation)),
+            Purpose::Selection(list) => self
+                .list(list)
+                .is_some_and(|shown| shown.selection.asked() == Some(generation)),
+            Purpose::Status => self.status_asked == Some(generation),
+            Purpose::Program => self.program_asked == Some(generation),
+            Purpose::IncludeCount => self.include_count_asked == Some(generation),
+            Purpose::SettingsSaved => self.settings_saved_asked == Some(generation),
+            Purpose::Export => {
+                matches!(self.export, Export::Running { generation: asked, .. } if asked == generation)
+            }
+            Purpose::FolderSizes(_) => true,
+        }
+    }
+
+    pub(crate) fn awaits_fix(&self, generation: Generation) -> bool {
+        self.fix_generation == Some(generation) && self.fix.running()
+    }
+
+    pub(crate) fn inspected_modified(&self) -> Option<i64> {
+        match self.search.list.selection().files()? {
+            [entry] => entry.mtime_ft,
+            _ => None,
+        }
+    }
+
+    pub(crate) fn location_check(&self) -> ScopeCheck {
+        self.location_observed
+            .as_ref()
+            .filter(|(folder, _)| self.location() == Some(folder.as_str()))
+            .map_or(ScopeCheck::Exists, |(_, check)| *check)
+    }
+
+    pub(crate) fn observe_location(&mut self, folder: String, check: ScopeCheck) -> bool {
+        if self.location() != Some(folder.as_str()) {
+            return false;
+        }
+        let changed = self.location_check() != check;
+        self.location_observed = Some((folder, check));
+        changed
+    }
+
     pub(crate) fn take_retired(&mut self) -> Retirement {
         let mut retired = std::mem::take(&mut self.retired);
         retired.append(self.search.list.take_retired());
@@ -468,7 +406,10 @@ impl Model {
 
     pub(crate) fn set_destination_folder(&mut self, folder: String) -> Accepted {
         self.settings.window.destination_folder = Some(folder);
-        Accepted::only(Change::Choice)
+        Accepted {
+            touched: Areas::SEARCH | Areas::INSPECTOR | Areas::KEY_BAR,
+            effects: vec![Effect::InspectAge, Effect::Polling, Effect::NoteSavedState],
+        }
     }
 
     pub(crate) fn set_clipboard_holds_files(&mut self, holds: bool) {
@@ -521,7 +462,22 @@ impl Model {
 
     pub(crate) fn collapse_inspector(&mut self) -> Accepted {
         self.settings.window.inspector = false;
-        Accepted::only(Change::Panes)
+        Accepted {
+            touched: Areas::TITLE
+                | Areas::SEARCH
+                | Areas::INSPECTOR
+                | Areas::STATUS
+                | Areas::LEFT_PANEL
+                | Areas::RIGHT_PANEL
+                | Areas::KEY_BAR,
+            effects: vec![
+                Effect::Layout,
+                Effect::PaneFocus,
+                Effect::InspectAge,
+                Effect::Polling,
+                Effect::NoteSavedState,
+            ],
+        }
     }
 
     pub(crate) fn take_keep(&mut self, list: List) -> Option<Keep> {
@@ -531,16 +487,25 @@ impl Model {
     pub(crate) fn accept_kept(&mut self, list: List, answer: Kept) -> Accepted {
         if let Some(shown) = self.list_mut(list) {
             if shown.accept_kept(answer) {
-                return Accepted::only(Change::SelectionFiltered {
-                    list,
-                    deselect: Deselect::Nothing,
-                });
+                return Accepted {
+                    touched: Areas::list(list) | Areas::STATUS | Areas::KEY_BAR,
+                    effects: vec![
+                        Effect::Deselect {
+                            list,
+                            rows: Deselect::Nothing,
+                        },
+                        Effect::ListPasses,
+                        Effect::InspectAge,
+                        Effect::Polling,
+                        Effect::NoteSavedState,
+                    ],
+                };
             }
         } else {
             let items = answer.kept.len();
             self.retired.push(answer, items);
         }
-        Accepted::only(Change::Nothing)
+        Accepted::default()
     }
 
     /// Whether a list still shows the rows of the ended operation `id`
@@ -573,10 +538,17 @@ impl Model {
                 .is_some_and(|shown| shown.selection.files().is_some());
             let filtered = self.refilter_selection(list);
             let deselect = match filtered {
-                Some(Accepted {
-                    change: Change::SelectionFiltered { deselect, .. },
-                    ..
-                }) => deselect,
+                Some(accepted) => accepted
+                    .effects
+                    .into_iter()
+                    .find_map(|effect| match effect {
+                        Effect::Deselect { rows, .. } => Some(rows),
+                        _ => None,
+                    })
+                    .unwrap_or_else(|| {
+                        self.list(list)
+                            .map_or(Deselect::Nothing, SearchList::deselect)
+                    }),
                 _ => self
                     .list(list)
                     .map_or(Deselect::Nothing, SearchList::deselect),
@@ -638,8 +610,12 @@ impl Model {
     }
 
     /// Records the app's own working set, read as it asks for status.
-    pub(crate) fn set_app_working_set(&mut self, bytes: Option<u64>) {
+    pub(crate) fn set_app_working_set(&mut self, bytes: Option<u64>) -> Accepted {
         self.app_working_set = bytes;
+        Accepted {
+            touched: Areas::STATUS,
+            effects: Vec::new(),
+        }
     }
 
     /// Settings applied `choices`. Showing every file for an empty search
@@ -647,9 +623,25 @@ impl Model {
     pub(crate) fn set_choices(&mut self, choices: Choices) -> Accepted {
         let search_again = choices.show_all_when_empty != self.choices().show_all_when_empty;
         self.settings.choices = choices;
-        Accepted {
-            change: Change::Settings,
-            then: search_again.then(|| Then::SearchAgain(vec![List::Search])),
+        {
+            let mut accepted = Accepted {
+                touched: Areas::TITLE
+                    | Areas::SEARCH
+                    | Areas::INSPECTOR
+                    | Areas::STATUS
+                    | Areas::LEFT_PANEL
+                    | Areas::RIGHT_PANEL
+                    | Areas::KEY_BAR,
+                effects: vec![Effect::Menu, Effect::Tray, Effect::InspectAge],
+            };
+
+            accepted
+                .effects
+                .extend(search_again.then(|| Effect::SearchAgain(vec![List::Search])));
+            accepted
+                .effects
+                .extend([Effect::Polling, Effect::NoteSavedState]);
+            accepted
         }
     }
 
@@ -664,7 +656,15 @@ impl Model {
         self.settings.choices.language = choice;
         self.strings = strings;
         self.operation_text_changed();
-        Accepted::only(Change::Choice)
+        Accepted {
+            touched: Areas::SEARCH | Areas::INSPECTOR | Areas::KEY_BAR,
+            effects: vec![
+                Effect::InspectAge,
+                Effect::ListPasses,
+                Effect::Polling,
+                Effect::NoteSavedState,
+            ],
+        }
     }
 
     pub(crate) fn show_settings_page(&mut self, page: Option<SettingsPage>) {
@@ -697,7 +697,23 @@ impl Model {
     /// group names.
     pub(crate) fn set_newer_release(&mut self, version: String) -> Accepted {
         self.newer_release = Some(version);
-        Accepted::only(Change::Status)
+        Accepted {
+            touched: Areas::STATUS
+                | Areas::LOCATIONS
+                | Areas::SEARCH
+                | Areas::INSPECTOR
+                | Areas::LEFT_PANEL
+                | Areas::RIGHT_PANEL
+                | Areas::KEY_BAR,
+            effects: vec![
+                Effect::PreparePanel(Side::Left),
+                Effect::PreparePanel(Side::Right),
+                Effect::ReadMemory,
+                Effect::InspectAge,
+                Effect::Polling,
+                Effect::NoteSavedState,
+            ],
+        }
     }
 
     pub(crate) fn newer_release(&self) -> Option<&str> {
@@ -708,7 +724,15 @@ impl Model {
     /// the service's fix button says.
     pub(crate) fn set_latest_release_older(&mut self, older: bool) -> Accepted {
         self.latest_release = LatestRelease::Known { older };
-        Accepted::only(Change::Fix)
+        Accepted {
+            touched: Areas::STATUS | Areas::SEARCH | Areas::INSPECTOR | Areas::KEY_BAR,
+            effects: vec![
+                Effect::PostSettings,
+                Effect::InspectAge,
+                Effect::Polling,
+                Effect::NoteSavedState,
+            ],
+        }
     }
 
     /// Asks once whether GitHub's latest release is older than the window,
@@ -716,13 +740,13 @@ impl Model {
     /// reads Downgrade before the person clicks it. With Check for updates
     /// off, Gozler asks GitHub only after a click, so the button reads
     /// Update and the question after the click says which it is.
-    fn ask_latest_release(&mut self, failure: &DaemonFailure) -> Option<Then> {
+    fn ask_latest_release(&mut self, failure: &DaemonFailure) -> Option<Effect> {
         let ask = matches!(failure, DaemonFailure::TooOld { .. })
             && self.settings.choices.check_for_updates
             && self.latest_release == LatestRelease::Unknown;
         ask.then(|| {
             self.latest_release = LatestRelease::Asking;
-            Then::AskLatestRelease
+            Effect::AskLatestRelease
         })
     }
 
@@ -773,12 +797,14 @@ impl Model {
     /// Settings closed, so the Use Total Commander link's search has nobody to
     /// answer; the window ends its request (rule 4).
     pub(crate) fn forget_total_commander(&mut self) -> Accepted {
-        Accepted {
-            change: Change::Nothing,
-            then: self
-                .program_asked
-                .take()
-                .map(|_| Then::Cancel(Purpose::Program)),
+        {
+            let mut accepted = Accepted::default();
+            accepted.effects.extend(
+                self.program_asked
+                    .take()
+                    .map(|_| Effect::Cancel(Purpose::Program)),
+            );
+            accepted
         }
     }
 
@@ -801,12 +827,14 @@ impl Model {
     /// Include page).
     pub(crate) fn forget_included_count(&mut self) -> Accepted {
         self.included_count = None;
-        Accepted {
-            change: Change::Nothing,
-            then: self
-                .include_count_asked
-                .take()
-                .map(|_| Then::Cancel(Purpose::IncludeCount)),
+        {
+            let mut accepted = Accepted::default();
+            accepted.effects.extend(
+                self.include_count_asked
+                    .take()
+                    .map(|_| Effect::Cancel(Purpose::IncludeCount)),
+            );
+            accepted
         }
     }
 
@@ -1003,10 +1031,10 @@ impl Model {
     /// person types (DESIGN.md: Search in a panel).
     pub(crate) fn set_typed_search(&mut self, list: List, text: String) -> Accepted {
         let Some(shown) = self.list_mut(list) else {
-            return Accepted::only(Change::Nothing);
+            return Accepted::default();
         };
         if text == shown.text {
-            return Accepted::only(Change::Nothing);
+            return Accepted::default();
         }
         shown.text = text;
         let soon = match list {
@@ -1018,9 +1046,15 @@ impl Model {
             }
             List::Panel(_) => true,
         };
-        Accepted {
-            change: Change::Typed,
-            then: soon.then_some(Then::SearchSoon(list)),
+        {
+            let mut accepted = Accepted {
+                touched: Areas::TITLE | Areas::SEARCH,
+                effects: vec![],
+            };
+            accepted
+                .effects
+                .extend(soon.then_some(Effect::SearchSoon(list)));
+            accepted
         }
     }
 
@@ -1049,21 +1083,41 @@ impl Model {
     /// nothing.
     pub(crate) fn set_matching(&mut self, matching: Matching) -> Accepted {
         if matching == self.settings.window.matching {
-            return Accepted::only(Change::Nothing);
+            return Accepted::default();
         }
         self.settings.window.matching = matching;
-        Accepted {
-            change: Change::Choice,
-            then: Some(Then::SearchAgain(vec![List::Search])),
+        {
+            let mut accepted = Accepted {
+                touched: Areas::SEARCH | Areas::INSPECTOR | Areas::KEY_BAR,
+                effects: vec![Effect::InspectAge],
+            };
+
+            accepted
+                .effects
+                .extend(Some(Effect::SearchAgain(vec![List::Search])));
+            accepted
+                .effects
+                .extend([Effect::Polling, Effect::NoteSavedState]);
+            accepted
         }
     }
 
     /// The person chose a sort; the search runs again (DESIGN.md: C20).
     pub(crate) fn sort_by(&mut self, sort: SortSpec) -> Accepted {
         self.settings.window.sort = sort;
-        Accepted {
-            change: Change::Choice,
-            then: Some(Then::SearchAgain(vec![List::Search])),
+        {
+            let mut accepted = Accepted {
+                touched: Areas::SEARCH | Areas::INSPECTOR | Areas::KEY_BAR,
+                effects: vec![Effect::InspectAge],
+            };
+
+            accepted
+                .effects
+                .extend(Some(Effect::SearchAgain(vec![List::Search])));
+            accepted
+                .effects
+                .extend([Effect::Polling, Effect::NoteSavedState]);
+            accepted
         }
     }
 
@@ -1074,12 +1128,29 @@ impl Model {
             filters.only_directly = false;
         }
         if filters == self.settings.window.filters {
-            return Accepted::only(Change::Nothing);
+            return Accepted::default();
+        }
+        if filters.location != self.settings.window.filters.location {
+            self.location_observed = None;
         }
         self.settings.window.filters = filters;
-        Accepted {
-            change: Change::Filters,
-            then: Some(Then::SearchAgain(vec![List::Search])),
+        {
+            let mut accepted = Accepted {
+                touched: Areas::FILTERS
+                    | Areas::SEARCH
+                    | Areas::INSPECTOR
+                    | Areas::STATUS
+                    | Areas::KEY_BAR,
+                effects: vec![Effect::InspectAge],
+            };
+
+            accepted
+                .effects
+                .extend(Some(Effect::SearchAgain(vec![List::Search])));
+            accepted
+                .effects
+                .extend([Effect::Polling, Effect::NoteSavedState]);
+            accepted
         }
     }
 
@@ -1110,7 +1181,9 @@ impl Model {
         let folder = match self.search.list.selection.files() {
             Some([entry]) if entry.is_dir => entry.path.clone(),
             Some([entry]) => parent_of(&entry.path),
-            _ => return Accepted::only(Change::Nothing),
+            _ => {
+                return Accepted::default();
+            }
         };
         self.choose_folder(folder)
     }
@@ -1120,17 +1193,49 @@ impl Model {
     pub(crate) fn show_mode(&mut self, mode: Mode) -> Accepted {
         let window = &mut self.settings.window;
         if window.mode == mode {
-            return Accepted::only(Change::Nothing);
+            return Accepted::default();
         }
         window.mode = mode;
-        Accepted::only(Change::Mode)
+        Accepted {
+            touched: Areas::TITLE
+                | Areas::SEARCH
+                | Areas::INSPECTOR
+                | Areas::STATUS
+                | Areas::LEFT_PANEL
+                | Areas::RIGHT_PANEL
+                | Areas::KEY_BAR,
+            effects: vec![
+                Effect::Layout,
+                Effect::Menu,
+                Effect::SwitchPanels,
+                Effect::HomeFocus,
+                Effect::InspectAge,
+                Effect::Polling,
+                Effect::NoteSavedState,
+            ],
+        }
     }
 
     /// Shows or hides the filter pane (DESIGN.md: C13).
     pub(crate) fn toggle_filter_pane(&mut self) -> Accepted {
         let window = &mut self.settings.window;
         window.filter_pane = !window.filter_pane;
-        Accepted::only(Change::Panes)
+        Accepted {
+            touched: Areas::TITLE
+                | Areas::SEARCH
+                | Areas::INSPECTOR
+                | Areas::STATUS
+                | Areas::LEFT_PANEL
+                | Areas::RIGHT_PANEL
+                | Areas::KEY_BAR,
+            effects: vec![
+                Effect::Layout,
+                Effect::PaneFocus,
+                Effect::InspectAge,
+                Effect::Polling,
+                Effect::NoteSavedState,
+            ],
+        }
     }
 
     /// Shows or hides the inspector (DESIGN.md: C14).
@@ -1139,13 +1244,44 @@ impl Model {
         window.inspector = self.inspector_content != super::layout::InspectorContent::Selection
             || !window.inspector;
         self.inspector_content = super::layout::InspectorContent::Selection;
-        Accepted::only(Change::Panes)
+        Accepted {
+            touched: Areas::TITLE
+                | Areas::SEARCH
+                | Areas::INSPECTOR
+                | Areas::STATUS
+                | Areas::LEFT_PANEL
+                | Areas::RIGHT_PANEL
+                | Areas::KEY_BAR,
+            effects: vec![
+                Effect::Layout,
+                Effect::PaneFocus,
+                Effect::InspectAge,
+                Effect::Polling,
+                Effect::NoteSavedState,
+            ],
+        }
     }
 
     pub(crate) fn show_transfers(&mut self) -> Accepted {
         self.inspector_content = super::layout::InspectorContent::Transfers;
         self.settings.window.inspector = true;
-        Accepted::only(Change::Panes)
+        Accepted {
+            touched: Areas::TITLE
+                | Areas::SEARCH
+                | Areas::INSPECTOR
+                | Areas::STATUS
+                | Areas::LEFT_PANEL
+                | Areas::RIGHT_PANEL
+                | Areas::KEY_BAR,
+            effects: vec![
+                Effect::Layout,
+                Effect::PaneFocus,
+                Effect::ListPasses,
+                Effect::InspectAge,
+                Effect::Polling,
+                Effect::NoteSavedState,
+            ],
+        }
     }
 
     pub(crate) fn toggle_transfers(&mut self) -> Accepted {
@@ -1157,17 +1293,62 @@ impl Model {
             self.inspector_content = super::layout::InspectorContent::Transfers;
             self.settings.window.inspector = true;
         }
-        Accepted::only(Change::Panes)
+        Accepted {
+            touched: Areas::TITLE
+                | Areas::SEARCH
+                | Areas::INSPECTOR
+                | Areas::STATUS
+                | Areas::LEFT_PANEL
+                | Areas::RIGHT_PANEL
+                | Areas::KEY_BAR,
+            effects: vec![
+                Effect::Layout,
+                Effect::PaneFocus,
+                Effect::InspectAge,
+                Effect::Polling,
+                Effect::NoteSavedState,
+            ],
+        }
     }
 
     pub(crate) fn maximize_inspector(&mut self) -> Accepted {
         self.settings.window.inspector_maximized = !self.settings.window.inspector_maximized;
-        Accepted::only(Change::Panes)
+        Accepted {
+            touched: Areas::TITLE
+                | Areas::SEARCH
+                | Areas::INSPECTOR
+                | Areas::STATUS
+                | Areas::LEFT_PANEL
+                | Areas::RIGHT_PANEL
+                | Areas::KEY_BAR,
+            effects: vec![
+                Effect::Layout,
+                Effect::PaneFocus,
+                Effect::InspectAge,
+                Effect::Polling,
+                Effect::NoteSavedState,
+            ],
+        }
     }
 
     pub(crate) fn flip_transfers(&mut self) -> Accepted {
         self.settings.window.transfers_flipped = !self.settings.window.transfers_flipped;
-        Accepted::only(Change::Panes)
+        Accepted {
+            touched: Areas::TITLE
+                | Areas::SEARCH
+                | Areas::INSPECTOR
+                | Areas::STATUS
+                | Areas::LEFT_PANEL
+                | Areas::RIGHT_PANEL
+                | Areas::KEY_BAR,
+            effects: vec![
+                Effect::Layout,
+                Effect::PaneFocus,
+                Effect::InspectAge,
+                Effect::Polling,
+                Effect::NoteSavedState,
+            ],
+        }
     }
 
     /// The person dragged the splitter to `height`, which the layout
@@ -1175,33 +1356,65 @@ impl Model {
     pub(crate) fn set_inspector_height(&mut self, height: Dip) -> Accepted {
         let window = &mut self.settings.window;
         if window.inspector_height == height {
-            return Accepted::only(Change::Nothing);
+            return Accepted::default();
         }
         window.inspector_height = height;
-        Accepted::only(Change::Panes)
+        Accepted {
+            touched: Areas::TITLE
+                | Areas::SEARCH
+                | Areas::INSPECTOR
+                | Areas::STATUS
+                | Areas::LEFT_PANEL
+                | Areas::RIGHT_PANEL
+                | Areas::KEY_BAR,
+            effects: vec![
+                Effect::Layout,
+                Effect::PaneFocus,
+                Effect::InspectAge,
+                Effect::Polling,
+                Effect::NoteSavedState,
+            ],
+        }
     }
 
     /// Shows or hides `column` (DESIGN.md: C15). A shown column joins at the
     /// end; Name cannot be hidden.
     pub(crate) fn toggle_column(&mut self, column: Column) -> Accepted {
         if !column.row().can_hide {
-            return Accepted::only(Change::Nothing);
+            return Accepted::default();
         }
-        Accepted::only(match self.columns.iter().position(|c| *c == column) {
+        match self.columns.iter().position(|c| *c == column) {
             Some(index) => {
                 self.columns.remove(index);
                 (self.settings.window.columns).retain(|saved| saved.column != column);
-                Change::ColumnHidden { index, column }
+                Accepted {
+                    touched: Areas::SEARCH | Areas::INSPECTOR | Areas::KEY_BAR,
+                    effects: vec![
+                        Effect::HideColumn { index, column },
+                        Effect::InspectAge,
+                        Effect::Polling,
+                        Effect::NoteSavedState,
+                    ],
+                }
             }
             None => {
                 self.columns.push(column);
                 // The list shows a column it inserts last at its end.
                 (self.settings.window.columns).push(SavedColumn { column });
-                Change::ColumnShown {
-                    index: self.columns.len() - 1,
+                Accepted {
+                    touched: Areas::SEARCH | Areas::INSPECTOR | Areas::KEY_BAR,
+                    effects: vec![
+                        Effect::ShowColumn {
+                            index: self.columns.len() - 1,
+                            column,
+                        },
+                        Effect::InspectAge,
+                        Effect::Polling,
+                        Effect::NoteSavedState,
+                    ],
                 }
             }
-        })
+        }
     }
 
     /// The search that `list`'s typed text and controls ask for, or the
@@ -1250,12 +1463,21 @@ impl Model {
                     .list
                     .results
                     .start_search(generation, search, sort);
-                return Accepted {
-                    change: Change::Searching(List::Search),
-                    then: Some(Then::Fetch(Fetch {
+                return {
+                    let mut accepted = Accepted {
+                        touched: Areas::list(List::Search) | Areas::STATUS | Areas::KEY_BAR,
+                        effects: vec![Effect::InspectAge],
+                    };
+                    accepted.effects.extend(Some(Effect::Fetch(Fetch {
                         generation,
                         ask: Ask::Rows(List::Search, ask),
-                    })),
+                    })));
+                    accepted.effects.push(Effect::NameSearchSoon(List::Search));
+
+                    accepted
+                        .effects
+                        .extend([Effect::Polling, Effect::NoteSavedState]);
+                    accepted
                 };
             }
         };
@@ -1267,11 +1489,14 @@ impl Model {
     /// long enough ([`super::results::Results::name_search`]).
     pub(crate) fn name_search(&mut self, list: List) -> Accepted {
         let named = (self.list_mut(list)).is_some_and(|shown| shown.results.name_search());
-        Accepted::only(if named {
-            Change::Searching(list)
+        if named {
+            Accepted {
+                touched: Areas::list(list) | Areas::STATUS | Areas::KEY_BAR,
+                effects: vec![Effect::InspectAge, Effect::Polling, Effect::NoteSavedState],
+            }
         } else {
-            Change::Nothing
-        })
+            Accepted::default()
+        }
     }
 
     /// A search panel's search (DESIGN.md: Search in a panel): its typed text
@@ -1283,7 +1508,7 @@ impl Model {
         let list = List::Panel(side);
         let panel = self.panels.panel(side);
         let Some(search) = panel.search() else {
-            return Accepted::only(Change::Nothing);
+            return Accepted::default();
         };
         let folder = panel.folder();
         let filters = match search.look_in {
@@ -1308,12 +1533,21 @@ impl Model {
                     let generation = self.generation();
                     let shown = self.list_mut(list).expect("the panel searches");
                     let ask = shown.results.start_search(generation, search, sort);
-                    return Accepted {
-                        change: Change::Searching(list),
-                        then: Some(Then::Fetch(Fetch {
+                    return {
+                        let mut accepted = Accepted {
+                            touched: Areas::list(list) | Areas::STATUS | Areas::KEY_BAR,
+                            effects: vec![Effect::InspectAge],
+                        };
+                        accepted.effects.extend(Some(Effect::Fetch(Fetch {
                             generation,
                             ask: Ask::Rows(list, ask),
-                        })),
+                        })));
+                        accepted.effects.push(Effect::NameSearchSoon(list));
+
+                        accepted
+                            .effects
+                            .extend([Effect::Polling, Effect::NoteSavedState]);
+                        accepted
                     };
                 }
             }
@@ -1339,13 +1573,23 @@ impl Model {
     /// selected.
     fn show_message(&mut self, list: List, message: ListMessage) -> Accepted {
         let Some(shown) = self.list_mut(list) else {
-            return Accepted::only(Change::Nothing);
+            return Accepted::default();
         };
         shown.results.show_message(message);
         shown.abandon_keeping();
         shown.set_selection(Selection::None);
         shown.chosen_bytes = None;
-        Accepted::only(Change::Message(list))
+        Accepted {
+            touched: Areas::list(list) | Areas::STATUS | Areas::KEY_BAR,
+            effects: vec![
+                Effect::ClearSelection(list),
+                Effect::SetCount { list, count: 0 },
+                Effect::Cancel(Purpose::Selection(list)),
+                Effect::InspectAge,
+                Effect::Polling,
+                Effect::NoteSavedState,
+            ],
+        }
     }
 
     /// The chunk that `list`'s visible rows still lack, unless a request
@@ -1376,17 +1620,17 @@ impl Model {
     }
 
     pub(crate) fn expire_request(&mut self, purpose: Purpose, generation: Generation) -> Accepted {
-        let change = match purpose {
+        match purpose {
             Purpose::Status if self.status_asked == Some(generation) => {
                 self.status_asked = None;
-                Change::Nothing
+                Accepted::default()
             }
-            Purpose::FolderSizes(side) if self.panels.expire_sizes(side, generation) => {
-                Change::FolderSizes(side)
-            }
-            _ => Change::Nothing,
-        };
-        Accepted::only(change)
+            Purpose::FolderSizes(side) if self.panels.expire_sizes(side, generation) => Accepted {
+                touched: Areas::panel(side) | Areas::STATUS | Areas::KEY_BAR,
+                effects: vec![Effect::PreparePanel(side), Effect::FolderSizes(side)],
+            },
+            _ => Accepted::default(),
+        }
     }
 
     pub(crate) fn cancel_results(&mut self, list: List) -> Accepted {
@@ -1396,9 +1640,19 @@ impl Model {
         if let Some(shown) = self.list_mut(list) {
             shown.results.cancel();
         }
-        Accepted {
-            change: Change::Searching(list),
-            then: Some(Then::Cancel(Purpose::Results(list))),
+        {
+            let mut accepted = Accepted {
+                touched: Areas::list(list) | Areas::STATUS | Areas::KEY_BAR,
+                effects: vec![Effect::InspectAge],
+            };
+
+            accepted
+                .effects
+                .extend(Some(Effect::Cancel(Purpose::Results(list))));
+            accepted
+                .effects
+                .extend([Effect::Polling, Effect::NoteSavedState]);
+            accepted
         }
     }
 
@@ -1413,10 +1667,10 @@ impl Model {
             return self.select_too_many(list, count);
         }
         let Some(shown) = self.list_mut(list) else {
-            return Accepted::only(Change::Nothing);
+            return Accepted::default();
         };
         let older = shown.selection.asked();
-        let then = if positions.is_empty() || shown.results.shown_ask().is_none() {
+        let effect = if positions.is_empty() || shown.results.shown_ask().is_none() {
             shown.set_selection(Selection::None);
             shown.chosen_bytes = None;
             None
@@ -1430,10 +1684,18 @@ impl Model {
         };
         // The request for the older selection reads other files (DESIGN.md: T6,
         // T7); a new request of the purpose ends it too.
-        let then = then.or_else(|| older.map(|_| Then::Cancel(Purpose::Selection(list))));
-        Accepted {
-            change: Change::Selection(list),
-            then,
+        let effect = effect.or_else(|| older.map(|_| Effect::Cancel(Purpose::Selection(list))));
+        {
+            let mut accepted = Accepted {
+                touched: Areas::list(list) | Areas::STATUS | Areas::KEY_BAR,
+                effects: vec![Effect::InspectAge, Effect::ListPasses],
+            };
+            accepted.effects.extend(effect);
+
+            accepted
+                .effects
+                .extend([Effect::Polling, Effect::NoteSavedState]);
+            accepted
         }
     }
 
@@ -1442,14 +1704,24 @@ impl Model {
     /// reading a scattered selection of millions of rows takes seconds.
     pub(crate) fn select_too_many(&mut self, list: List, count: u64) -> Accepted {
         let Some(shown) = self.list_mut(list) else {
-            return Accepted::only(Change::Nothing);
+            return Accepted::default();
         };
         let older = shown.selection.asked();
         shown.set_selection(Selection::TooMany(count));
         shown.chosen_bytes = None;
-        Accepted {
-            change: Change::Selection(list),
-            then: older.map(|_| Then::Cancel(Purpose::Selection(list))),
+        {
+            let mut accepted = Accepted {
+                touched: Areas::list(list) | Areas::STATUS | Areas::KEY_BAR,
+                effects: vec![Effect::InspectAge, Effect::ListPasses],
+            };
+
+            accepted
+                .effects
+                .extend(older.map(|_| Effect::Cancel(Purpose::Selection(list))));
+            accepted
+                .effects
+                .extend([Effect::Polling, Effect::NoteSavedState]);
+            accepted
         }
     }
 
@@ -1457,11 +1729,11 @@ impl Model {
     /// folder alone also asks for its contents, which the inspector shows
     /// (DESIGN.md: Inspector pane); a search panel adds up the selection's
     /// size for its status line instead.
-    fn select(&mut self, list: List, files: Arc<[ResultItem]>) -> Option<Then> {
+    fn select(&mut self, list: List, files: Arc<[ResultItem]>) -> Option<Effect> {
         self.filter_selection(list, SelectionSource::Files(files))
     }
 
-    fn filter_selection(&mut self, list: List, source: SelectionSource) -> Option<Then> {
+    fn filter_selection(&mut self, list: List, source: SelectionSource) -> Option<Effect> {
         let generation = self.generation();
         let shown = self.list_mut(list)?;
         shown.set_selection(Selection::Filtering {
@@ -1470,7 +1742,14 @@ impl Model {
             running: false,
         });
         shown.chosen_bytes = None;
-        self.inline_filter(list).and_then(|accepted| accepted.then)
+        self.inline_filter(list).and_then(|accepted| {
+            accepted.effects.into_iter().find(|effect| {
+                matches!(
+                    effect,
+                    Effect::Fetch(_) | Effect::ReadSelectionSoon(_) | Effect::Cancel(_)
+                )
+            })
+        })
     }
 
     fn inline_filter(&mut self, list: List) -> Option<Accepted> {
@@ -1539,9 +1818,17 @@ impl Model {
                 {
                     *running = false;
                 }
-                return Accepted::only(Change::Selection(list));
+                return Accepted {
+                    touched: Areas::list(list) | Areas::STATUS | Areas::KEY_BAR,
+                    effects: vec![
+                        Effect::InspectAge,
+                        Effect::Polling,
+                        Effect::NoteSavedState,
+                        Effect::ListPasses,
+                    ],
+                };
             }
-            return Accepted::only(Change::Nothing);
+            return Accepted::default();
         }
         let Filtered {
             input,
@@ -1562,9 +1849,19 @@ impl Model {
                 positions: positions.expect("only cached input can lack rows"),
                 asked: None,
             });
-            return Accepted {
-                change: Change::Selection(list),
-                then: Some(Then::ReadSelectionSoon(list)),
+            return {
+                let mut accepted = Accepted {
+                    touched: Areas::list(list) | Areas::STATUS | Areas::KEY_BAR,
+                    effects: vec![Effect::InspectAge, Effect::ListPasses],
+                };
+
+                accepted
+                    .effects
+                    .extend(Some(Effect::ReadSelectionSoon(list)));
+                accepted
+                    .effects
+                    .extend([Effect::Polling, Effect::NoteSavedState]);
+                accepted
             };
         };
         let deselect = if files.len() == count {
@@ -1574,10 +1871,25 @@ impl Model {
         } else {
             Deselect::Taken
         };
-        let then = self.adopt_selection(list, files, chosen_bytes, sums);
-        Accepted {
-            change: Change::SelectionFiltered { list, deselect },
-            then,
+        let effect = self.adopt_selection(list, files, chosen_bytes, sums);
+        {
+            let mut accepted = Accepted {
+                touched: Areas::list(list) | Areas::STATUS | Areas::KEY_BAR,
+                effects: vec![
+                    Effect::Deselect {
+                        list,
+                        rows: deselect,
+                    },
+                    Effect::ListPasses,
+                    Effect::InspectAge,
+                ],
+            };
+            accepted.effects.extend(effect);
+
+            accepted
+                .effects
+                .extend([Effect::Polling, Effect::NoteSavedState]);
+            accepted
         }
     }
 
@@ -1614,7 +1926,7 @@ impl Model {
         files: Arc<[ResultItem]>,
         chosen_bytes: Option<u64>,
         sums: Sums,
-    ) -> Option<Then> {
+    ) -> Option<Effect> {
         let shown = self.list_mut(list)?;
         if files.is_empty() {
             shown.set_selection(Selection::None);
@@ -1648,7 +1960,7 @@ impl Model {
             contents: FolderContents::Calculating(generation),
         });
         self.search.list.selection_sums = sums;
-        Some(Then::Fetch(Fetch {
+        Some(Effect::Fetch(Fetch {
             generation,
             ask: Ask::FolderSize(search),
         }))
@@ -1705,7 +2017,7 @@ impl Model {
     ) -> Accepted {
         let Some(shown) = (self.search.list.results.shown_ask()).filter(|_| self.can_export())
         else {
-            return Accepted::only(Change::Nothing);
+            return Accepted::default();
         };
         let (search, sort) = (shown.search.clone(), shown.sort);
         let columns: Vec<EsColumn> = display_order
@@ -1725,9 +2037,12 @@ impl Model {
             rows: 0,
         };
         self.job_started(Job::Export);
-        Accepted {
-            change: Change::Export,
-            then: Some(Then::Fetch(Fetch {
+        {
+            let mut accepted = Accepted {
+                touched: Areas::STATUS | Areas::SEARCH | Areas::INSPECTOR | Areas::KEY_BAR,
+                effects: vec![Effect::InspectAge],
+            };
+            accepted.effects.extend(Some(Effect::Fetch(Fetch {
                 generation,
                 ask: Ask::Export(ExportAsk {
                     search,
@@ -1737,7 +2052,12 @@ impl Model {
                     want_created: plan.columns.contains(&EsColumn::DateCreated),
                     format: plan.result_format(),
                 }),
-            })),
+            })));
+
+            accepted
+                .effects
+                .extend([Effect::Polling, Effect::NoteSavedState]);
+            accepted
         }
     }
 
@@ -1745,12 +2065,22 @@ impl Model {
     /// C5).
     pub(crate) fn cancel_export(&mut self) -> Accepted {
         if !self.exporting() {
-            return Accepted::only(Change::Nothing);
+            return Accepted::default();
         }
         self.export = Export::Idle;
-        Accepted {
-            change: Change::Export,
-            then: Some(Then::Cancel(Purpose::Export)),
+        {
+            let mut accepted = Accepted {
+                touched: Areas::STATUS | Areas::SEARCH | Areas::INSPECTOR | Areas::KEY_BAR,
+                effects: vec![Effect::InspectAge],
+            };
+
+            accepted
+                .effects
+                .extend(Some(Effect::Cancel(Purpose::Export)));
+            accepted
+                .effects
+                .extend([Effect::Polling, Effect::NoteSavedState]);
+            accepted
         }
     }
 
@@ -1854,11 +2184,14 @@ impl Model {
             Job::Export => self.cancel_export(),
             Job::Fix => self.cancel_fix(),
             Job::Operation => match &self.operation {
-                Some(operation) if operation.can_cancel() => Accepted {
-                    change: Change::Nothing,
-                    then: Some(Then::CancelOperation(operation.id())),
-                },
-                _ => Accepted::only(Change::Nothing),
+                Some(operation) if operation.can_cancel() => {
+                    let mut accepted = Accepted::default();
+                    accepted
+                        .effects
+                        .extend(Some(Effect::CancelOperation(operation.id())));
+                    accepted
+                }
+                _ => Accepted::default(),
             },
         }
     }
@@ -1899,12 +2232,24 @@ impl Model {
     /// Services is the window's own, and starts nothing here.
     pub(crate) fn start_fix(&mut self, fix: &Fix) -> Accepted {
         let Some(work) = self.fix.start(fix) else {
-            return Accepted::only(Change::Nothing);
+            return Accepted::default();
         };
         self.job_started(Job::Fix);
-        Accepted {
-            change: Change::Fix,
-            then: Some(Then::RunFix(work)),
+        let generation = self.generation();
+        self.fix_generation = Some(generation);
+        {
+            let mut accepted = Accepted {
+                touched: Areas::STATUS | Areas::SEARCH | Areas::INSPECTOR | Areas::KEY_BAR,
+                effects: vec![Effect::PostSettings, Effect::InspectAge],
+            };
+            accepted
+                .effects
+                .extend(Some(Effect::RunFix { generation, work }));
+
+            accepted
+                .effects
+                .extend([Effect::Polling, Effect::NoteSavedState]);
+            accepted
         }
     }
 
@@ -1912,44 +2257,96 @@ impl Model {
     /// a fix they declined ends without a word in the status bar.
     pub(crate) fn answer_setup(&mut self, download: bool) -> Accepted {
         let setup = self.fix.answer(download);
-        Accepted {
-            change: Change::Fix,
-            then: setup.map(|setup| Then::RunFix(FixWork::Download(setup))),
+        let effect = setup.map(|setup| {
+            let generation = self.generation();
+            self.fix_generation = Some(generation);
+            Effect::RunFix {
+                generation,
+                work: FixWork::Download(setup),
+            }
+        });
+        {
+            let mut accepted = Accepted {
+                touched: Areas::STATUS | Areas::SEARCH | Areas::INSPECTOR | Areas::KEY_BAR,
+                effects: vec![Effect::PostSettings, Effect::InspectAge],
+            };
+
+            accepted.effects.extend(effect);
+
+            accepted
+                .effects
+                .extend([Effect::Polling, Effect::NoteSavedState]);
+            accepted
         }
     }
 
     /// The fix's thread reported `event`. Once the commands end well, the
     /// window asks the service for its status until it answers; once the
     /// downloaded setup is checked, the window starts it.
-    pub(crate) fn accept_fix(&mut self, event: FixEvent) -> Accepted {
-        if !self.fix.accept(event) {
-            return Accepted::only(Change::Nothing);
+    pub(crate) fn accept_fix(&mut self, generation: Generation, event: FixEvent) -> Accepted {
+        if !self.awaits_fix(generation) {
+            self.retired.push(event, 1);
+            return Accepted::default();
         }
-        let then = if let Some(setup) = self.fix.starting_setup() {
-            Some(Then::RunSetup(setup.to_owned()))
+        if !self.fix.accept(event) {
+            return Accepted::default();
+        }
+        let effect = if let Some(setup) = self.fix.starting_setup() {
+            Some(Effect::RunSetup(setup.to_owned()))
         } else if self.fix.confirming().is_some() {
-            Some(Then::ConfirmSetup)
+            Some(Effect::ConfirmSetup)
         } else if self.fix.found_no_setup() {
-            Some(Then::ExplainNoSetup)
+            Some(Effect::ExplainNoSetup)
         } else if self.fix.waits_for_service() {
-            self.status_needed().map(Then::Fetch)
+            self.status_needed().map(Effect::Fetch)
         } else {
             None
         };
-        Accepted {
-            change: Change::Fix,
-            then,
+        {
+            let mut accepted = Accepted {
+                touched: Areas::STATUS | Areas::SEARCH | Areas::INSPECTOR | Areas::KEY_BAR,
+                effects: vec![Effect::PostSettings, Effect::InspectAge],
+            };
+            accepted.effects.extend(effect);
+
+            accepted
+                .effects
+                .extend([Effect::Polling, Effect::NoteSavedState]);
+            accepted
         }
+    }
+
+    pub(crate) fn setup_failed(&mut self, error: String) -> Accepted {
+        let Some(generation) = self
+            .fix_generation
+            .filter(|_| self.fix.starting_setup().is_some())
+        else {
+            return Accepted::default();
+        };
+        self.accept_fix(
+            generation,
+            FixEvent::Setup(super::fixer::SetupEvent::End(
+                super::fixer::SetupResult::Failed(error),
+            )),
+        )
     }
 
     /// Stops the fix, in a step that can stop.
     pub(crate) fn cancel_fix(&mut self) -> Accepted {
         if !self.fix.cancel() {
-            return Accepted::only(Change::Nothing);
+            return Accepted::default();
         }
-        Accepted {
-            change: Change::Fix,
-            then: Some(Then::StopFix),
+        {
+            let mut accepted = Accepted {
+                touched: Areas::STATUS | Areas::SEARCH | Areas::INSPECTOR | Areas::KEY_BAR,
+                effects: vec![Effect::PostSettings, Effect::InspectAge],
+            };
+            accepted.effects.extend(Some(Effect::StopFix));
+
+            accepted
+                .effects
+                .extend([Effect::Polling, Effect::NoteSavedState]);
+            accepted
         }
     }
 
@@ -2001,78 +2398,68 @@ impl Model {
     /// Applies a reply; a reply of an older generation changes nothing.
     pub(crate) fn accept(&mut self, fetched: Fetched) -> Accepted {
         let generation = fetched.generation;
+        if !self.awaits(fetched.purpose, generation) {
+            let items = fetched.outcome.items();
+            self.retired.push(fetched, items);
+            return Accepted::default();
+        }
         match fetched.purpose {
-            Purpose::Results(list)
-                if self
-                    .list(list)
-                    .is_some_and(|shown| shown.results.awaits(generation)) =>
-            {
-                self.accept_results(list, generation, fetched.outcome)
-            }
-            Purpose::Status if self.status_asked == Some(generation) => {
-                self.accept_status(fetched.outcome)
-            }
-            Purpose::Selection(list)
-                if self
-                    .list(list)
-                    .is_some_and(|shown| shown.selection.asked() == Some(generation)) =>
-            {
-                self.accept_selection(list, fetched.outcome)
-            }
-            Purpose::Export if matches!(self.export, Export::Running { generation: g, .. } if g == generation) => {
-                self.accept_export(fetched.outcome)
-            }
-            Purpose::Program if self.program_asked == Some(generation) => {
+            Purpose::Results(list) => self.accept_results(list, generation, fetched.outcome),
+            Purpose::Status => self.accept_status(fetched.outcome),
+            Purpose::Selection(list) => self.accept_selection(list, fetched.outcome),
+            Purpose::Export => self.accept_export(fetched.outcome),
+            Purpose::Program => {
                 self.program_asked = None;
-                Accepted::only(Change::TotalCommander(match fetched.outcome {
-                    Outcome::Rows(chunk) => {
-                        let found = newest_total_commander(&chunk.rows).map(str::to_owned);
-                        let items = chunk.rows.len();
-                        self.retired.push(chunk, items);
-                        Ok(found)
-                    }
-                    Outcome::Failed(failure) => Err(failure),
-                    other => {
-                        unreachable!("a program search's reply is rows or a failure: {other:?}")
-                    }
-                }))
+                Accepted {
+                    touched: Areas::NONE,
+                    effects: vec![Effect::TotalCommander(match fetched.outcome {
+                        Outcome::Rows(chunk) => {
+                            let found = newest_total_commander(&chunk.rows).map(str::to_owned);
+                            let items = chunk.rows.len();
+                            self.retired.push(chunk, items);
+                            Ok(found)
+                        }
+                        Outcome::Failed(failure) => Err(failure),
+                        other => {
+                            unreachable!("a program search's reply is rows or a failure: {other:?}")
+                        }
+                    })],
+                }
             }
-            Purpose::IncludeCount if self.include_count_asked == Some(generation) => {
+            Purpose::IncludeCount => {
                 self.include_count_asked = None;
                 self.included_count = Some(match fetched.outcome {
                     Outcome::IncludedCount(entries) => Ok(entries),
                     Outcome::Failed(failure) => Err(failure),
                     other => unreachable!("a count's reply is a count or a failure: {other:?}"),
                 });
-                Accepted::only(Change::IncludedCount)
+                Accepted {
+                    touched: Areas::NONE,
+                    effects: vec![Effect::PostSettings],
+                }
             }
-            Purpose::SettingsSaved if self.settings_saved_asked == Some(generation) => {
+            Purpose::SettingsSaved => {
                 self.settings_saved_asked = None;
                 // A service that is not running reads the settings when it
                 // starts, so a failure needs nothing. Once applied, the
                 // drives' states change, which status shows.
-                Accepted {
-                    change: Change::Nothing,
-                    then: self.status_needed().map(Then::Fetch),
+                {
+                    let mut accepted = Accepted::default();
+                    accepted
+                        .effects
+                        .extend(self.status_needed().map(Effect::Fetch));
+                    accepted
                 }
             }
             Purpose::FolderSizes(side) => {
                 if self.panels.accept_sizes(side, generation, fetched.outcome) {
-                    Accepted::only(Change::FolderSizes(side))
+                    Accepted {
+                        touched: Areas::panel(side) | Areas::STATUS | Areas::KEY_BAR,
+                        effects: vec![Effect::PreparePanel(side), Effect::FolderSizes(side)],
+                    }
                 } else {
-                    Accepted::only(Change::Nothing)
+                    Accepted::default()
                 }
-            }
-            Purpose::Results(_)
-            | Purpose::Status
-            | Purpose::Selection(_)
-            | Purpose::Export
-            | Purpose::Program
-            | Purpose::IncludeCount
-            | Purpose::SettingsSaved => {
-                let items = fetched.outcome.items();
-                self.retired.push(fetched.outcome, items);
-                Accepted::only(Change::Nothing)
             }
         }
     }
@@ -2085,8 +2472,8 @@ impl Model {
                 let shown = self
                     .list_mut(list)
                     .expect("accept checked that the list waits");
-                let change = match shown.results.accept(generation, chunk) {
-                    RowsChange::Stale => Change::Nothing,
+                let mut accepted = match shown.results.accept(generation, chunk) {
+                    RowsChange::Stale => Accepted::default(),
                     RowsChange::NewSearch { count } => {
                         // A new search's rows are other files (DESIGN.md: T2),
                         // and the disk as it is now.
@@ -2099,13 +2486,42 @@ impl Model {
                         }
                         let waits = list == List::Search
                             && std::mem::take(&mut self.search.enter_on_answer);
-                        Change::NewSearch {
-                            list,
-                            count,
-                            enter_first: waits && count > 0,
+                        {
+                            let mut accepted = Accepted {
+                                touched: Areas::list(list) | Areas::STATUS | Areas::KEY_BAR,
+                                effects: vec![
+                                    Effect::ClearSelection(list),
+                                    Effect::SetCount { list, count },
+                                    Effect::FirstRow { list, generation },
+                                    Effect::Cancel(Purpose::Selection(list)),
+                                    Effect::ReleaseOperations,
+                                    Effect::FetchVisible(list),
+                                    Effect::FillFirstRows(list),
+                                    Effect::InspectAge,
+                                ],
+                            };
+                            if waits
+                                && count > 0
+                                && let Some(ask) = self
+                                    .list(list)
+                                    .and_then(|shown| shown.results().shown_ask())
+                                    .cloned()
+                            {
+                                accepted.effects.push(Effect::EnterFirst(ask));
+                            }
+
+                            accepted
                         }
                     }
-                    RowsChange::Rows { rows, count } => Change::Rows { list, rows, count },
+                    RowsChange::Rows { rows, count } => Accepted {
+                        touched: Areas::list(list) | Areas::STATUS | Areas::KEY_BAR,
+                        effects: vec![
+                            Effect::Rows { list, rows, count },
+                            Effect::FetchVisible(list),
+                            Effect::FillFirstRows(list),
+                            Effect::InspectAge,
+                        ],
+                    },
                 };
                 // A page's flags cover every volume in scope, and the status
                 // names which. The scope is the shown search's, so it is read
@@ -2118,12 +2534,18 @@ impl Model {
                         && coverage.sizes_or_dates_unknown().is_none();
                 let another_failed = (List::ALL.into_iter())
                     .any(|other| other != list && self.shows_recovering_failure(other));
-                let then = if unexplained || another_failed {
-                    self.status_needed().map(Then::Fetch)
+                let effect = if unexplained || another_failed {
+                    self.status_needed().map(Effect::Fetch)
                 } else {
                     None
                 };
-                Accepted { change, then }
+                accepted.effects.extend(effect);
+                if accepted.touched != Areas::NONE {
+                    accepted
+                        .effects
+                        .extend([Effect::Polling, Effect::NoteSavedState]);
+                }
+                accepted
             }
             Outcome::ResultSnapshotGone => self.snapshot_gone(list),
             Outcome::Failed(failure) => self.show_failure(list, failure),
@@ -2135,12 +2557,15 @@ impl Model {
     /// so the list searches again, as `F5` does.
     fn snapshot_gone(&mut self, list: List) -> Accepted {
         let Some(shown) = self.list_mut(list) else {
-            return Accepted::only(Change::Nothing);
+            return Accepted::default();
         };
         shown.results.forget_snapshot();
-        Accepted {
-            change: Change::Nothing,
-            then: Some(Then::SearchAgain(vec![list])),
+        {
+            let mut accepted = Accepted::default();
+            accepted
+                .effects
+                .extend(Some(Effect::SearchAgain(vec![list])));
+            accepted
         }
     }
 
@@ -2149,14 +2574,15 @@ impl Model {
     /// poll runs the search again once a failure that ends by itself has
     /// ended (DESIGN.md: T3, T4).
     fn show_failure(&mut self, list: List, failure: DaemonFailure) -> Accepted {
-        let then = self.ask_latest_release(&failure);
+        let effect = self.ask_latest_release(&failure);
         self.failure = Some(failure.clone());
         if list == List::Search {
             self.search.enter_on_answer = false;
         }
-        Accepted {
-            then,
-            ..self.show_message(list, ListMessage::Failure(failure))
+        {
+            let mut accepted = self.show_message(list, ListMessage::Failure(failure));
+            accepted.effects.extend(effect);
+            accepted
         }
     }
 
@@ -2193,9 +2619,30 @@ impl Model {
                         lists.push(list);
                     }
                 }
-                Accepted {
-                    change: Change::Status,
-                    then: (!lists.is_empty()).then_some(Then::SearchAgain(lists)),
+                {
+                    let mut accepted = Accepted {
+                        touched: Areas::STATUS
+                            | Areas::LOCATIONS
+                            | Areas::SEARCH
+                            | Areas::INSPECTOR
+                            | Areas::LEFT_PANEL
+                            | Areas::RIGHT_PANEL
+                            | Areas::KEY_BAR,
+                        effects: vec![
+                            Effect::PreparePanel(Side::Left),
+                            Effect::PreparePanel(Side::Right),
+                            Effect::ReadMemory,
+                            Effect::InspectAge,
+                        ],
+                    };
+
+                    accepted
+                        .effects
+                        .extend((!lists.is_empty()).then_some(Effect::SearchAgain(lists)));
+                    accepted
+                        .effects
+                        .extend([Effect::Polling, Effect::NoteSavedState]);
+                    accepted
                 }
             }
             Outcome::Failed(failure) => {
@@ -2214,11 +2661,30 @@ impl Model {
                         (shown.results).show_message(ListMessage::Failure(failure.clone()));
                     }
                 }
-                let then = self.ask_latest_release(&failure);
+                let effect = self.ask_latest_release(&failure);
                 self.failure = Some(failure);
-                Accepted {
-                    change: Change::Status,
-                    then,
+                {
+                    let mut accepted = Accepted {
+                        touched: Areas::STATUS
+                            | Areas::LOCATIONS
+                            | Areas::SEARCH
+                            | Areas::INSPECTOR
+                            | Areas::LEFT_PANEL
+                            | Areas::RIGHT_PANEL
+                            | Areas::KEY_BAR,
+                        effects: vec![
+                            Effect::PreparePanel(Side::Left),
+                            Effect::PreparePanel(Side::Right),
+                            Effect::ReadMemory,
+                            Effect::InspectAge,
+                        ],
+                    };
+                    accepted.effects.extend(effect);
+
+                    accepted
+                        .effects
+                        .extend([Effect::Polling, Effect::NoteSavedState]);
+                    accepted
                 }
             }
             other => unreachable!("a status request's reply is status or a failure: {other:?}"),
@@ -2260,21 +2726,37 @@ impl Model {
                 } else {
                     rows
                 };
-                let then = if reply.files.is_empty() {
+                let effect = if reply.files.is_empty() {
                     None
                 } else {
                     self.select(list, reply.files)
                 };
-                Accepted {
-                    change: Change::SelectionRead { list, rows },
-                    then,
+                {
+                    let mut accepted = Accepted {
+                        touched: Areas::list(list) | Areas::STATUS | Areas::KEY_BAR,
+                        effects: vec![
+                            Effect::Redraw { list, rows },
+                            Effect::FetchVisible(list),
+                            Effect::ListPasses,
+                            Effect::InspectAge,
+                        ],
+                    };
+                    accepted.effects.extend(effect);
+
+                    accepted
+                        .effects
+                        .extend([Effect::Polling, Effect::NoteSavedState]);
+                    accepted
                 }
             }
             Outcome::Totals(totals) if matches!(shown.selection, Selection::Folder { .. }) => {
                 if let Selection::Folder { contents, .. } = &mut shown.selection {
                     *contents = FolderContents::Counted(totals);
                 }
-                Accepted::only(Change::FolderCounted)
+                Accepted {
+                    touched: Areas::INSPECTOR,
+                    effects: vec![Effect::InspectAge],
+                }
             }
             Outcome::ResultSnapshotGone => {
                 shown.set_selection(Selection::None);
@@ -2288,7 +2770,15 @@ impl Model {
             // list's selection.
             Outcome::Failed(_) => {
                 shown.set_selection(Selection::None);
-                Accepted::only(Change::Selection(list))
+                Accepted {
+                    touched: Areas::list(list) | Areas::STATUS | Areas::KEY_BAR,
+                    effects: vec![
+                        Effect::InspectAge,
+                        Effect::Polling,
+                        Effect::NoteSavedState,
+                        Effect::ListPasses,
+                    ],
+                }
             }
             other => unreachable!(
                 "a selection request's reply is its rows, its folder's totals or a failure: \
@@ -2302,26 +2792,35 @@ impl Model {
         let Export::Running { path, rows, .. } = &mut self.export else {
             unreachable!("accept checked that an export runs")
         };
-        let failed = |path: &PathBuf, error| Change::ExportFailed {
-            path: path.clone(),
-            error,
+        let failed = |path: &PathBuf, error| Accepted {
+            touched: Areas::STATUS,
+            effects: vec![Effect::ExportFailed {
+                path: path.clone(),
+                error,
+            }],
         };
-        let change = match outcome {
+        let accepted = match outcome {
             Outcome::ExportProgress { rows: written } => {
                 *rows = written;
-                return Accepted::only(Change::Export);
+                return Accepted {
+                    touched: Areas::STATUS | Areas::SEARCH | Areas::INSPECTOR | Areas::KEY_BAR,
+                    effects: vec![Effect::InspectAge, Effect::Polling, Effect::NoteSavedState],
+                };
             }
             Outcome::Exported { rows } => {
                 let path = std::mem::take(path);
                 self.export = Export::Done { path, rows };
-                return Accepted::only(Change::Export);
+                return Accepted {
+                    touched: Areas::STATUS | Areas::SEARCH | Areas::INSPECTOR | Areas::KEY_BAR,
+                    effects: vec![Effect::InspectAge, Effect::Polling, Effect::NoteSavedState],
+                };
             }
             Outcome::ExportFailed(failure) => failed(path, ExportError::Write(failure)),
             Outcome::Failed(failure) => failed(path, ExportError::Daemon(failure)),
             other => unreachable!("an export's reply is progress, its end or a failure: {other:?}"),
         };
         self.export = Export::Idle;
-        Accepted::only(change)
+        accepted
     }
 
     /// The list's display order of [`Model::columns`], as indexes into it:
@@ -2379,6 +2878,17 @@ impl Model {
             .filter_map(|&index| self.columns.get(index))
             .map(|&column| SavedColumn { column })
             .collect();
+    }
+
+    pub(crate) fn observe_saved_state(&mut self) -> Accepted {
+        Accepted {
+            touched: Areas::NONE,
+            effects: if self.saved_state_changed() {
+                vec![Effect::SaveSoon]
+            } else {
+                Vec::new()
+            },
+        }
     }
 
     /// Records the state that `ui.json` saves and answers whether it
@@ -2767,10 +3277,24 @@ pub(crate) mod tests {
         let read = search(&mut model, "pending");
         let accepted = model.cancel_results(List::Search);
         assert_eq!(
-            accepted.then,
-            Some(Then::Cancel(Purpose::Results(List::Search)))
+            accepted,
+            Accepted {
+                touched: Areas::list(List::Search) | Areas::STATUS | Areas::KEY_BAR,
+                effects: vec![
+                    Effect::InspectAge,
+                    Effect::Cancel(Purpose::Results(List::Search)),
+                    Effect::Polling,
+                    Effect::NoteSavedState
+                ]
+            }
         );
-        assert_eq!(model.accept(rows(&read, 3)).change, Change::Nothing);
+        assert_eq!(
+            model.accept(rows(&read, 3)),
+            Accepted {
+                touched: Areas::NONE,
+                effects: vec![]
+            }
+        );
         assert_eq!(model.search_list().results().total(), 10);
         assert!(model.exporting());
     }
@@ -2841,13 +3365,7 @@ pub(crate) mod tests {
             now: "2026-03-04T12:00:00Z".parse().expect("an instant"),
             time_zone: jiff::tz::TimeZone::UTC,
         };
-        match model.start_search(List::Search, &start, ScopeCheck::Exists) {
-            Accepted {
-                change: Change::Searching(List::Search),
-                then: Some(Then::Fetch(fetch)),
-            } => fetch,
-            other => panic!("the search starts a request: {other:?}"),
-        }
+        fetch_of(model.start_search(List::Search, &start, ScopeCheck::Exists))
     }
 
     /// The reply to `fetch`: its first rows of a search with `total` matches.
@@ -2876,8 +3394,12 @@ pub(crate) mod tests {
     }
 
     fn fetch_of(accepted: Accepted) -> Fetch {
-        match accepted.then {
-            Some(Then::Fetch(fetch)) => fetch,
+        match accepted
+            .effects
+            .into_iter()
+            .find(|effect| matches!(effect, Effect::Fetch(_)))
+        {
+            Some(Effect::Fetch(fetch)) => fetch,
             other => panic!("a request starts: {other:?}"),
         }
     }
@@ -2892,19 +3414,51 @@ pub(crate) mod tests {
         let panel = fetch_of(panel_search(&mut model, r"C:\Users\me", "report"));
         assert_ne!(panel.purpose(), fetch.purpose());
         assert_eq!(
-            model.accept(rows(&fetch, 3)).change,
-            Change::NewSearch {
-                list: List::Search,
-                count: 3,
-                enter_first: false
+            model.accept(rows(&fetch, 3)),
+            Accepted {
+                touched: Areas::list(List::Search) | Areas::STATUS | Areas::KEY_BAR,
+                effects: vec![
+                    Effect::ClearSelection(List::Search),
+                    Effect::SetCount {
+                        list: List::Search,
+                        count: 3
+                    },
+                    Effect::FirstRow {
+                        list: List::Search,
+                        generation: fetch.generation
+                    },
+                    Effect::Cancel(Purpose::Selection(List::Search)),
+                    Effect::ReleaseOperations,
+                    Effect::FetchVisible(List::Search),
+                    Effect::FillFirstRows(List::Search),
+                    Effect::InspectAge,
+                    Effect::Polling,
+                    Effect::NoteSavedState
+                ]
             }
         );
         assert_eq!(
-            model.accept(rows(&panel, 2)).change,
-            Change::NewSearch {
-                list: List::Panel(Side::Left),
-                count: 2,
-                enter_first: false
+            model.accept(rows(&panel, 2)),
+            Accepted {
+                touched: Areas::list(List::Panel(Side::Left)) | Areas::STATUS | Areas::KEY_BAR,
+                effects: vec![
+                    Effect::ClearSelection(List::Panel(Side::Left)),
+                    Effect::SetCount {
+                        list: List::Panel(Side::Left),
+                        count: 2
+                    },
+                    Effect::FirstRow {
+                        list: List::Panel(Side::Left),
+                        generation: panel.generation
+                    },
+                    Effect::Cancel(Purpose::Selection(List::Panel(Side::Left))),
+                    Effect::ReleaseOperations,
+                    Effect::FetchVisible(List::Panel(Side::Left)),
+                    Effect::FillFirstRows(List::Panel(Side::Left)),
+                    Effect::InspectAge,
+                    Effect::Polling,
+                    Effect::NoteSavedState
+                ]
             }
         );
         assert_eq!(model.search_list().results().count(), 3);
@@ -3061,8 +3615,16 @@ pub(crate) mod tests {
             ..model.matching()
         };
         assert_eq!(
-            model.set_matching(case).then,
-            Some(Then::SearchAgain(vec![List::Search]))
+            model.set_matching(case),
+            Accepted {
+                touched: Areas::SEARCH | Areas::INSPECTOR | Areas::KEY_BAR,
+                effects: vec![
+                    Effect::InspectAge,
+                    Effect::SearchAgain(vec![List::Search]),
+                    Effect::Polling,
+                    Effect::NoteSavedState
+                ]
+            }
         );
         let older = search(&mut model, "repo");
         assert_eq!(
@@ -3077,11 +3639,20 @@ pub(crate) mod tests {
         );
         assert_eq!(
             model.name_search(List::Search),
-            Accepted::only(Change::Searching(List::Search))
+            Accepted {
+                touched: Areas::list(List::Search) | Areas::STATUS | Areas::KEY_BAR,
+                effects: vec![Effect::InspectAge, Effect::Polling, Effect::NoteSavedState]
+            }
         );
         assert_eq!(captions::results_status(&model, &English), "Searching…");
         let _newest = search(&mut model, "report f");
-        assert_eq!(model.accept(rows(&older, 3)).change, Change::Nothing);
+        assert_eq!(
+            model.accept(rows(&older, 3)),
+            Accepted {
+                touched: Areas::NONE,
+                effects: vec![]
+            }
+        );
         assert_eq!(model.search.list.results.count(), 10);
     }
 
@@ -3090,11 +3661,27 @@ pub(crate) mod tests {
         let mut model = showing(10);
         let fetch = search(&mut model, "repo");
         assert_eq!(
-            model.accept(rows(&fetch, 3)).change,
-            Change::NewSearch {
-                list: List::Search,
-                count: 3,
-                enter_first: false
+            model.accept(rows(&fetch, 3)),
+            Accepted {
+                touched: Areas::list(List::Search) | Areas::STATUS | Areas::KEY_BAR,
+                effects: vec![
+                    Effect::ClearSelection(List::Search),
+                    Effect::SetCount {
+                        list: List::Search,
+                        count: 3
+                    },
+                    Effect::FirstRow {
+                        list: List::Search,
+                        generation: fetch.generation
+                    },
+                    Effect::Cancel(Purpose::Selection(List::Search)),
+                    Effect::ReleaseOperations,
+                    Effect::FetchVisible(List::Search),
+                    Effect::FillFirstRows(List::Search),
+                    Effect::InspectAge,
+                    Effect::Polling,
+                    Effect::NoteSavedState
+                ]
             }
         );
         assert_eq!(captions::results_status(&model, &English), "3 results");
@@ -3107,8 +3694,21 @@ pub(crate) mod tests {
             .rows_needed(List::Search, CHUNK_ROWS..CHUNK_ROWS + 40)
             .expect("the rows are not cached");
         assert_eq!(
-            model.accept(failed(&chunk, DaemonFailure::Lost)).change,
-            Change::Message(List::Search)
+            model.accept(failed(&chunk, DaemonFailure::Lost)),
+            Accepted {
+                touched: Areas::list(List::Search) | Areas::STATUS | Areas::KEY_BAR,
+                effects: vec![
+                    Effect::ClearSelection(List::Search),
+                    Effect::SetCount {
+                        list: List::Search,
+                        count: 0
+                    },
+                    Effect::Cancel(Purpose::Selection(List::Search)),
+                    Effect::InspectAge,
+                    Effect::Polling,
+                    Effect::NoteSavedState
+                ]
+            }
         );
         assert_eq!(model.search.list.results.count(), 0);
         let strings = english();
@@ -3130,25 +3730,94 @@ pub(crate) mod tests {
         ));
         let ask = model.status_needed().expect("no status request runs");
         assert_eq!(
-            model.accept(status(&ask, VolumePhase::Live)).then,
-            Some(Then::SearchAgain(vec![List::Search]))
+            model.accept(status(&ask, VolumePhase::Live)),
+            Accepted {
+                touched: Areas::STATUS
+                    | Areas::LOCATIONS
+                    | Areas::SEARCH
+                    | Areas::INSPECTOR
+                    | Areas::LEFT_PANEL
+                    | Areas::RIGHT_PANEL
+                    | Areas::KEY_BAR,
+                effects: vec![
+                    Effect::PreparePanel(Side::Left),
+                    Effect::PreparePanel(Side::Right),
+                    Effect::ReadMemory,
+                    Effect::InspectAge,
+                    Effect::SearchAgain(vec![List::Search]),
+                    Effect::Polling,
+                    Effect::NoteSavedState
+                ]
+            }
         );
         // A search that takes longer than the poll would otherwise start
         // again on every status reply, and never finish.
         let _again = search(&mut model, "report");
         let ask = model.status_needed().expect("no status request runs");
-        assert_eq!(model.accept(status(&ask, VolumePhase::Live)).then, None);
+        assert_eq!(
+            model.accept(status(&ask, VolumePhase::Live)),
+            Accepted {
+                touched: Areas::STATUS
+                    | Areas::LOCATIONS
+                    | Areas::SEARCH
+                    | Areas::INSPECTOR
+                    | Areas::LEFT_PANEL
+                    | Areas::RIGHT_PANEL
+                    | Areas::KEY_BAR,
+                effects: vec![
+                    Effect::PreparePanel(Side::Left),
+                    Effect::PreparePanel(Side::Right),
+                    Effect::ReadMemory,
+                    Effect::InspectAge,
+                    Effect::Polling,
+                    Effect::NoteSavedState
+                ]
+            }
+        );
 
         let mut model = showing(10);
         let ask = model.status_needed().expect("no status request runs");
         assert_eq!(
-            model.accept(status(&ask, VolumePhase::Bootstrapping)).then,
-            None
+            model.accept(status(&ask, VolumePhase::Bootstrapping)),
+            Accepted {
+                touched: Areas::STATUS
+                    | Areas::LOCATIONS
+                    | Areas::SEARCH
+                    | Areas::INSPECTOR
+                    | Areas::LEFT_PANEL
+                    | Areas::RIGHT_PANEL
+                    | Areas::KEY_BAR,
+                effects: vec![
+                    Effect::PreparePanel(Side::Left),
+                    Effect::PreparePanel(Side::Right),
+                    Effect::ReadMemory,
+                    Effect::InspectAge,
+                    Effect::Polling,
+                    Effect::NoteSavedState
+                ]
+            }
         );
         let ask = model.status_needed().expect("no status request runs");
         assert_eq!(
-            model.accept(status(&ask, VolumePhase::Live)).then,
-            Some(Then::SearchAgain(vec![List::Search]))
+            model.accept(status(&ask, VolumePhase::Live)),
+            Accepted {
+                touched: Areas::STATUS
+                    | Areas::LOCATIONS
+                    | Areas::SEARCH
+                    | Areas::INSPECTOR
+                    | Areas::LEFT_PANEL
+                    | Areas::RIGHT_PANEL
+                    | Areas::KEY_BAR,
+                effects: vec![
+                    Effect::PreparePanel(Side::Left),
+                    Effect::PreparePanel(Side::Right),
+                    Effect::ReadMemory,
+                    Effect::InspectAge,
+                    Effect::SearchAgain(vec![List::Search]),
+                    Effect::Polling,
+                    Effect::NoteSavedState
+                ]
+            }
         );
         assert!(
             !model.polls_status(false),
@@ -3166,7 +3835,26 @@ pub(crate) mod tests {
 
         let ask = model.status_needed().expect("no status request runs");
         let accepted = model.accept(status(&ask, VolumePhase::Rescanning));
-        assert_eq!(accepted, Accepted::only(Change::Status));
+        assert_eq!(
+            accepted,
+            Accepted {
+                touched: Areas::STATUS
+                    | Areas::LOCATIONS
+                    | Areas::SEARCH
+                    | Areas::INSPECTOR
+                    | Areas::LEFT_PANEL
+                    | Areas::RIGHT_PANEL
+                    | Areas::KEY_BAR,
+                effects: vec![
+                    Effect::PreparePanel(Side::Left),
+                    Effect::PreparePanel(Side::Right),
+                    Effect::ReadMemory,
+                    Effect::InspectAge,
+                    Effect::Polling,
+                    Effect::NoteSavedState
+                ]
+            }
+        );
         assert_eq!(model.search.list.results.count(), 10);
         // S13.
         assert_eq!(
@@ -3227,8 +3915,12 @@ pub(crate) mod tests {
             chunk.volumes_incomplete = true;
         }
         assert!(matches!(
-            model.accept(reply).then,
-            Some(Then::Fetch(Fetch {
+            model
+                .accept(reply)
+                .effects
+                .into_iter()
+                .find(|effect| matches!(effect, Effect::Fetch(_))),
+            Some(Effect::Fetch(Fetch {
                 ask: Ask::Status,
                 ..
             }))
@@ -3245,8 +3937,11 @@ pub(crate) mod tests {
             ask: Ask::Status,
         };
         assert_eq!(
-            model.accept(status(&older, VolumePhase::Rescanning)).change,
-            Change::Nothing
+            model.accept(status(&older, VolumePhase::Rescanning)),
+            Accepted {
+                touched: Areas::NONE,
+                effects: vec![]
+            }
         );
         assert_eq!(model.status, None);
     }
@@ -3258,8 +3953,24 @@ pub(crate) mod tests {
         let mut model = showing(10);
         let ask = model.status_needed().expect("no status request runs");
         assert_eq!(
-            model.accept(failed(&ask, DaemonFailure::Lost)).change,
-            Change::Status
+            model.accept(failed(&ask, DaemonFailure::Lost)),
+            Accepted {
+                touched: Areas::STATUS
+                    | Areas::LOCATIONS
+                    | Areas::SEARCH
+                    | Areas::INSPECTOR
+                    | Areas::LEFT_PANEL
+                    | Areas::RIGHT_PANEL
+                    | Areas::KEY_BAR,
+                effects: vec![
+                    Effect::PreparePanel(Side::Left),
+                    Effect::PreparePanel(Side::Right),
+                    Effect::ReadMemory,
+                    Effect::InspectAge,
+                    Effect::Polling,
+                    Effect::NoteSavedState
+                ]
+            }
         );
         assert_eq!(model.search.list.results.count(), 10);
         assert_eq!(message(&model), None);
@@ -3269,8 +3980,21 @@ pub(crate) mod tests {
             detail: "regex parse error".into(),
         };
         assert_eq!(
-            model.accept(failed(&fetch, refused)).change,
-            Change::Message(List::Search)
+            model.accept(failed(&fetch, refused)),
+            Accepted {
+                touched: Areas::list(List::Search) | Areas::STATUS | Areas::KEY_BAR,
+                effects: vec![
+                    Effect::ClearSelection(List::Search),
+                    Effect::SetCount {
+                        list: List::Search,
+                        count: 0
+                    },
+                    Effect::Cancel(Purpose::Selection(List::Search)),
+                    Effect::InspectAge,
+                    Effect::Polling,
+                    Effect::NoteSavedState
+                ]
+            }
         );
         assert_eq!(model.search.list.results.count(), 0);
     }
@@ -3287,7 +4011,26 @@ pub(crate) mod tests {
         ));
         let ask = model.status_needed().expect("no status request runs");
         let disabled = DaemonFailure::NotRunning(NotRunning::Disabled);
-        assert_eq!(model.accept(failed(&ask, disabled)).change, Change::Status);
+        assert_eq!(
+            model.accept(failed(&ask, disabled)),
+            Accepted {
+                touched: Areas::STATUS
+                    | Areas::LOCATIONS
+                    | Areas::SEARCH
+                    | Areas::INSPECTOR
+                    | Areas::LEFT_PANEL
+                    | Areas::RIGHT_PANEL
+                    | Areas::KEY_BAR,
+                effects: vec![
+                    Effect::PreparePanel(Side::Left),
+                    Effect::PreparePanel(Side::Right),
+                    Effect::ReadMemory,
+                    Effect::InspectAge,
+                    Effect::Polling,
+                    Effect::NoteSavedState
+                ]
+            }
+        );
         let strings = english();
         assert_eq!(
             message(&model),
@@ -3309,7 +4052,20 @@ pub(crate) mod tests {
         };
         assert_eq!(
             model.start_search(List::Search, &start, ScopeCheck::Exists),
-            Accepted::only(Change::Message(List::Search))
+            Accepted {
+                touched: Areas::list(List::Search) | Areas::STATUS | Areas::KEY_BAR,
+                effects: vec![
+                    Effect::ClearSelection(List::Search),
+                    Effect::SetCount {
+                        list: List::Search,
+                        count: 0
+                    },
+                    Effect::Cancel(Purpose::Selection(List::Search)),
+                    Effect::InspectAge,
+                    Effect::Polling,
+                    Effect::NoteSavedState
+                ]
+            }
         );
         let strings = english();
         assert_eq!(
@@ -3331,7 +4087,20 @@ pub(crate) mod tests {
         };
         assert_eq!(
             model.start_search(List::Search, &start, ScopeCheck::Missing),
-            Accepted::only(Change::Message(List::Search))
+            Accepted {
+                touched: Areas::list(List::Search) | Areas::STATUS | Areas::KEY_BAR,
+                effects: vec![
+                    Effect::ClearSelection(List::Search),
+                    Effect::SetCount {
+                        list: List::Search,
+                        count: 0
+                    },
+                    Effect::Cancel(Purpose::Selection(List::Search)),
+                    Effect::InspectAge,
+                    Effect::Polling,
+                    Effect::NoteSavedState
+                ]
+            }
         );
         let strings = english();
         assert_eq!(
@@ -3396,7 +4165,18 @@ pub(crate) mod tests {
     fn a_selection_of_cached_rows_is_built_from_the_cache() {
         let mut model = showing(50_000);
         let accepted = model.set_selection(List::Search, vec![3..5, 9..10].into());
-        assert_eq!(accepted, Accepted::only(Change::Selection(List::Search)));
+        assert_eq!(
+            accepted,
+            Accepted {
+                touched: Areas::list(List::Search) | Areas::STATUS | Areas::KEY_BAR,
+                effects: vec![
+                    Effect::InspectAge,
+                    Effect::ListPasses,
+                    Effect::Polling,
+                    Effect::NoteSavedState
+                ]
+            }
+        );
         assert_eq!(paths(&model), [r"C:\row3", r"C:\row4", r"C:\row9"]);
         assert_eq!(model.read_selection(List::Search), None);
     }
@@ -3409,8 +4189,11 @@ pub(crate) mod tests {
         assert!(model.search.list.selection.files().is_none());
         model.set_selection(List::Search, vec![3..4].into());
         assert_eq!(
-            model.accept_filtered(List::Search, old).change,
-            Change::Nothing
+            model.accept_filtered(List::Search, old),
+            Accepted {
+                touched: Areas::NONE,
+                effects: vec![]
+            }
         );
         assert_eq!(paths(&model), [r"C:\row3"]);
 
@@ -3531,7 +4314,19 @@ pub(crate) mod tests {
     fn a_selected_row_outside_the_cache_is_read_with_the_cached_rows_beside_it() {
         let mut model = showing(50_000);
         let accepted = model.set_selection(List::Search, vec![0..1, 40_000..40_001].into());
-        assert_eq!(accepted.then, Some(Then::ReadSelectionSoon(List::Search)));
+        assert_eq!(
+            accepted,
+            Accepted {
+                touched: Areas::list(List::Search) | Areas::STATUS | Areas::KEY_BAR,
+                effects: vec![
+                    Effect::InspectAge,
+                    Effect::ListPasses,
+                    Effect::ReadSelectionSoon(List::Search),
+                    Effect::Polling,
+                    Effect::NoteSavedState
+                ]
+            }
+        );
         assert_eq!(
             captions::selection_status(&model, &English),
             "Reading the selection…"
@@ -3547,10 +4342,20 @@ pub(crate) mod tests {
         assert_eq!(ask.cached, [0..CHUNK_ROWS]);
 
         assert_eq!(
-            model.accept(selection_reply(&fetch, "D:")).change,
-            Change::SelectionRead {
-                list: List::Search,
-                rows: 0..CHUNK_ROWS
+            model.accept(selection_reply(&fetch, "D:")),
+            Accepted {
+                touched: Areas::list(List::Search) | Areas::STATUS | Areas::KEY_BAR,
+                effects: vec![
+                    Effect::Redraw {
+                        list: List::Search,
+                        rows: 0..CHUNK_ROWS
+                    },
+                    Effect::FetchVisible(List::Search),
+                    Effect::ListPasses,
+                    Effect::InspectAge,
+                    Effect::Polling,
+                    Effect::NoteSavedState
+                ]
             }
         );
         assert_eq!(paths(&model), [r"D:\row0", r"D:\row40000"]);
@@ -3565,7 +4370,18 @@ pub(crate) mod tests {
     fn a_selection_past_the_limit_is_not_read() {
         let mut model = showing(200_000);
         let accepted = model.set_selection(List::Search, vec![0..150_000].into());
-        assert_eq!(accepted, Accepted::only(Change::Selection(List::Search)));
+        assert_eq!(
+            accepted,
+            Accepted {
+                touched: Areas::list(List::Search) | Areas::STATUS | Areas::KEY_BAR,
+                effects: vec![
+                    Effect::InspectAge,
+                    Effect::ListPasses,
+                    Effect::Polling,
+                    Effect::NoteSavedState
+                ]
+            }
+        );
         assert_eq!(model.read_selection(List::Search), None);
         assert_eq!(model.search_list().selection().files(), None);
         assert_eq!(
@@ -3597,10 +4413,20 @@ pub(crate) mod tests {
             Arc::make_mut(&mut rows.files)[1] = ResultItem::gone();
         }
         assert_eq!(
-            model.accept(reply).change,
-            Change::SelectionRead {
-                list: List::Search,
-                rows: 0..200_000
+            model.accept(reply),
+            Accepted {
+                touched: Areas::list(List::Search) | Areas::STATUS | Areas::KEY_BAR,
+                effects: vec![
+                    Effect::Redraw {
+                        list: List::Search,
+                        rows: 0..200_000
+                    },
+                    Effect::FetchVisible(List::Search),
+                    Effect::ListPasses,
+                    Effect::InspectAge,
+                    Effect::Polling,
+                    Effect::NoteSavedState
+                ]
             }
         );
         assert_eq!(paths(&model), [r"D:\row150000"]);
@@ -3616,8 +4442,11 @@ pub(crate) mod tests {
             outcome: Outcome::ResultSnapshotGone,
         };
         assert_eq!(
-            model.accept(gone).then,
-            Some(Then::SearchAgain(vec![List::Search]))
+            model.accept(gone),
+            Accepted {
+                touched: Areas::NONE,
+                effects: vec![Effect::SearchAgain(vec![List::Search])]
+            }
         );
     }
 
@@ -3632,14 +4461,24 @@ pub(crate) mod tests {
             .expect("the selection is read");
         // The window ends the older read when it schedules the new one.
         assert_eq!(
-            model
-                .set_selection(List::Search, vec![40_000..40_002].into())
-                .then,
-            Some(Then::ReadSelectionSoon(List::Search))
+            model.set_selection(List::Search, vec![40_000..40_002].into()),
+            Accepted {
+                touched: Areas::list(List::Search) | Areas::STATUS | Areas::KEY_BAR,
+                effects: vec![
+                    Effect::InspectAge,
+                    Effect::ListPasses,
+                    Effect::ReadSelectionSoon(List::Search),
+                    Effect::Polling,
+                    Effect::NoteSavedState
+                ]
+            }
         );
         assert_eq!(
-            model.accept(selection_reply(&older, "D:")).change,
-            Change::Nothing
+            model.accept(selection_reply(&older, "D:")),
+            Accepted {
+                touched: Areas::NONE,
+                effects: vec![]
+            }
         );
         assert_eq!(paths(&model), Vec::<&str>::new());
         let newer = model
@@ -3651,8 +4490,12 @@ pub(crate) mod tests {
     /// The request for one selected folder's contents, which `accepted`
     /// starts.
     fn folder_size(accepted: Accepted) -> Fetch {
-        match accepted.then {
-            Some(Then::Fetch(
+        match accepted
+            .effects
+            .into_iter()
+            .find(|effect| matches!(effect, Effect::Fetch(_)))
+        {
+            Some(Effect::Fetch(
                 fetch @ Fetch {
                     ask: Ask::FolderSize(_),
                     ..
@@ -3700,18 +4543,36 @@ pub(crate) mod tests {
             unreachable!("folder_size returns a folder size request")
         };
         assert_eq!(search.scope.as_deref(), Some(r"C:\row1"));
-        assert_eq!(model.accept(totals(&first, 5)).change, Change::Nothing);
+        assert_eq!(
+            model.accept(totals(&first, 5)),
+            Accepted {
+                touched: Areas::NONE,
+                effects: vec![]
+            }
+        );
         assert_eq!(size(&model), "Calculating…");
         assert_eq!(
             model.accept(totals(&second, 7)),
-            Accepted::only(Change::FolderCounted)
+            Accepted {
+                touched: Areas::INSPECTOR,
+                effects: vec![Effect::InspectAge]
+            }
         );
-        assert_eq!(size(&model), "2.00 KB (2,048 bytes) in 7 items");
+        assert_eq!(size(&model), "2 KB (2,048 bytes) in 7 items");
 
         let _third = folder_size(model.set_selection(List::Search, vec![0..1].into()));
         assert_eq!(
-            model.set_selection(List::Search, vec![2..3].into()).then,
-            Some(Then::Cancel(Purpose::Selection(List::Search)))
+            model.set_selection(List::Search, vec![2..3].into()),
+            Accepted {
+                touched: Areas::list(List::Search) | Areas::STATUS | Areas::KEY_BAR,
+                effects: vec![
+                    Effect::InspectAge,
+                    Effect::ListPasses,
+                    Effect::Cancel(Purpose::Selection(List::Search)),
+                    Effect::Polling,
+                    Effect::NoteSavedState
+                ]
+            }
         );
         assert_eq!(
             captions::InspectorCaptions::new(&model, &English).heading,
@@ -3731,8 +4592,21 @@ pub(crate) mod tests {
             .read_selection(List::Search)
             .expect("the selection is read");
         assert_eq!(
-            model.accept(failed(&fetch, DaemonFailure::Lost)).change,
-            Change::Message(List::Search)
+            model.accept(failed(&fetch, DaemonFailure::Lost)),
+            Accepted {
+                touched: Areas::list(List::Search) | Areas::STATUS | Areas::KEY_BAR,
+                effects: vec![
+                    Effect::ClearSelection(List::Search),
+                    Effect::SetCount {
+                        list: List::Search,
+                        count: 0
+                    },
+                    Effect::Cancel(Purpose::Selection(List::Search)),
+                    Effect::InspectAge,
+                    Effect::Polling,
+                    Effect::NoteSavedState
+                ]
+            }
         );
         assert_eq!(model.search.list.selection, Selection::None);
         let strings = english();
@@ -3750,11 +4624,27 @@ pub(crate) mod tests {
         let newer = search(&mut model, "repo");
         model.accept(failed(&read, DaemonFailure::Lost));
         assert_eq!(
-            model.accept(rows(&newer, 3)).change,
-            Change::NewSearch {
-                list: List::Search,
-                count: 3,
-                enter_first: false
+            model.accept(rows(&newer, 3)),
+            Accepted {
+                touched: Areas::list(List::Search) | Areas::STATUS | Areas::KEY_BAR,
+                effects: vec![
+                    Effect::ClearSelection(List::Search),
+                    Effect::SetCount {
+                        list: List::Search,
+                        count: 3
+                    },
+                    Effect::FirstRow {
+                        list: List::Search,
+                        generation: newer.generation
+                    },
+                    Effect::Cancel(Purpose::Selection(List::Search)),
+                    Effect::ReleaseOperations,
+                    Effect::FetchVisible(List::Search),
+                    Effect::FillFirstRows(List::Search),
+                    Effect::InspectAge,
+                    Effect::Polling,
+                    Effect::NoteSavedState
+                ]
             },
             "a search in flight shows its own reply"
         );
@@ -3809,13 +4699,7 @@ pub(crate) mod tests {
     /// Starts an export of the shown search as CSV; returns its fetch.
     fn export(model: &mut Model) -> Fetch {
         let order = model.column_order();
-        match model.start_export(r"D:\results.csv".into(), ExportFormat::Csv, &order) {
-            Accepted {
-                change: Change::Export,
-                then: Some(Then::Fetch(fetch)),
-            } => fetch,
-            other => panic!("the export starts a request: {other:?}"),
-        }
+        fetch_of(model.start_export(r"D:\results.csv".into(), ExportFormat::Csv, &order))
     }
 
     fn export_reply(fetch: &Fetch, outcome: Outcome) -> Fetched {
@@ -3858,7 +4742,13 @@ pub(crate) mod tests {
             "Exporting… 4 rows"
         );
         let ended = model.accept(export_reply(&fetch, Outcome::Exported { rows: 10 }));
-        assert_eq!(ended, Accepted::only(Change::Export));
+        assert_eq!(
+            ended,
+            Accepted {
+                touched: Areas::STATUS | Areas::SEARCH | Areas::INSPECTOR | Areas::KEY_BAR,
+                effects: vec![Effect::InspectAge, Effect::Polling, Effect::NoteSavedState]
+            }
+        );
         assert_eq!(
             captions::export_status(&model, &English),
             "Exported 10 rows to results.csv"
@@ -3879,7 +4769,26 @@ pub(crate) mod tests {
         assert!(model.polls_status(false), "the page follows the service");
         let ask = model.status_needed().expect("no status request runs");
         let stopped = DaemonFailure::NotRunning(NotRunning::Stopped);
-        assert_eq!(model.accept(failed(&ask, stopped)).change, Change::Status);
+        assert_eq!(
+            model.accept(failed(&ask, stopped)),
+            Accepted {
+                touched: Areas::STATUS
+                    | Areas::LOCATIONS
+                    | Areas::SEARCH
+                    | Areas::INSPECTOR
+                    | Areas::LEFT_PANEL
+                    | Areas::RIGHT_PANEL
+                    | Areas::KEY_BAR,
+                effects: vec![
+                    Effect::PreparePanel(Side::Left),
+                    Effect::PreparePanel(Side::Right),
+                    Effect::ReadMemory,
+                    Effect::InspectAge,
+                    Effect::Polling,
+                    Effect::NoteSavedState
+                ]
+            }
+        );
         assert_eq!(
             captions::IndexCaptions::new(&model, &English, &|_| None).service,
             english().text("failure.stopped")
@@ -3899,6 +4808,35 @@ pub(crate) mod tests {
         assert!(!model.polls_status(false));
     }
 
+    #[test]
+    fn a_cancelled_fix_reply_cannot_advance_the_next_fix() {
+        use crate::core::fixer::{FixState, SetupEvent, SetupFix, SetupResult, SetupStep};
+
+        let mut model = model();
+        model.start_fix(&Fix::Update);
+        model.cancel_fix();
+        model.start_fix(&Fix::Update);
+        let accepted = model.accept_fix(
+            Generation(1),
+            FixEvent::Setup(SetupEvent::End(SetupResult::NoSetup)),
+        );
+        assert_eq!(
+            accepted,
+            Accepted {
+                touched: Areas::NONE,
+                effects: vec![]
+            }
+        );
+        assert_eq!(
+            model.fix(),
+            &Fixer::Setup {
+                fix: SetupFix::Update,
+                state: FixState::Running(SetupStep::FindingRelease),
+            }
+        );
+        assert!(model.awaits_fix(Generation(2)));
+    }
+
     /// A service that answers again before its commands end stops the
     /// poll, so a fix that waited for the poll would end as "did not
     /// answer" with the service running (DESIGN.md: Service fixes).
@@ -3907,19 +4845,27 @@ pub(crate) mod tests {
         let mut model = showing(10);
         let started = model.start_fix(&Fix::Repair(Repair::StartService));
         assert_eq!(
-            started.then,
-            Some(Then::RunFix(FixWork::Commands(vec![
-                "net start gozler".into()
-            ])))
+            started,
+            Accepted {
+                touched: Areas::STATUS | Areas::SEARCH | Areas::INSPECTOR | Areas::KEY_BAR,
+                effects: vec![
+                    Effect::PostSettings,
+                    Effect::InspectAge,
+                    Effect::RunFix {
+                        generation: Generation(2),
+                        work: FixWork::Commands(vec!["net start gozler".into()])
+                    },
+                    Effect::Polling,
+                    Effect::NoteSavedState
+                ]
+            }
         );
         let other = ListButton::Fix(Fix::Repair(Repair::TurnOnService));
         assert!(!model.list_button_enabled(&other), "one fix runs at a time");
-        model.accept_fix(FixEvent::Commands(CommandEvent::Allowed));
+        model.accept_fix(Generation(2), FixEvent::Commands(CommandEvent::Allowed));
         assert!(!model.polls_status(false));
-        let ended = model.accept_fix(FixEvent::Commands(CommandEvent::Succeeded));
-        let Some(Then::Fetch(ask)) = ended.then else {
-            panic!("the fix asks the service: {ended:?}");
-        };
+        let ended = model.accept_fix(Generation(2), FixEvent::Commands(CommandEvent::Succeeded));
+        let ask = fetch_of(ended);
         assert!(
             model.polls_status(false),
             "the poll runs until the service answers"
@@ -3942,29 +4888,65 @@ pub(crate) mod tests {
             show_all_when_empty: false,
             ..Choices::default()
         });
-        assert_eq!(accepted.then, Some(Then::SearchAgain(vec![List::Search])));
+        assert_eq!(
+            accepted,
+            Accepted {
+                touched: Areas::TITLE
+                    | Areas::SEARCH
+                    | Areas::INSPECTOR
+                    | Areas::STATUS
+                    | Areas::LEFT_PANEL
+                    | Areas::RIGHT_PANEL
+                    | Areas::KEY_BAR,
+                effects: vec![
+                    Effect::Menu,
+                    Effect::Tray,
+                    Effect::InspectAge,
+                    Effect::SearchAgain(vec![List::Search]),
+                    Effect::Polling,
+                    Effect::NoteSavedState
+                ]
+            }
+        );
         let start = QueryStart {
             now: jiff::Timestamp::UNIX_EPOCH,
             time_zone: jiff::tz::TimeZone::UTC,
         };
         assert_eq!(
             model.start_search(List::Search, &start, ScopeCheck::Exists),
-            Accepted::only(Change::Message(List::Search))
+            Accepted {
+                touched: Areas::list(List::Search) | Areas::STATUS | Areas::KEY_BAR,
+                effects: vec![
+                    Effect::ClearSelection(List::Search),
+                    Effect::SetCount {
+                        list: List::Search,
+                        count: 0
+                    },
+                    Effect::Cancel(Purpose::Selection(List::Search)),
+                    Effect::InspectAge,
+                    Effect::Polling,
+                    Effect::NoteSavedState
+                ]
+            }
         );
         assert_eq!(
             message(&model),
             Some(("Type to search.".to_owned(), vec![]))
         );
         assert_eq!(
-            model.set_typed_search(List::Search, "report".into()).then,
-            None
+            model.set_typed_search(List::Search, "report".into()),
+            Accepted {
+                touched: Areas::TITLE | Areas::SEARCH,
+                effects: vec![]
+            }
         );
-        assert!(matches!(
+        assert!(
             model
                 .start_search(List::Search, &start, ScopeCheck::Exists)
-                .then,
-            Some(Then::Fetch(_))
-        ));
+                .effects
+                .into_iter()
+                .any(|effect| matches!(effect, Effect::Fetch(_)))
+        );
     }
 
     /// The Use Total Commander link's reply goes to the dialog alone; a
@@ -3980,25 +4962,46 @@ pub(crate) mod tests {
             Arc::make_mut(&mut chunk.rows)[0].path = r"C:\TC\TOTALCMD64.EXE".into();
         }
         assert_eq!(
-            model.accept(reply.clone()).change,
-            Change::TotalCommander(Ok(Some(r"C:\TC\TOTALCMD64.EXE".into())))
+            model.accept(reply.clone()),
+            Accepted {
+                touched: Areas::NONE,
+                effects: vec![Effect::TotalCommander(Ok(Some(
+                    r"C:\TC\TOTALCMD64.EXE".into()
+                )))]
+            }
         );
-        assert_eq!(model.accept(reply).change, Change::Nothing, "answered once");
+        assert_eq!(
+            model.accept(reply),
+            Accepted {
+                touched: Areas::NONE,
+                effects: vec![]
+            },
+            "answered once"
+        );
         let fetch = model.find_total_commander();
         assert_eq!(
-            model.accept(failed(&fetch, DaemonFailure::Lost)).change,
-            Change::TotalCommander(Err(DaemonFailure::Lost))
+            model.accept(failed(&fetch, DaemonFailure::Lost)),
+            Accepted {
+                touched: Areas::NONE,
+                effects: vec![Effect::TotalCommander(Err(DaemonFailure::Lost))]
+            }
         );
         assert!(!model.polls_status(false));
         assert_eq!(model.search.list.results.count(), 10);
         let fetch = model.find_total_commander();
         assert_eq!(
-            model.forget_total_commander().then,
-            Some(Then::Cancel(Purpose::Program))
+            model.forget_total_commander(),
+            Accepted {
+                touched: Areas::NONE,
+                effects: vec![Effect::Cancel(Purpose::Program)]
+            }
         );
         assert_eq!(
-            model.accept(failed(&fetch, DaemonFailure::Lost)).change,
-            Change::Nothing
+            model.accept(failed(&fetch, DaemonFailure::Lost)),
+            Accepted {
+                touched: Areas::NONE,
+                effects: vec![]
+            }
         );
     }
 
@@ -4014,16 +5017,37 @@ pub(crate) mod tests {
         };
         let first = model.count_included(IndexSettings::default());
         assert_eq!(
-            model.forget_included_count().then,
-            Some(Then::Cancel(Purpose::IncludeCount))
+            model.forget_included_count(),
+            Accepted {
+                touched: Areas::NONE,
+                effects: vec![Effect::Cancel(Purpose::IncludeCount)]
+            }
         );
-        assert_eq!(model.accept(counted(&first)).change, Change::Nothing);
+        assert_eq!(
+            model.accept(counted(&first)),
+            Accepted {
+                touched: Areas::NONE,
+                effects: vec![]
+            }
+        );
         assert_eq!(model.included_count(), None);
         let second = model.count_included(IndexSettings::default());
-        assert_eq!(model.accept(counted(&second)).change, Change::IncludedCount);
+        assert_eq!(
+            model.accept(counted(&second)),
+            Accepted {
+                touched: Areas::NONE,
+                effects: vec![Effect::PostSettings]
+            }
+        );
         assert_eq!(model.included_count(), Some(&Ok(7)));
         // Closing Settings forgets it, so the next session starts empty.
-        assert_eq!(model.forget_included_count().then, None);
+        assert_eq!(
+            model.forget_included_count(),
+            Accepted {
+                touched: Areas::NONE,
+                effects: vec![]
+            }
+        );
         assert_eq!(model.included_count(), None);
     }
 
@@ -4092,10 +5116,13 @@ pub(crate) mod tests {
         };
         assert_eq!(
             model.accept(export_reply(&fetch, Outcome::ExportFailed(denied))),
-            Accepted::only(Change::ExportFailed {
-                path: r"D:\results.csv".into(),
-                error: ExportError::Write(denied),
-            })
+            Accepted {
+                touched: Areas::STATUS,
+                effects: vec![Effect::ExportFailed {
+                    path: r"D:\results.csv".into(),
+                    error: ExportError::Write(denied)
+                }]
+            }
         );
         assert_eq!(captions::export_status(&model, &English), "");
         assert!(model.can_export());

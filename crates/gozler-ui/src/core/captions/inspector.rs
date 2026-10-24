@@ -222,9 +222,8 @@ fn several(strings: &Strings, numbers: &dyn Numbers, sums: Sums) -> InspectorCap
     }
 }
 
-/// A size as the inspector shows it, with its exact bytes, as File
-/// Explorer's Properties does: "1.20 KB (1,234 bytes)", or "16 bytes" once
-/// when the two read the same.
+/// The inspector includes exact bytes after the compact size, as
+/// "1 KB (1,234 bytes)", or only once when both read "16 bytes".
 fn exact_size(strings: &Strings, numbers: &dyn Numbers, bytes: u64) -> String {
     let size = text::bytes(strings, numbers, bytes);
     let exact = strings.count("size.bytes", bytes, numbers, &[]);

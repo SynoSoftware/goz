@@ -836,6 +836,8 @@ unsafe extern "system" fn procedure<W: WindowProc>(
     wparam: WPARAM,
     lparam: LPARAM,
 ) -> LRESULT {
+    // SAFETY: these are the original parameters of this native message.
+    let _context = unsafe { super::watchdog::enter(msg, wparam, lparam) };
     if msg == WM_NCCREATE {
         // SAFETY: WM_NCCREATE's lparam is the CREATESTRUCTW of the
         // CreateWindowExW call, whose lpCreateParams is the Rc::into_raw

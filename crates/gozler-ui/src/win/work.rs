@@ -18,6 +18,8 @@ use windows::Win32::System::IO::CancelSynchronousIo;
 
 mod shell;
 
+pub(crate) mod watchdog;
+
 /// Constructed only inside a worker; neither UI code nor an inline CPU pass
 /// can acquire the capability to call a marked blocking function.
 pub(crate) struct OffThread(PhantomData<Rc<()>>);

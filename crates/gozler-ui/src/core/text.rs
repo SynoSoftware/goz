@@ -404,11 +404,9 @@ pub(crate) fn parse_catalogue(text: &str) -> Result<Vec<(String, String)>, serde
     Ok(entries)
 }
 
-/// A size as the selection and the inspector show it: bytes below 1 KB,
-/// then three significant digits in KB, MB, GB or TB, as File Explorer's
-/// Properties does. The further digits are dropped, not rounded, so 1,340
-/// bytes show as 1.30 KB, and 1,000 of a unit shows in the next one, so
-/// 1,000 KB shows as 0.97 MB.
+/// Compact sizes use whole bytes and KB, then three significant digits from
+/// MB upward. Extra digits are dropped; 1,000 of a unit moves to the next,
+/// so 1,000 KB shows as 0.97 MB.
 pub(crate) fn bytes(strings: &Strings, numbers: &dyn Numbers, n: u64) -> String {
     if n < 1024 {
         return strings.count("size.bytes", n, numbers, &[]);
@@ -422,9 +420,10 @@ pub(crate) fn bytes(strings: &Strings, numbers: &dyn Numbers, n: u64) -> String 
         unit_bytes *= 1024;
         unit += 1;
     }
-    let digits: u8 = match n / unit_bytes {
-        0..=9 => 2,
-        10..=99 => 1,
+    let digits: u8 = match (unit, n / unit_bytes) {
+        (0, _) => 0,
+        (_, 0..=9) => 2,
+        (_, 10..=99) => 1,
         _ => 0,
     };
     let scale = 10u128.pow(u32::from(digits));
@@ -743,13 +742,12 @@ pub(crate) mod tests {
     /// Four significant digits, such as "1,000 KB" or "10.00 MB", read
     /// wrongly and are wider than the status bar part measured for a size.
     #[test]
-    fn a_size_keeps_three_significant_digits() {
+    fn compact_sizes_limit_precision() {
         let strings = english();
         let shown = |n| bytes(&strings, &English, n);
         let kb = |value| strings.format("size.kb", &[value]);
-        // 1.3086 KB and 22.955 KB, whose last digits File Explorer drops.
-        assert_eq!(shown(1_340), kb("1.30"));
-        assert_eq!(shown(23_506), kb("22.9"));
+        assert_eq!(shown(1_340), kb("1"));
+        assert_eq!(shown(23_506), kb("22"));
         // 1,000 KB moves to the next unit.
         assert_eq!(shown(1_024_000), strings.format("size.mb", &["0.97"]));
     }

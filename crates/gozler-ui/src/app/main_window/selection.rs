@@ -123,8 +123,8 @@ impl MainWindow {
 
     fn read_target_selection(&self, hwnd: Hwnd, list: List) -> bool {
         match list {
-            List::Search => self.read_list_selection(hwnd),
-            List::Panel(side) => self.read_selection(side, true),
+            List::Search => self.controls().search.read_list_selection(self, hwnd),
+            List::Panel(side) => self.controls().panels.read_selection(self, side, true),
         }
     }
 
@@ -193,9 +193,10 @@ impl MainWindow {
                     SelectionAction::SearchMenu(point, context) => {
                         self.row_menu_ready(hwnd, point, context)
                     }
-                    SelectionAction::PanelMenu(side, point, context) => {
-                        self.panel_menu_ready(hwnd, side, point, context)
-                    }
+                    SelectionAction::PanelMenu(side, point, context) => self
+                        .controls()
+                        .panels
+                        .panel_menu_ready(self, hwnd, side, point, context),
                 }
             }
             if self.shutdown.borrow().is_some() {
@@ -269,14 +270,14 @@ impl MainWindow {
     pub(super) fn gate_changed_selections(&self) {
         let mut model = self.model.borrow_mut();
         for side in Side::BOTH {
-            if self.panel_changed[side.index()].get() == panels::ListChanged::Selection {
+            if self.panel(side).changed.get() == panels::ListChanged::Selection {
                 model.panels_mut().native_selection_pending(side, true);
             }
         }
     }
 
     pub(super) fn accept_told_selections(&self, hwnd: Hwnd) {
-        let answers = self.created().work.borrow_mut().take_told();
+        let answers = self.created().work.borrow_mut().lists.take_told();
         for (list, answer) in answers {
             self.native_selection(list)
                 .borrow_mut()
@@ -301,16 +302,16 @@ impl MainWindow {
             native.capture.seed(count, selected)
         };
         self.created().work.borrow_mut().retire(retired);
-        self.created().work.borrow_mut().tell(list, input);
+        self.created().work.borrow_mut().lists.tell(list, input);
         self.retire_native_selection(list);
         if let List::Panel(side) = list {
             self.model
                 .borrow_mut()
                 .panels_mut()
                 .native_selection_pending(side, false);
-            self.panel_changed[side.index()].set(panels::ListChanged::Nothing);
+            self.panel(side).changed.set(panels::ListChanged::Nothing);
         } else {
-            self.selection_pending.set(false);
+            self.controls().search.selection_pending.set(false);
         }
         self.list_control(list).hwnd().set_enabled(true);
     }
@@ -346,7 +347,7 @@ impl MainWindow {
             }
             let input = self.native_selection(list).borrow_mut().capture.take(count);
             if let Some(input) = input {
-                self.created().work.borrow_mut().tell(list, input);
+                self.created().work.borrow_mut().lists.tell(list, input);
                 self.accept_told_selections(hwnd);
                 continue;
             }
@@ -387,7 +388,7 @@ impl MainWindow {
                         .borrow_mut()
                         .capture
                         .known(count, RowSelection::new(positions, expected));
-                    self.created().work.borrow_mut().tell(list, input);
+                    self.created().work.borrow_mut().lists.tell(list, input);
                     self.accept_told_selections(control.hwnd().parent());
                 }
                 return;
@@ -426,7 +427,7 @@ impl MainWindow {
                     .capture
                     .read(key, read.chunks, read.items);
             if let Some(input) = input {
-                self.created().work.borrow_mut().tell(list, input);
+                self.created().work.borrow_mut().lists.tell(list, input);
                 self.accept_told_selections(control.hwnd().parent());
             }
         } else if !finished && self.native_key(list) == key {
@@ -574,9 +575,9 @@ impl MainWindow {
                     control.hwnd().set_enabled(true);
                 }
                 match list {
-                    List::Search => self.selection_pending.set(true),
+                    List::Search => self.controls().search.selection_pending.set(true),
                     List::Panel(side) => {
-                        self.panel_changed[side.index()].set(panels::ListChanged::Selection)
+                        self.panel(side).changed.set(panels::ListChanged::Selection)
                     }
                 }
             }
@@ -739,7 +740,7 @@ impl MainWindow {
             .borrow_mut()
             .panels_mut()
             .set_focused(side, focused);
-        self.panel_changed[side.index()].set(panels::ListChanged::Nothing);
+        self.panel(side).changed.set(panels::ListChanged::Nothing);
         let count = control.count();
         let input = {
             let mut native = self.native_selection(list).borrow_mut();
@@ -750,7 +751,7 @@ impl MainWindow {
             .borrow_mut()
             .panels_mut()
             .native_selection_pending(side, false);
-        self.created().work.borrow_mut().tell(list, input);
+        self.created().work.borrow_mut().lists.tell(list, input);
         self.retire_native_selection(list);
         if !self.selection_command_pending(list) && !self.native_deselection_pending(list) {
             control.hwnd().set_enabled(true);
@@ -762,8 +763,8 @@ impl MainWindow {
             control.select(row, true);
         }
         control.redraw_rows(control.visible_rows());
-        self.show_panel(side);
-        self.update_key_bar();
+        self.controls().panels.show_panel(self, side);
+        self.controls().key_bar.update_key_bar(self);
         self.resume_selection_actions(control.hwnd().parent());
         self.start_list_passes();
     }

@@ -105,8 +105,8 @@ pub(crate) fn run() {
         };
         match win::instance::ask(window, exit_message) {
             // This start becomes the first once that process has ended,
-            // which can take long after its window closed, because it
-            // first joins its threads.
+            // because essential persistence and accepted cleanup can
+            // outlive its window.
             Some(EXIT_CLOSES) => {
                 process.wait_for_end();
                 waiting_since = Instant::now();

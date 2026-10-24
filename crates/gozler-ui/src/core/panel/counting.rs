@@ -31,7 +31,7 @@ impl Counting {
 
     pub(super) fn cost(&self) -> usize {
         if self.selected.is_empty() {
-            self.rows.shown.as_ref().map_or(0, Vec::len)
+            self.rows.counting_cost()
         } else {
             usize::try_from(self.selected_count)
                 .unwrap_or(usize::MAX)
@@ -50,10 +50,7 @@ impl Counting {
                 .inspect(|_| picked += 1),
         );
         let (selected, size) = if picked == 0 {
-            let size = match &self.rows.shown {
-                None => self.rows.totals,
-                Some(shown) => Totals::of(shown.iter().map(|&i| &self.rows.entries[i as usize])),
-            };
+            let size = self.rows.shown_totals();
             (None, (items > 0).then_some(size))
         } else {
             (Some(picked), Some(chosen))

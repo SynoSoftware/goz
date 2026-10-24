@@ -19,6 +19,7 @@ pub(crate) mod fixer;
 pub(crate) mod glyph;
 pub(crate) mod ids;
 pub(crate) mod include;
+mod inspector;
 pub(crate) mod layout;
 pub(crate) mod model;
 pub(crate) mod open;

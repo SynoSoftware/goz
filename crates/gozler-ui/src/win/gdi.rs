@@ -670,6 +670,9 @@ fn system_icon_info(
 impl Hwnd {
     /// Gives the control `font` and redraws it.
     pub(crate) fn set_font(self, font: &Font) {
+        if self.font() == font.0 {
+            return;
+        }
         // SAFETY: WM_SETFONT takes a font handle and a redraw flag.
         unsafe {
             windows::Win32::UI::WindowsAndMessaging::SendMessageW(

@@ -81,6 +81,8 @@ owner has run it, and file an issue for each item that fails.
 
 ## Settings
 
+- Apply saves edited settings without losing the current page or focus. Switch
+  the language and check the search and panel column headers.
 - Each open command runs for its own case, and emptying a box brings back File
   Explorer's way.
 - Total Commander fills
@@ -133,6 +135,8 @@ owner has run it, and file an issue for each item that fails.
 
 ## DPI and contrast
 
+- In the normal light/system theme, resize both modes, drag the splitter and
+  open the shared transfer pane: controls leave no cleared or half-drawn areas.
 - The window moves between monitors with different DPI, and the layout, the
   fonts and the icons scale with nothing else changing. The Settings dialog and
   its pages scale too.
@@ -144,6 +148,15 @@ owner has run it, and file an issue for each item that fails.
 
 ## Slow window tasks
 
+- On a sleeping disk, typing a Location uses its last observation; F5 refreshes
+  it. With a share offline, Enter, F3 and Properties leave the UI usable. Pull a
+  USB drive during a read; Settings > Drives and service and Include stay usable
+  with the drive asleep or offline.
+- Check focus after Enter, Esc, Tab and a mode switch, including while work is
+  pending. A cancelled folder recovery stays on Retry when another operation ends.
+- Use the build normally for a day, then inspect `ui-slow.log`. File one issue
+  per distinct message and cause, adding repeats to the existing issue. A sent
+  message acknowledgment alone does not prove posted input was processed.
 - Leave a search, selection or folder read waiting on an unavailable source.
   After three seconds its own area offers Waiting and Cancel. Cancel or Esc
   stops that read; a running copy or export continues. Retry of a cancelled
@@ -190,8 +203,9 @@ of [the engine spec](fast-copy-delete-spec.md).
 - A move across volumes, for example to a USB drive: the sources go, the
   progress shows bytes, and a cancel leaves each file in one place.
 - A copy from a share whose server is switched off during the copy: the
-  operation shows Cancelling until the share times out, and Exit ends Gozler
-  within 3 seconds, leaving the copy Interrupted.
+  operation shows Cancelling until the share times out. Exit closes the UI
+  immediately; essential recovery can finish in the invisible process, leaving
+  the copy Interrupted for the next start.
 - A delete of a tree with read-only files on a FAT32 USB drive, which takes
   D1's classic fallback.
 - A copy of a folder symbolic link and of a file symbolic link by an

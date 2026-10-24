@@ -114,10 +114,10 @@ responsibly resolve yourself.
   exit. A wait written without those rules is how the window freezes on a
   dead share: the freezes still open are calls nobody moved to a thread,
   and each thread somebody did write carries its own copy of the rules.
-  Until `docs/plans/window-architecture.md` builds the owner, put such
-  work on a thread the way the nearest existing code does, never on the
-  window's thread. Messages to a control stay on the window's thread,
-  which owns it.
+  Before adding UI work, read `docs/DESIGN.md`, "The window", and use
+  `core::work`, `win::work` and `app::work`. Domain engines keep their own
+  workers, scheduling and recovery. Messages to a control stay on the
+  window's thread, which owns it.
 - **Count allocations.** The index holds millions of entries, so a byte per
   entry or an allocation per hit is a real cost. Borrow instead of cloning on
   hot paths and size buffers up front. Measure with the criterion benches in

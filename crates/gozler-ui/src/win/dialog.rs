@@ -223,6 +223,8 @@ unsafe extern "system" fn procedure<D: DialogProc>(
     wparam: WPARAM,
     lparam: LPARAM,
 ) -> isize {
+    // SAFETY: these are the original parameters of this native message.
+    let _context = unsafe { super::watchdog::enter(msg, wparam, lparam) };
     if msg == WM_INITDIALOG {
         // SAFETY: lparam is the pointer to the `Running` that run_modal
         // passed.
@@ -460,6 +462,8 @@ unsafe extern "system" fn page_procedure(
     wparam: WPARAM,
     lparam: LPARAM,
 ) -> isize {
+    // SAFETY: these are the original parameters of this native page message.
+    let _context = unsafe { super::watchdog::enter(msg, wparam, lparam) };
     match msg {
         // False: the hidden page takes no focus when it is created.
         WM_INITDIALOG => 0,

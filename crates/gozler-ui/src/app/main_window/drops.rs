@@ -72,8 +72,8 @@ impl MainWindow {
             return;
         };
         if scrolled {
-            self.created()
-                .controls
+            self.controls()
+                .search
                 .list
                 .hwnd()
                 .parent()
@@ -205,7 +205,7 @@ impl DropHandler for MainWindow {
                 .as_ref()
                 .and_then(|(_, answer)| answer.effect);
         }
-        let list = self.created().controls.list;
+        let list = self.controls().search.list;
         let accepts = self.model.borrow().mode() == Mode::Search
             && !self.modal_running.get()
             && self.file_operations.get().is_some();
@@ -308,8 +308,8 @@ impl DropHandler for MainWindow {
         });
         self.created().work.borrow_mut().drops.leave();
         if scrolled {
-            self.created()
-                .controls
+            self.controls()
+                .search
                 .list
                 .hwnd()
                 .parent()

@@ -1,5 +1,6 @@
 //! Service fixes share one bounded work slot; the core fixer owns their steps.
 
+use crate::core::fetch::Generation;
 use crate::core::fixer::{CommandEvent, CommandResult, FixEvent, FixWork, SetupEvent, SetupResult};
 use crate::core::update::{self, Setup};
 use crate::core::work::{INLINE_ITEMS, Replacement, Retirement, Waiting};
@@ -40,8 +41,7 @@ impl Drop for Event {
 
 pub(in crate::app) struct Fixes {
     task: Option<Task<Run, ()>>,
-    events: Option<Receiver<Event>>,
-    started: u64,
+    events: Option<(Generation, Receiver<Event>)>,
     waker: OpenWaker,
     commands: bool,
     retired: Retirement,
@@ -52,21 +52,16 @@ impl Fixes {
         Self {
             task: Some(Task::shell(waker.clone(), Replacement::Cancel, run)),
             events: None,
-            started: 0,
             waker,
             commands: false,
             retired: Retirement::default(),
         }
     }
 
-    pub(in crate::app) fn start(&mut self, work: FixWork) {
+    pub(in crate::app) fn start(&mut self, generation: Generation, work: FixWork) {
         let Some(task) = &mut self.task else { return };
-        self.started = self
-            .started
-            .checked_add(1)
-            .expect("fix run ids cannot wrap");
         let (sender, events) = sync_channel(EVENTS);
-        if let Some(earlier) = self.events.replace(events) {
+        if let Some(earlier) = self.events.replace((generation, events)) {
             self.retired.push(earlier, INLINE_ITEMS + 1);
         }
         self.commands = matches!(work, FixWork::Commands(_));
@@ -75,7 +70,7 @@ impl Fixes {
             folder: std::env::temp_dir().join("Gozler").join(format!(
                 "fix-{}-{}",
                 std::process::id(),
-                self.started
+                generation.0
             )),
             events: sender,
             waker: self.waker.clone(),
@@ -91,15 +86,15 @@ impl Fixes {
         }
     }
 
-    pub(in crate::app) fn drain(&mut self) -> Vec<FixEvent> {
+    pub(in crate::app) fn drain(&mut self) -> Vec<(Generation, FixEvent)> {
         let mut events = self
             .events
             .as_ref()
-            .map(|events| {
+            .map(|(generation, events)| {
                 events
                     .try_iter()
                     .take(EVENTS)
-                    .filter_map(|mut event| event.0.take())
+                    .filter_map(|mut event| event.0.take().map(|event| (*generation, event)))
                     .collect::<Vec<_>>()
             })
             .unwrap_or_default();
@@ -110,16 +105,20 @@ impl Fixes {
         }
         if let Some(task) = &mut self.task
             && task.take().is_some()
-            && let Some(remaining) = self.events.take()
+            && let Some((generation, remaining)) = self.events.take()
         {
             events.extend(
                 remaining
                     .try_iter()
                     .take(EVENTS)
-                    .filter_map(|mut event| event.0.take()),
+                    .filter_map(|mut event| event.0.take().map(|event| (generation, event))),
             );
         }
         events
+    }
+
+    pub(in crate::app) fn discard(&mut self, event: FixEvent) {
+        self.retired.push(Event(Some(event)), INLINE_ITEMS + 1);
     }
 
     pub(in crate::app) fn waiting(&self, now: Instant) -> Option<Waiting> {
@@ -421,7 +420,7 @@ mod tests {
                 path.clone(),
             )))))
             .unwrap_or_else(|_| panic!("the event receiver remains open"));
-        fixes.events = Some(events);
+        fixes.events = Some((Generation(1), events));
         fixes.stop();
         assert!(
             path.exists(),

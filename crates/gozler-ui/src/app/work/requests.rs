@@ -94,6 +94,10 @@ impl Requests {
         self.programs = programs;
     }
 
+    pub(in crate::app) fn current(&self, purpose: Purpose) -> Option<Generation> {
+        self.groups[slot(purpose)].current
+    }
+
     pub(in crate::app) fn cancel(&mut self, purpose: Purpose) {
         let group = &mut self.groups[slot(purpose)];
         group.current = None;

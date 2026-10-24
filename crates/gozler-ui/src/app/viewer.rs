@@ -5,7 +5,7 @@
 //! page or a move waits for, one at a time.
 
 use super::work::viewers::Reader;
-use crate::core::captions::ButtonIcon;
+use crate::core::captions;
 use crate::core::ids::{ControlId, IconId};
 use crate::core::layout::{
     Px, Rect, Size, image_button_width, status_last_part, viewer_message, viewer_message_width,
@@ -52,6 +52,7 @@ pub(super) struct Viewers {
 struct Shared {
     open: RefCell<Vec<Rc<Viewer>>>,
     state: Cell<ViewerState>,
+    changed: Cell<bool>,
 }
 
 impl Viewers {
@@ -60,6 +61,7 @@ impl Viewers {
             shared: Rc::new(Shared {
                 open: RefCell::new(Vec::new()),
                 state: Cell::new(state),
+                changed: Cell::new(false),
             }),
             registered: Cell::new(false),
         }
@@ -121,6 +123,11 @@ impl Viewers {
     /// and Wrap long lines.
     pub(super) fn state(&self) -> ViewerState {
         self.shared.state.get()
+    }
+
+    /// Takes the saved-state transfer posted by a Viewer change.
+    pub(super) fn take_state(&self) -> Option<ViewerState> {
+        self.shared.changed.replace(false).then(|| self.state())
     }
 
     /// Closes every Viewer, as Exit does; each leaves its state first.
@@ -332,7 +339,7 @@ impl Viewer {
         let _ = replace_menu_bar(hwnd, &menu_bar(&self.strings.borrow()));
         if let Some(c) = self.controls.get() {
             c.retry
-                .set_icon(ButtonIcon::of(self.message_button(), false));
+                .set_glyph(captions::button_glyph(self.message_button()));
         }
     }
 
@@ -357,7 +364,7 @@ impl Viewer {
         let key = self.message_button();
         let caption = self.strings.borrow().text(key).to_owned();
         c.retry.hwnd().set_text(&caption);
-        c.retry.set_icon(ButtonIcon::of(key, false));
+        c.retry.set_glyph(captions::button_glyph(key));
         c.message.hwnd().set_text(&text);
         c.message.hwnd().set_visible(message.is_some());
         if !retry && Hwnd::focused() == Some(c.retry.hwnd()) {
@@ -707,6 +714,7 @@ impl Viewer {
                 wrap,
                 ..shared.state.get()
             });
+            shared.changed.set(true);
             self.main.post(DEFERRED);
         }
     }
@@ -746,6 +754,7 @@ impl Viewer {
                 placement: Some(placement),
                 ..shared.state.get()
             });
+            shared.changed.set(true);
             self.main.post(DEFERRED);
         }
     }

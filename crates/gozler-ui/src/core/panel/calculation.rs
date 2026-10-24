@@ -1,6 +1,7 @@
 //! Folder transformations own their candidate until rows and interaction can
 //! be published together. A remap moves that candidate without replaying a change.
 
+use super::rows::{Focus, Remembered, ranges};
 use super::*;
 use crate::core::search_list::Ended;
 
@@ -174,14 +175,7 @@ impl Calculation {
             ),
             Input::Change(change) => {
                 let mut rows = if matches!(change, Change::Listed { .. }) {
-                    FolderRows {
-                        entries: Vec::new(),
-                        order: before.order,
-                        totals: Totals::default(),
-                        shown: None,
-                        taken_hashes: None,
-                        kept: before.kept.clone(),
-                    }
+                    before.replacement()
                 } else {
                     (*before).clone()
                 };
@@ -204,13 +198,11 @@ impl Calculation {
                         ..
                     } => {
                         mapping.kind = UpdatedKind::Listed {
-                            again: same && read.sort == rows.order,
+                            again: same && read.sort == rows.order(),
                         };
                         mapping.same = same;
                         mapping.focus = focus;
-                        rows.entries = entries;
-                        rows.order = read.sort;
-                        rows.totals = Totals::of(&rows.entries);
+                        rows.replace_listing(entries, read.sort);
                         mapping.read = Some(read);
                     }
                     Change::Watch(changes) => {
@@ -232,22 +224,7 @@ impl Calculation {
                     Change::Filter => {}
                     Change::Sizes(outcome) => {
                         mapping.kind = UpdatedKind::Sizes;
-                        let entries = match outcome.as_ref() {
-                            Outcome::Rows(chunk) => chunk.rows.as_ref(),
-                            _ => &[],
-                        };
-                        let sizes: Vec<(Box<[u16]>, u64)> = entries
-                            .iter()
-                            .filter(|row| row.is_dir)
-                            .filter_map(|row| {
-                                Some((last_name(&row.path).encode_utf16().collect(), row.size?))
-                            })
-                            .collect();
-                        give_sizes(&mut rows.entries, &sizes);
-                        if rows.order.key == SortKey::Size {
-                            sort_listing(&mut rows.entries, rows.order);
-                        }
-                        rows.totals = Totals::of(&rows.entries);
+                        rows.apply_sizes(&outcome);
                     }
                     Change::Ended => mapping.kind = UpdatedKind::Ended,
                     Change::Await => mapping.kind = UpdatedKind::Await,
@@ -255,15 +232,9 @@ impl Calculation {
                 (rows, mapping)
             }
         };
-        for end in ends {
-            for (id, request) in &end.evidence.operations {
-                if ends_in(request, &folder) {
-                    rows.kept.insert(*id, end.moment);
-                    mapping.read_again = true;
-                }
-                mapping.sizes |= changes_sizes(request, &folder);
-            }
-        }
+        let (read_again, sizes) = rows.follow_ends(ends, &folder);
+        mapping.read_again |= read_again;
+        mapping.sizes |= sizes;
         if let Some(read) = &mapping.read {
             let stale = rows.release(read.generation);
             mapping.read_again = stale;
@@ -273,10 +244,7 @@ impl Calculation {
         let mut remembered = if mapping.same {
             before.remember(interaction.focused, &interaction.selected, before_up)
         } else {
-            Remembered {
-                focused: None,
-                selected: HashMap::new(),
-            }
+            Remembered::default()
         };
         let mut gone = interaction
             .gone

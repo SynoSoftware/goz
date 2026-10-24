@@ -28,6 +28,7 @@ pub(crate) mod tray;
 pub(crate) mod update;
 pub(crate) mod viewer;
 pub(crate) mod wake;
+pub(crate) mod watchdog;
 pub(crate) mod window;
 pub(crate) mod work;
 

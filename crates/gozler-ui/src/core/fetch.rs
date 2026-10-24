@@ -36,8 +36,8 @@ impl List {
     ];
 }
 
-/// What a request is for. At most one request of each purpose is live, so
-/// starting one cancels the live one of its purpose and no other (DESIGN.md:
+/// What a request is for. At most one request of each purpose is current;
+/// starting one replaces interest in that purpose and no other (DESIGN.md:
 /// window rule 4). Each list has its own `Results` and `Selection`, so a
 /// search in one list never cancels another list's request.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

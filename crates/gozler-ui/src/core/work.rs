@@ -7,10 +7,16 @@ use std::time::Duration;
 #[cfg(test)]
 mod scan;
 
+pub(crate) mod watchdog;
+
 pub(crate) const SESSION_FINALIZATION: Duration = Duration::from_secs(2);
 pub(crate) const INLINE_ITEMS: usize = 1_000;
 pub(crate) const SLOW: Duration = Duration::from_secs(3);
 const BACKGROUND_LIMIT: Duration = Duration::from_secs(10);
+
+pub(crate) fn source_completion_wait(elapsed: Duration) -> Duration {
+    Duration::from_secs(1).saturating_sub(elapsed)
+}
 
 pub(crate) fn waiting(strings: &super::text::Strings, path: Option<&str>) -> String {
     match path.filter(|path| !path.is_empty()) {
@@ -194,6 +200,26 @@ impl<T> Slot<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn source_completion_gets_one_grace_period_without_delaying_later_exit() {
+        assert_eq!(
+            source_completion_wait(Duration::ZERO),
+            Duration::from_secs(1)
+        );
+        assert_eq!(
+            source_completion_wait(Duration::from_millis(750)),
+            Duration::from_millis(250)
+        );
+        assert_eq!(
+            source_completion_wait(Duration::from_secs(1)),
+            Duration::ZERO
+        );
+        assert_eq!(
+            source_completion_wait(Duration::from_secs(9)),
+            Duration::ZERO
+        );
+    }
 
     #[test]
     fn only_background_work_expires_while_awaited_work_stays_slow() {

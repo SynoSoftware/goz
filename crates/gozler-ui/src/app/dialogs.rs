@@ -72,7 +72,7 @@ impl DialogProc for About<'_> {
     fn message(&self, _dialog: Hwnd, message: DialogMessage) -> bool {
         match message {
             DialogMessage::LinkActivated { id } if id == ControlId::AboutLink.id() => {
-                self.main.open_repository();
+                self.main.settings.open_repository(self.main);
                 true
             }
             DialogMessage::LinkActivated { .. }

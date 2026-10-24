@@ -44,261 +44,293 @@ runtime verification.
 
 ### Execution status
 
-**Stages 1–2 and 5 are complete; stages 3–4 and 6–9 are incomplete.**
-Lead owns shared contracts, integration and the only build. Stage 2 passed
-integrated review and Build 38: formatting, clippy, all workspace tests and docs;
-262 UI tests passed, 14 ignored. Its three full runs were 36–38: first integration
-compile corrections together, then one newly reachable fold lint corrected with
-a plain loop that polls every volume. Log:
-`V:/temp/gozler-window-stage2-build38.log`. No new focused or benchmark run.
-Stage 2 is committed as `f66011f`.
+**Stages 2 and 5 are complete; stages 1, 3–4 and 6–9 remain incomplete.**
+Last green full run: **47**. Full attempts: **47**; next: 48 only if needed.
+HEAD: `f5c8ec3`. Stage 6–8 work below is uncommitted. Installation remains a
+separate decision. On October 24 the owner brought deferred questions and UAC
+forward and confirmed readiness for one physical drag check after a green build.
 
-Current milestone:
-- Integrated adversarial review:
-  `V:/temp/gozler-window-stage1-integrated-review1.md`. Corrected distinct COM
-  data/capability references and frozen right-drop destination/menu. Lead also
-  routed status-bar Cancel through pending drop abandonment, sharing the pane's
-  action route and removing QueueStep's unused cancellation variant. Delta is
-  clean: `V:/temp/gozler-window-stage1-integrated-review2.md`.
-- Build 33 completed with integration compile/lint/doc errors, corrected together:
-  imports, borrowed/owned text, test visibility, a removed tooltip method still
-  used by Settings/Indexed folders, a closure annotation, private HWND test
-  construction and obsolete doc links. `fetch_update` retains a narrow allowance
-  because the workspace MSRV is 1.94 and its replacement requires 1.95.
-- Build 34: all 260 UI tests passed (14 ignored), formatting and docs passed.
-  First reachable clippy findings were three nested-if simplifications, a missing
-  local unsafe justification and one orphaned test-only helper. Corrected together.
-  Native pipe/ACL/working-set tests in unchanged paths failed
-  under restricted execution, as in Build 2; rerun the same script outside that
-  sandbox rather than changing those tests. Build 35 outside that restriction is
-  green: formatting, clippy, every workspace test and documentation passed.
-  Log: `V:/temp/gozler-window-stage1-build35.log`. Stage 1 committed as `a86ff43`.
-- Stage 2 integrated: Requests, service program inspection/checking, panel folder
-  readers, Viewer, Include elevation, service fixes, Indexed folders, Paste and
-  tray calls use typed groups under Work. Native network/file workers are split
-  from UI endpoints. The source scan found remaining Explorer calls and hook
-  cleanup joins; both are corrected, the latter with an owned stop event.
-  All Stage 2 files are frozen for its commit; only the lead builds.
-- Stage 2 review 1 found a Viewer removal-recovery race and a private HWND test
-  construction. Both are corrected; review 2 covers those fixes and newly wired
-  Paste/Indexed folders/tray/shared shutdown contracts. Evidence:
-  `V:/temp/gozler-window-stage2-worker-review1.md`. The native environment checks
-  are recorded in `ui-after-install.md`, not claimed passed.
-- The expanded review found a third UI wait: keyboard hook installation's ready
-  receiver. The hook exception permits its dedicated message loop, not a UI wait.
-  Its implementer owns the coupled shortcut/MainWindow/Settings acknowledgment
-  correction, retaining the old shortcut until successful installation. The
-  scan now exempts only that native launcher, not waits in its startup method.
-  That correction is complete: asynchronous inactive preparation/adoption,
-  captured Apply/OK continuation, token-scoped key capture and WM_DESTROY
-  endpoint closure. Focused review is clean at
-  `V:/temp/gozler-window-stage2-worker-review3.md`; the known fetch_update/MSRV
-  allowance is added. Earlier clean group evidence is reused from review 2.
-- Stage 3 slow-task implementation is in progress. `V:/temp/gozler-window-stage3-slow-inventory.md`
-  records actual idle/progress/expiry consumers; watchdog seams and its required
-  native-loop evidence are in `V:/temp/gozler-window-stage3-watchdog-design.md`.
-  The watchdog draft remains unwired. Integration needs the existing `windows`
-  dependency's `Win32_System_WindowsProgramming` feature for QueryThreadCycleTime,
-  with no new crate or parallel FFI declaration. RAII handler scopes preserve
-  outer context on the UI stack while the worker copies one ID-only record.
-  The disposable native probe was included only under cfg(test); that include
-  is now removed and production is not wired.
-  Evidence attempt 1 stopped before running on two SendMessageW argument types
-  in the disposable harness; both corrected together. Attempt 2 used posted
-  messages: menu, application/system dialog, resizing and controlled blocking
-  passed; moving did not enter and drag delivery was not demonstrated. Attempt 3
-  used asynchronous SendNotifyMessage and keyboard-initiated SC_MOVE: menu,
-  application/system dialog, size, move and controlled blocking passed. The
-  synthetic drag never reached GiveFeedback, so it proves nothing about delivery
-  inside OLE's loop. No further synthetic retries: the remaining prerequisite is
-  one valid native drag-loop acknowledgment observation. The watchdog stays
-  disabled until then. SendNotifyMessage also cannot diagnose a wait that itself
-  services nonqueued messages. Evidence: `V:/temp/gozler-window-stage3-watchdog-evidence3.log`
-  and `V:/temp/gozler-window-stage3-watchdog-implementation.md`. Attempts 1–2
-  used `-Timing` unnecessarily; attempt 3 used focused `-Test`. These are native
-  API checks, not full builds or performance benchmarks.
-- Stage 3 shared timing contract: Task exposes current waiting state and accepts
-  progress only after the caller validates input identity. Expiry reports once,
-  cancels interest and retains occupied execution until completion. Requests
-  returns purpose/generation/waiting observations; background Status and panel
-  folder-size expiry clear only matching owner latches. Folder/Viewer owners
-  implement their own existing message/Cancel surfaces. The lead owns shared
-  Model/Work integration and catalogue wording. No agent builds independently.
-- Stage 3 first retained batch passed integrated review and Build 39:
-  Search/search panels, initial folder listings, per-command Viewer waits,
-  Settings-owned work and Indexed folders; background Status/folder-size/program
-  expiry and natural retry. Existing native message/status/buttons are reused.
-  Six new lasting regressions cover expiry/occupied execution, status retry with
-  stale expiry/reply, search cancellation preserving export, program-cache retry,
-  folder cancellation identity and Viewer cancellation surviving layout. The
-  existing size-sum test also checks matching expiry. All passed. Review 1 found
-  the no-row-update size-expiry path did not refresh native counts; the existing
-  panel refresh now handles it. Correction review is clean:
-  `V:/temp/gozler-window-stage3-waiting-review2.md`. One full batch run passed
-  formatting, clippy, all workspace tests (268 UI passed, 14 ignored) and docs:
-  `V:/temp/gozler-window-stage3-waiting-build39.log`. No focused test of product
-  code or benchmark was added; native evidence attempt 3 is separately recorded.
-  Committed as `74128aa`.
-- The next retained batch covers native shell, clipboard, path, pairing and
-  selection preparation waits, exact cancellation ownership, initial folder
-  preparation and background drag-hover expiry. Location checks are background
-  observations; accepted drops and source completion retain their existing queue
-  progress and cancellation owner. Review found Settings could cancel hidden
-  auxiliary work and a main auxiliary wait could obscure an active noncancelable
-  fix. Both corrections are source-reviewed clean at
-  `V:/temp/gozler-window-stage3-native-wait-review2.md`.
-- Settled owner decision: all UAC, approvals and interactive checks are deferred
-  until the end. Continue independent implementation. The prepared physical-drag
-  harness is `V:/temp/gozler-native-watchdog-interactive.rs`, with instructions in
-  `V:/temp/gozler-native-watchdog-interactive.md`; it has not been included or run.
-  The watchdog remains unwired until valid native OLE-loop evidence passes.
-- Independent native-control work takes Stage 4's unconditional native getter
-  comparisons together with Stage 6's substantial control split: ListView,
-  FolderTree and StatusBar each own their implementation and private resources.
-  Retained review is clean at
-  `V:/temp/gozler-window-native-controls-review1.md`. No painting behavior changed; any
-  conditional flicker work still requires the deferred before/after evidence,
-  whose unchanged baseline is `74128aa`. Unreadable shield and marquee state
-  remains with the later control-owner migration; no generic cache was added.
-- The combined native-wait/control batch passed its first full run, Build 40:
-  formatting, clippy, all workspace tests (269 UI passed, 14 ignored) and docs.
-  Log: `V:/temp/gozler-window-native-wait-controls-build40.log`. Its one new test
-  watches hover expiry rejecting stale IDs and stopping replay without clearing
-  newer drag intent. No focused test, benchmark, UI or UAC check ran. Platform
-  cfg, Ubuntu, MSRV and core-purity checks remain with CI; no dependencies changed.
-- Stage 5 state ownership/types, Stage 6 feature captions and the control
-  owners' marquee flags are implemented and integrated. Queue recovery became
-  asynchronous in Stage 2, so
-  Instance denotes eligibility, not engine readiness: command State reads
-  readiness from the sole FileOperations OnceCell. Its existing regression now
-  also rejects file commands before adoption. IncludeSave records bridge phase
-  and acknowledgment only; the existing Work group remains the task owner,
-  rather than reintroducing an app Saving handle. Existing Search/Settings
-  tests retain their assertions; feature caption tests moved with their owners.
-  No display/getter tests or instrumentation were added. Retained review is
-  clean: `V:/temp/gozler-window-state-areas-review1.md`. Build 41 caught two
-  panel integration omissions (Timer import and command readiness field),
-  corrected together. Build 42 passed formatting, clippy, all workspace tests
-  (269 UI passed, 14 ignored) and docs:
-  `V:/temp/gozler-window-state-areas-build42.log`. No focused test or benchmark
-  ran, no new standalone test was added, and the same platform/CI checks remain
-  deferred. Caption functions and their existing tests now live with six
-  feature owners; shared primitives/aggregation keep one implementation.
-- Next Stage 6 batch has exclusive ownership: window-feature implementer owns
-  coupled MainWindow/Model areas; folder implementer owns private Panel row
-  algorithms; lead owns Work's typed composition, shared contracts and only
-  build. Read-only preparation overlapped Build 42. Each complete deliverable
-  freezes before review; one integrated build follows the combined source.
-- Stage 2 settled interfaces: persistent Viewer session and fixed panel slots
-  retain blocked work until actual resource cleanup. `Task::interrupt_io` only
-  interrupts a native call, preserving session lifetime; Cancel also ends it.
-  Device-notification registration hands off to the owning UI through bounded
-  request/ack channels, outside borrows, avoiding a worker's stale HWND race;
-  the worker retains its live file/watch until ack or abandonment, and closes it
-  off UI. Program metadata and execution checks are separate bounded tasks over
-  one canonical cache, so status never waits. Nullable elevation owners replace
-  main-HWND UAC ownership. Accepted mutation/export cleanup retains process
-  lifetime off UI, independently of essential settings/recovery writes.
+#### Current batch and ownership
 
-Implemented contracts:
-- `core::work` owns admission, timing and the measured inline CPU threshold;
-  `win::work` owns worker/capability construction, native cancellation and
-  live-window delivery; `app::work` maps purposes/results to existing owners.
-  Cancellation keeps a blocked execution slot; latest replaceable pending work
-  coalesces. Large displaced inputs, replies and endpoints retire off UI.
-- Location, pairing, Settings labels, sign-in registry, shell actions/setup and
-  file clipboard publication use bounded purposes. Saves serialize changed-key,
-  removal and scope intent while merging unrelated disk keys; acknowledgments
-  preserve retry rules and newer Settings edits. Clipboard retries are finite
-  and respect sequence changes; Empty/Set/Close finishes consistently.
-- Shell purposes retain/pump their STA; no main HWND crosses to it. NOASYNC is
-  not treated as a universal Properties/URI lifetime guarantee. Large command
-  paths prepare off UI and retain original list/selection intent.
-- Queue adoption exposes only a fully restored engine. Its session serializes
-  accepted commands FIFO, publishes immutable snapshots and explicit ordered
-  acknowledgments, reserves ids atomically, and forwards actual recovery
-  acknowledgment at terminal close independently of normal reply pressure.
-  Queue remains the sole operation/scheduling/recovery owner.
-- Shared rows/ranges feed selection, Taken filtering, panel reconciliation,
-  counts, command preparation and quick search. Panel candidates are owned
-  through remap and publication; epochs, Taken, receipt-time end evidence and
-  listing cutoffs reject stale answers. The producer FIFO is bounded and reports
-  terminal Lost after its accepted prefix on watch overflow.
-- Native selection capture/application/deselection yields in bounded turns.
-  Capture precedes row publication, never impersonates empty/current selection,
-  and invalidates same-count replacement. Deferred menus/commands retain their
-  original side/list/focus; explicit selection mutations wait for native apply.
-- The canonical Operations follower runs serialized off UI with receipt-time
-  cache/end/job evidence. Release revalidates current keepers/rows in bounded
-  commits. Effects preserve Queue/panel/dialog/progress/source order. Transfer
-  tiles apply incrementally; list actions use the native highlight and card
-  buttons retain their displayed target. Failure reports use native owner data.
-- Own drag paths match successful shell items. External preview/effect work is
-  replaceable; accepted setup and final GetData are FIFO, with setup acknowledgment
-  first. Pending intake cancels by id without late restart. Synchronous holds
-  survive through use; async completion has one obligation and a separate lane.
-  Source notification cannot block essential persistence.
-- Awaited work becomes slow at three seconds without automatic expiration;
-  background work expires silently at ten seconds while retaining its execution
-  slot. Settings labels use it. Visible waiting/Cancel and streaming progress
-  join their actual Stage 2–3 consumers, avoiding unused caption scaffolding.
-- GitHub parsing precedes both publication locks. The service-check cache moves
-  bounded facts for two programs under lock; disk/hash/process work stays outside
-  it. Its launcher remains Stage 2.
+Lead owns contracts, permanent docs, integration and the only build. Retained
+source is frozen, including the integrated watchdog. All six final specialist
+reviews finished: five clean; flow found one Panel cancellation defect. Its owner
+fixed recovery after navigation cancellation and explicit Retry after cancelling
+that recovery; both app entry points now share the Panel cancellation owner.
+The first delta found three related paths (clean folder watch, Search observation,
+later operation end after Cancel); their batched correction is frozen and clean
+in `V:/temp/gozler-window-final-cancel-delta-review2.md` (all six affected-contract
+passes, including the documentation corrections). Small corrections are batched before
+the next full build. The lead also prepares exact own-only staged blobs so foreign
+status/date work stays uncommitted and the architecture commit remains coherent.
 
-Evidence and settled constraints:
-- Last green full run: Build 38,
-  `V:/temp/gozler-window-stage2-build38.log` (262 UI tests passed, 14 ignored).
-  Accounting: 38 full attempts, six focused attempts,
-  one optimized timing run, no Criterion runs. Last focused check:
-  `-Test a_change_batch_keeps_the_taken_names_folded_once`, green at
-  `V:/temp/gozler-window-stage1-cache-focused6.log`. Detailed prior evidence
-  remains in doc checkpoint `35919d6` and `V:/temp/gozler-window-stage1-*`.
-- `-Timing timing_large_panel_selection` observed 1,000/100,000 entries:
-  chosen-source medians 0.969/70.565 ms, counts 0.017/1.861 ms. This supports
-  `INLINE_ITEMS = 1,000`, not a before/after speed claim. Baseline:
-  `V:/temp/gozler-window-stage1-pass-baseline.log`; support review:
-  `V:/temp/gozler-window-stage1-pass-timing-review1.md`.
-- Durable regressions cover finite/stale admission, disposal affinity,
-  inline/deferred equivalence, settings merge/coalescing, early WM_QUIT versus
-  finalizer completion, clipboard retries, panel snapshot/remap/overflow/end
-  evidence, capture replacement, quick stale focus, receipt-time awaited names,
-  id reservation and terminal Queue delivery. These cases passed Build 35.
-  No display/getter tests added.
-- Stage 2 adds only `a_cancelled_ready_setup_is_removed_only_by_retirement`
-  (discarded installers are deleted off UI) and
-  `window_code_has_no_unowned_launcher_or_recognized_wait` (known wait/launcher
-  forms cannot escape their owner). Both passed Builds 37–38. Existing moved
-  tests retain their behavior; no hook wrapper/display tests added.
-- Normal Exit destroys UI without waiting for writers; essential writes may keep
-  an invisible process alive. Session end dispatches at most two seconds, checks
-  explicit finalizer completion and preserves earlier WM_QUIT for the outer loop.
-  Windows sign-out may terminate unfinished persistence.
-- Failed drop marshaling is unsupported with no UI GetData fallback. An unknown
-  in-process STA provider can still dispatch its implementation back onto UI;
-  native drag imagery remains UI-affine. No universal provider responsiveness
-  claim. Contracts: `V:/temp/gozler-window-stage1-drop-intake-contract.md`;
-  integration: `V:/temp/gozler-window-stage1-drop-integration.md`.
-- Shell native-lifetime evidence is in the corresponding `shell-lifetime`,
-  `shell-native-contract` and `shell-probe` reports under the same prefix.
-  Disposable fixture removed. Native edit-box clipboard wait remains suspected,
-  tracked as #147. Required environment/visual checks stay in `ui-after-install.md`,
-  not claimed passed; installation remains separate.
-- Ubuntu/platform compilation, core purity, MSRV and affected cargo-deny checks
-  remain for CI. No new dependency package or wire layout in the latest batch.
-- Stage 2 Requests uses one Task per Purpose and a capacity-one interim channel
-  separate from terminal delivery. Export cleanup stays off UI and logs
-  partial-file removal failures independently of essential writes. Accepted
-  elevated mutations and export cleanup retain process lifetime after UI closes;
-  best-effort provider/tray cleanup cannot delay essential writes. Old launchers
-  are removed. All Stage 2 group evidence is retained in worker reviews 1–3;
-  the final integration corrections are compiler visibility/lifetime wiring.
+- **Stage 6:** feature/control ownership, private Panel row operations and typed
+  Work groups are implemented and source-reviewed. Areas own controls and native
+  interaction; shared facts stay in Model. Accepted Location/label facts belong
+  to consumers, while Work retains execution inputs. Queue retains engine
+  scheduling and recovery. Source reviews remain valid; Full46 verifies the
+  integrated code. Precise own-hunk commits remain.
+- **Stage 7:** Model has one `Accepted { touched, effects }` contract; no
+  Change/Then compatibility path. MainWindow applies structure, refreshes touched
+  areas, then delivers ordered actions. Native reentry coalesces repair through
+  the existing Deferred wake. Explicit Viewer state transfer replaces refresh
+  mutation. Settings, Viewer and synchronization keep their own scoped state.
+  Prerewrite source: `V:/temp/gozler-stage7-before/`, repository-relative paths.
+  Final handoff: `V:/temp/gozler-window-feature-owners.md`.
+- **Stage 7 review is clean:** `V:/temp/gozler-window-stage7-review3.md` merges
+  reviews 1–2 and their hashes. It resolves off-UI late retirement after Destroy,
+  hidden-focus repair after unrelated Status, unchanged Transfers unmaximize,
+  explicit HomeFocus on ordinary mode switches, and preservation of a newer
+  visible focus. Subsequent narrow records correct compile imports and test
+  generations, and restore Polling/NoteSavedState after accepted rows:
+  `V:/temp/gozler-window-stage7-compile-correction-review1.md`,
+  `V:/temp/gozler-window-stage7-row-tail-review1.md`,
+  `V:/temp/gozler-window-stage7-full45-generation-review1.md`.
+  Full46 verifies compilation and tests; native measurements remain separate.
+- **Reentry identities:** FirstRow retains shown-results Generation; deferred
+  Cancel compares Requests.current with Model's awaited identity. Repair dispatch
+  and replies share one Model intent Generation, replacing Work's separate
+  temp-folder counter. A cancelled A reply cannot advance B before B starts.
+  Rejected Ready uses the existing Event cleanup; late nonempty retirement uses
+  existing win::work::spawn after close transfers the normal retirement Task.
+  Empty retirement starts no thread. No new queue, focus generation or framework.
+- **Stage 8:** native getter guards and unreadable marquee/shield flags are
+  implemented. Search caches only shield state; glyph-only buttons use native
+  readback. No new painting surface or visual-success claim. Reports:
+  `V:/temp/gozler-window-stage8-shield-glyph.md`,
+  `V:/temp/gozler-window-stage8-shield-review1.md` (clean).
+- **Stage 1 source-completion correction:** one second total from source-cleanup
+  start is allowed only by the off-UI finalizer, using the remaining budget.
+  Source feedback never delays essential writes or UI close; frozen COM and
+  sources behind it remain best effort. Audit and clean review:
+  `V:/temp/gozler-window-source-completion-exit-audit.md`,
+  `V:/temp/gozler-window-source-completion-review1.md`. Full46 passes its test.
+- **New pure regressions, all passed Full46:**
+  `source_completion_gets_one_grace_period_without_delaying_later_exit`,
+  `a_nested_update_supersedes_presentation_but_keeps_a_file_command_once`,
+  `a_cancelled_fix_reply_cannot_advance_the_next_fix`. No display/getter tests.
+  The earlier Inspector age invariant also passes. Formatting policy reuses an
+  existing test; no display test was added.
+- **Stage 9:** DESIGN contains actual owners, bounded selection, work policy,
+  shutdown/source grace, three-phase updates, rules 14–21 and native painting
+  rules. AGENTS points to that implemented owner, preserving engine scheduling.
+  Crate/module comments describe retained responsibilities. The latest doc audit
+  confirmed native buffers, changed-rectangle batching and redraw erasure/frame/
+  child flags from source. Watchdog documentation describes the retained mechanism.
+  Final review fixes, affected checks, precise stage commits and deletion of
+  this incomplete plan remain; do not treat this source/doc audit as completion.
 
-Historical analysis below was reviewed against `ab0e9b0` on 2026-10-23.
-Recheck present callers before relying on old measurements. Preserve the engine,
-shared transfer pane, explicit synchronization commit and current indexing/
-early-large-file dispatch behavior. Stage 4 starts from current painting,
-including `362f5b2`; reconcile concurrent editing first.
+#### Verification gate and foreign changes
+
+**Verification resumed with an explicit owner format decision.** Full44 passed
+formatting and earlier compile fixes; 270 UI tests passed, 14 were ignored, and
+one foreign test expected `1 KB` while production returned `1.00 KB`.
+Log: `V:/temp/gozler-window-feature-owners-build44.log`.
+
+**Settled October 24:** compact bytes and KB use whole numbers; decimals begin
+at MB. Root changed the existing canonical text::bytes precision branch, leaving
+MB+ precision, truncation and unit promotion intact. Existing compact-size and T7
+expectations follow the deliberate behavior change; no test was added. The
+foreign status assertion remains untouched and now matches the requested rule.
+SizeFormat's fixed-unit columns retain whole Bytes/KB and two-decimal MB.
+No additional precision setting is implemented. Narrow source review precedes
+verification: `V:/temp/gozler-window-size-precision-review1.md` (clean).
+
+Full45 passed fmt/clippy/docs; UI 274 passed, two failed, 14 ignored. One own
+FirstRow expectation used the older generation and is corrected/reviewed. The
+other failure was foreign date-header work introduced during the run: its owner
+subsequently added the missing catalogue keys and formatting. Root restored the
+two attempted short-header edits so that foreign work stays intact. Permission
+failures in fixture pipes, ACL manipulation and working-set privileges match the
+earlier restricted-runtime failure; no client/engine/winfs code was changed.
+
+Full46 ran outside that restriction and is **green**, including fmt/clippy/tests/
+docs, UI **277 passed / 14 ignored**. Log:
+`V:/temp/gozler-window-integrated-build46.log`.
+
+The owner confirmed readiness after a green build. The physical OLE check then
+**passed**: down/movement, GiveFeedback entry, acknowledgment 81 to 82 while
+inside the loop, final DRAGDROP_S_CANCEL, return and no timeout. Log:
+`V:/temp/gozler-window-watchdog-interactive-focused2.log` (12.72 s).
+Its first compile lacked windows-rs' WindowsProgramming feature; enabling that
+existing dependency feature fixed it. The disposable include is removed; no test
+window/process remains. No stall log was produced. The retained watchdog is
+integrated and covered by the six source reviews; its three pure policy tests
+await Full47. The transport evidence does not prove posted-input readiness in
+every cross-thread sent-message wait; DESIGN records that diagnostic limit.
+
+Native proof: the first disposable timing run compiled but failed creating its
+window, before measurements: its fixture omitted pane-class registration. The
+combined `-Timing timing_window_` then opened and closed its visual host, but
+the timing test failed on duplicate pane registration in that same test process.
+Log: `V:/temp/gozler-window-final-native-proof2.log`; original failure:
+`V:/temp/gozler-window-native-timing.log`. Both attempts are terminal failures;
+no timing measurements passed. Run the two filters in separate cached
+test processes, without registration-sharing machinery. Foreground visual input
+proved unreliable and consumed time; its partial recording is not proof. The
+existing fixture owner prepares the plan's bounded handler-driven paired visual
+sequence under V:/temp, with no product scaffolding. The historical source is an
+immutable archive of `74128aa` under V:/temp. Its ordinary `-Release` attempt
+could not publish over running normal executables; those processes were left
+alone. An isolated test host avoids replacing them. No timings or visual success
+are claimed yet. `V:/temp/gozler-window-own-stage/` holds reviewed own-only
+candidate blobs, excluding foreign status/date work; an isolated exact-HEAD copy
+with those blobs is running `-Test core::`, log
+`V:/temp/gozler-window-own-only-focused.log`. This verifies the independent commit
+contract rather than relying on the mixed worktree's earlier green build.
+All old fixture includes are removed. Full47 is **green** against retained
+integrated source: fmt, clippy, workspace tests and docs; UI **282 passed / 14
+ignored**. Log: `V:/temp/gozler-window-integrated-build47.log`. The two Panel
+cancellation regressions and three watchdog regressions passed. Only this plan
+changed during the run; all other 448-input snapshot entries remained stable.
+Reuse that full
+result only after later disposable includes are removed and retained source hashes
+match `V:/temp/gozler-window-full47-inputs.json`.
+
+Own-only `core::` compiled and ran 260 tests: 259 passed, including the two Panel
+cancellation and three watchdog regressions. Its sole failure was a foreign
+status expectation still present in the reconstructed candidate; restore HEAD's
+`fixing.done` assertion only in that candidate. The focused recheck passed:
+`V:/temp/gozler-window-own-only-focused2.log`. The integrated foreign behavior is
+untouched. Candidate formatting is checked; no new product fix/review cycle.
+
+Focused runs since Full44: `compact_sizes_limit_precision` first failed on own
+Stage 7 compile omissions, then passed after the corrections;
+`core::` passed 258 tests; `native_watchdog_interactive_drag_evidence` first
+failed compilation for the feature above, then passed. Logs use respectively
+`gozler-window-size-precision-focused[2].log`,
+`gozler-window-stage7-core-focused.log` and
+`gozler-window-watchdog-interactive-focused[2].log`, all under V:/temp.
+
+Full44 also found two own lints and a moved doc link. These are corrected:
+private Panels helper, one MainWindow transfer orchestration body with its
+original argument count, InspectorFit's comment beside its owner. Correction
+review `V:/temp/gozler-window-feature-integration-review4.md` is clean; corrections
+passed Full46. Source hashes stayed stable during Full43 and Full44.
+
+Another session owns status-bar/catalogue/resource edits, its Model test hunks,
+MainWindow's indexing-entry map and DESIGN's status-bar descriptions. Preserve
+and exclude them from commits. Later staging must select own hunks in Model,
+MainWindow and DESIGN. The lead staged 52 own-only blobs from the reviewed
+candidate tree, including the verified watchdog; the index excludes foreign
+contracts, and the worktree retains them. The candidate-only status assertion
+correction and formatting are included. Foreign date-column work also touches text.rs, dates.rs,
+the Search/panel captions and controls, and Model's short_header/.full hunks;
+preserve and exclude those alongside the earlier status-bar changes.
+
+#### Completed verification and history
+
+| Retained milestone | Commit | Full runs and result | Evidence |
+| --- | --- | --- | --- |
+| Work policy, bounded passes, drop intake and shutdown | `a86ff43` | 33–35; 35 green, 260 UI passed / 14 ignored | `V:/temp/gozler-window-stage1-integrated-review2.md`; Stage 1 logs |
+| Worker migration and shutdown ownership | `f66011f` | 36–38; 38 green, 262 / 14 | `V:/temp/gozler-window-stage2-build38.log`; worker review 3 |
+| Slow-work waiting and cancellation | `74128aa` | 39 green first run, 268 / 14 | `V:/temp/gozler-window-stage3-waiting-build39.log` |
+| Native waits and control owners | `47f06cc` | 40 green first run, 269 / 14 | `V:/temp/gozler-window-native-wait-controls-build40.log` |
+| Model state, feature captions and marquee ownership | `f5c8ec3` | 41–42; 42 green, 269 / 14 | `V:/temp/gozler-window-state-areas-build42.log` |
+| Feature owners, Work groups, Panel rows, explicit updates and watchdog | own-only blobs staged, uncommitted | 43–45 corrections; 46 green; 47 green, 282 / 14 | `V:/temp/gozler-window-integrated-build47.log`; six final specialist reviews and cancellation delta review2 |
+
+Current retained source reviews are clean:
+`V:/temp/gozler-window-work-groups-review1.md`,
+`V:/temp/gozler-window-panel-row-review1.md`,
+`V:/temp/gozler-window-feature-owner-review2.md`,
+`V:/temp/gozler-window-feature-integration-review3.md` and review4 above.
+Work contract: `V:/temp/gozler-window-work-groups-contract.md`.
+Setter audit: `V:/temp/gozler-window-stage8-remaining-setters.md`.
+These prove reviewed source, not unobserved runtime behavior.
+
+Detailed historical status through Full44 is retained at
+`V:/temp/gozler-window-execution-history-through44.md`; earlier checkpoint:
+`35919d6`, with `V:/temp/gozler-window-stage1-*` logs. Full33–35 include the
+restricted-environment pipe ACL/working-set failure corrected by an elevated
+Build35. Full41 caught two panel integration omissions fixed before Full42.
+Full43's import, caller, private threshold and timing reexport corrections passed
+focused source review before Full44. Later verification is recorded above.
+
+Accounting beyond full builds: six historical focused attempts through Stage 1,
+then one focused native-watchdog attempt and five later focused attempts
+(twelve total, including compile failures), plus the current own-only `core::`
+attempt (thirteenth) and its successful single-test recheck (fourteenth); one legitimate
+`-Timing timing_large_panel_selection`, two disposable watchdog timing attempts,
+and two native timing/visual attempts (both failed before timing); one baseline
+`-Release` attempt failed at locked executable publication; **no Criterion runs**.
+Last successful product-focused run:
+`-Test a_change_batch_keeps_the_taken_names_folded_once`,
+`V:/temp/gozler-window-stage1-cache-focused6.log`.
+The selection timing observed chosen-source medians 0.969 / 70.565 ms and counts
+0.017 / 1.861 ms at 1,000 / 100,000 entries, supporting `INLINE_ITEMS = 1,000`,
+not a before/after speed claim. Baseline and review:
+`V:/temp/gozler-window-stage1-pass-baseline.log`,
+`V:/temp/gozler-window-stage1-pass-timing-review1.md`.
+
+Lasting regressions through Build35 cover admission/stale replies, disposal
+affinity, inline/deferred equivalence, settings merge/coalescing, early WM_QUIT
+versus finalizer completion, clipboard retry, panel reconciliation/overflow/end
+evidence, native capture replacement, quick-search focus, operation receipt
+facts, id reservation and terminal Queue delivery. Stage 2 adds only
+`a_cancelled_ready_setup_is_removed_only_by_retirement` and
+`window_code_has_no_unowned_launcher_or_recognized_wait` (passed 37–38).
+Slow-work/native batches add lasting cancellation and hover-expiry cases; the
+Inspector age-timer invariant passed Full44. Existing caption/row tests moved
+with their owners; no display/getter tests added.
+
+#### Settled contracts and deferred proof
+
+- `core::work` owns policy and inline size; `win::work` alone constructs worker
+  capabilities and owns bounded execution/native cancellation/live delivery;
+  `app::work` routes typed purposes and results. Cancelling blocked work keeps
+  its slot; pending replaceable work coalesces. Large inputs, replies and final
+  drops retire off UI. Queue owns operation scheduling, cancellation and recovery.
+- Saves serialize changed-key/removal/scope intent and preserve unrelated disk
+  keys and later edits. Accepted mutations/export cleanup retain off-UI process
+  lifetime independently of essential settings/recovery writes. Normal Exit
+  destroys UI immediately; session end pumps at most two seconds, checks explicit
+  finalizer completion and preserves early WM_QUIT for the outer loop. Windows
+  sign-out may terminate unfinished persistence.
+- Queue is adopted only after restoration. Its session serializes commands FIFO,
+  reserves ids atomically and separates ordered/terminal acknowledgments from
+  ordinary reply pressure. Instance eligibility never substitutes for readiness.
+  Persistent Viewer/panel sessions keep blocked slots until actual cleanup;
+  native interruption alone does not end a session. Device registration uses a
+  bounded UI acknowledgment while the worker retains and closes native resources.
+- Shared snapshots and bounded commits preserve selection, Taken, epochs,
+  receipt-time operation facts and listing cutoffs. Panel watch overflow reports
+  terminal Lost after its accepted FIFO prefix. Native selection capture/apply/
+  deselect yields; commands/menus retain original side/list/focus. Filtering
+  blocks commands until accepted; transfers apply incrementally and keep displayed
+  targets. Program parsing precedes publication locks; slow work stays outside.
+- Shell purposes retain and pump their STA without borrowing the main HWND.
+  Clipboard retry is finite and sequence-aware. Drop data and capability COM
+  references remain distinct; accepted setup/GetData are FIFO with setup ack
+  first, right-drop destination is frozen, pending cancellation cannot restart
+  late, and async source completion has one obligation. Unknown in-process STA
+  providers may dispatch onto UI; failed marshaling has no UI GetData fallback.
+  Native drag imagery stays UI-affine. Do not claim universal provider safety.
+  Contracts: `V:/temp/gozler-window-stage1-drop-intake-contract.md` and
+  `V:/temp/gozler-window-stage1-drop-integration.md`; shell lifetime/contract/probe
+  reports use the same Stage 1 prefix. Disposable shell fixture was removed.
+- Awaited work reports waiting/Cancel after three seconds without expiry;
+  background observations expire silently at ten seconds while retaining their
+  execution slot. Settings cancellation stays scoped to page and purpose; active
+  noncancelable repair is not obscured. User cancellation never cancels accepted
+  protected writes or unrelated file operations.
+- Watchdog transport is **accepted by native evidence**. Synthetic attempt 3
+  proved menu, dialogs, sizing/moving and controlled-block behavior; the physical
+  check above proved OLE GiveFeedback and heartbeat delivery during the drag.
+  Reuse both records; no synthetic retry or recurring native regression suite.
+  The retained implementation is integrated and source-reviewed; removal of the
+  transport probe's disposable include is complete. Earlier evidence:
+  `V:/temp/gozler-window-stage3-watchdog-evidence3.log`.
+- Stage 4 conditional painting needs the same observed interaction before/after,
+  baseline `74128aa`; existing approved painting remains, no new painting added.
+  Environment/visual checks remain in `ui-after-install.md`, unrun. Native edit
+  clipboard wait is suspected and tracked as #147. A scan is only a backstop.
+- Ubuntu/platform cfg, core purity, MSRV and affected cargo-deny checks remain
+  with CI. Latest batches add no package dependency or wire layout. Existing
+  narrow `fetch_update` allowance remains until its replacement is available at
+  the project's MSRV (1.94 versus 1.95).
+- Preserve engine/shared transfer, synchronization commit, indexing and early
+  large-file contracts. The original source analysis was against `ab0e9b0` on
+  October 23; recheck present callers rather than treating that analysis as proof.
 
 ## Why
 
@@ -1394,6 +1426,13 @@ Split along those responsibilities; line count is a review prompt, not a
 completion quota or a reason to fragment coherent code and tests.
 
 ### Stage 7: what an update returns (maintenance)
+
+Prerewrite inventory (the immutable Stage 7 snapshot named above):
+`MainWindow::apply` executes `Then` before `Change` and refreshes bound controls,
+Inspector, polling and saved state for every accepted reply. `search` separately
+starts the naming timer; the save tail also copies Viewer state into Model.
+Keep replacement of these coupled paths with one implementer; review the
+retained three-phase implementation once the whole batch is complete.
 
 1. `Accepted` becomes `{ touched: Areas, effects: Vec<Effect> }`; `Then`
    becomes `Effect`, and `Change` goes. The stage starts by listing, from

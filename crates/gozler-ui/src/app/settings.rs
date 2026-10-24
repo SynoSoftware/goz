@@ -336,6 +336,7 @@ pub(super) struct SettingsDialog<'a> {
     /// once the dialog's buttons have their width.
     status_widths: OnceCell<(StatusWidths, Px)>,
     status_layout: Cell<Option<StatusLayout>>,
+    apply_shield: Cell<Option<bool>>,
 }
 
 impl<'a> SettingsDialog<'a> {
@@ -368,6 +369,7 @@ impl<'a> SettingsDialog<'a> {
             status: OnceCell::new(),
             status_widths: OnceCell::new(),
             status_layout: Cell::new(None),
+            apply_shield: Cell::new(None),
         }
     }
 
@@ -386,7 +388,7 @@ impl<'a> SettingsDialog<'a> {
         for control in status.text_controls() {
             control.set_font(&font);
         }
-        let (widest, cancel) = self.main.settings_status_texts();
+        let (widest, cancel) = self.main.settings.settings_status_texts(self.main);
         status.set_cancel_caption(&cancel);
         let (widths, font_height) = {
             let meter = TextMeter::new(&font);
@@ -710,8 +712,11 @@ impl<'a> SettingsDialog<'a> {
         let Some(list) = self.include_folders() else {
             return;
         };
-        let drives = self.main.include_drives(include);
-        let rows = self.main.include_summary(&self.strings, &drives, include);
+        let drives = self.main.settings.include_drives(self.main, include);
+        let rows = self
+            .main
+            .settings
+            .include_summary(self.main, &self.strings, &drives, include);
         let cells: Vec<[String; 3]> = rows.iter().map(|row| row.cells.clone()).collect();
         let shown = self.include_rows.replace(rows);
         let shown: Vec<[String; 3]> = shown.into_iter().map(|row| row.cells).collect();
@@ -740,14 +745,14 @@ impl<'a> SettingsDialog<'a> {
         };
         let (Some(edited), Some(applied)) = (edited, applied) else {
             // The service's state or failure, as the Index page says it.
-            label.set_text(&self.main.index_captions().service);
+            label.set_text(&self.main.settings.index_captions(self.main).service);
             return;
         };
-        let now = self.main.indexed_entries();
+        let now = self.main.settings.indexed_entries(self.main);
         let after = if edited == applied {
             Some(now)
         } else {
-            match self.main.included_count() {
+            match self.main.settings.included_count(self.main) {
                 Some(Ok(entries)) => Some(entries),
                 Some(Err(failure)) => {
                     label.set_text(&failure_text(&self.strings, &failure));
@@ -756,17 +761,22 @@ impl<'a> SettingsDialog<'a> {
                 None => None,
             }
         };
-        let volumes = self.main.connected_volumes();
+        let volumes = self.main.settings.connected_volumes(self.main);
         let volumes: Vec<&str> = volumes.iter().map(String::as_str).collect();
         let adds = edited.adds_to(&applied, &volumes);
-        let text = self.main.include_preview(&self.strings, now, after, adds);
+        let text = self
+            .main
+            .settings
+            .include_preview(self.main, &self.strings, now, after, adds);
         label.set_text(&text);
     }
 
     /// The Include settings changed: the preview asks the service for a new
     /// count once the person stops changing them for a moment.
     fn include_changed(&self, dialog: Hwnd) {
-        self.main.forget_included_count(self.window);
+        self.main
+            .settings
+            .forget_included_count(self.main, self.window);
         self.show_preview();
         dialog.set_timer(PREVIEW_TIMER, PREVIEW_DELAY_MS);
     }
@@ -785,7 +795,7 @@ impl<'a> SettingsDialog<'a> {
         if let Some(edited) = edited
             && Some(&edited) != applied.as_ref()
         {
-            self.main.count_included(edited);
+            self.main.settings.count_included(self.main, edited);
         }
     }
 
@@ -794,7 +804,7 @@ impl<'a> SettingsDialog<'a> {
         let Some(include) = self.draft.borrow().edited.include.clone() else {
             return;
         };
-        let drives = self.main.include_drives(&include);
+        let drives = self.main.settings.include_drives(self.main, &include);
         let state = IndexedFolders::new(self.main, &self.strings, &drives, include);
         let captions = DialogCaptions::new(DialogId::IndexedFolders, &self.strings);
         let ended = dialog::run_modal(dialog, DialogId::IndexedFolders, &captions, &state);
@@ -813,7 +823,8 @@ impl<'a> SettingsDialog<'a> {
         self.saving
             .replace(Some(Awaited::Include(include.clone(), after)));
         self.main
-            .run_as_administrator(self.window, Elevated::Include(include));
+            .settings
+            .run_as_administrator(self.main, self.window, Elevated::Include(include));
         true
     }
 
@@ -825,7 +836,8 @@ impl<'a> SettingsDialog<'a> {
         }
         self.saving.replace(Some(Awaited::Rebuild));
         self.main
-            .run_as_administrator(self.window, Elevated::Rebuild);
+            .settings
+            .run_as_administrator(self.main, self.window, Elevated::Rebuild);
         self.update_apply(dialog);
     }
 
@@ -842,7 +854,7 @@ impl<'a> SettingsDialog<'a> {
             self.sign_in_answered(dialog);
             return;
         }
-        let Some(answer) = self.main.take_include_saved() else {
+        let Some(answer) = self.main.settings.take_include_saved() else {
             return;
         };
         let Some(awaited) = self.saving.take() else {
@@ -905,9 +917,12 @@ impl<'a> SettingsDialog<'a> {
                 }
             }
             Err(error) => {
-                let message = self
-                    .main
-                    .shortcut_message(registration.shortcut(), &error, false);
+                let message = self.main.tray.shortcut_message(
+                    self.main,
+                    registration.shortcut(),
+                    &error,
+                    false,
+                );
                 self.refuse(
                     dialog,
                     SettingsPage::Keyboard,
@@ -925,7 +940,7 @@ impl<'a> SettingsDialog<'a> {
             let Some(Awaited::SignIn { id, on, .. }) = saving.as_ref() else {
                 return;
             };
-            (*id, *on, self.main.take_sign_in_saved(*id))
+            (*id, *on, self.main.settings.take_sign_in_saved(*id))
         };
         let Some(answer) = answer else { return };
         let changed = {
@@ -953,7 +968,7 @@ impl<'a> SettingsDialog<'a> {
             );
             win::dialog::error_box(Some(dialog), &text, self.strings.text("window.title"));
         }
-        if !self.main.sign_in_is_current(id) || win::window::quit_pending() {
+        if !self.main.settings.sign_in_is_current(self.main, id) || win::window::quit_pending() {
             return;
         }
         let Some(Awaited::SignIn { include, after, .. }) = self.saving.take() else {
@@ -994,7 +1009,7 @@ impl<'a> SettingsDialog<'a> {
             command_rows(
                 &self.strings,
                 &draft.edited.choices.shortcuts,
-                self.main.registered_shortcut(),
+                self.main.tray.registered_shortcut(),
                 &filter,
             )
         };
@@ -1018,6 +1033,7 @@ impl<'a> SettingsDialog<'a> {
         let keys: Vec<String> = match self.selected_command() {
             Some(CommandId::ShowWindow) => self
                 .main
+                .tray
                 .registered_shortcut()
                 .map(|show| show.text(&self.strings))
                 .into_iter()
@@ -1136,12 +1152,14 @@ impl<'a> SettingsDialog<'a> {
                 button.set_enabled(!saving);
             }
         }
-        for (button, key) in [
-            (DialogItem::Ok.id(), "button.ok"),
-            (ControlId::SettingsApply.id(), "settings.apply"),
-        ] {
-            if let Some(button) = Button::of_dialog(dialog, button) {
-                button.set_icon(ButtonIcon::of(key, include_changed));
+        if self.apply_shield.replace(Some(include_changed)) != Some(include_changed) {
+            for (button, key) in [
+                (DialogItem::Ok.id(), "button.ok"),
+                (ControlId::SettingsApply.id(), "settings.apply"),
+            ] {
+                if let Some(button) = Button::of_dialog(dialog, button) {
+                    button.set_icon(ButtonIcon::of(key, include_changed));
+                }
             }
         }
         let answers = self.index.borrow().as_ref().is_some_and(|c| c.has_report);
@@ -1193,7 +1211,7 @@ impl<'a> SettingsDialog<'a> {
                     )
                 }
                 None => {
-                    let mut job = self.main.settings_job(&self.strings);
+                    let mut job = self.main.settings.settings_job(self.main, &self.strings);
                     if self.status_request(now).is_some() {
                         job = JobCaption {
                             text: work::waiting(&self.strings, None),
@@ -1204,7 +1222,9 @@ impl<'a> SettingsDialog<'a> {
                     }
                     (
                         job,
-                        fixing.is_some() || request.is_some() || self.main.settings_waiting(now),
+                        fixing.is_some()
+                            || request.is_some()
+                            || self.main.settings.settings_waiting(self.main, now),
                     )
                 }
             }
@@ -1249,11 +1269,16 @@ impl<'a> SettingsDialog<'a> {
         if let Some(purpose) = self.status_request(now) {
             self.main.cancel_settings_request(self.window, purpose);
         } else if self.main.fix_waiting(now).is_some() {
-            if self.main.settings_job(&self.strings).cancel {
+            if self
+                .main
+                .settings
+                .settings_job(self.main, &self.strings)
+                .cancel
+            {
                 self.main.cancel_settings_fix(self.window);
             }
         } else {
-            self.main.cancel_settings_waiting();
+            self.main.settings.cancel_settings_waiting(self.main);
         }
         self.show_status(dialog);
     }
@@ -1530,7 +1555,9 @@ impl<'a> SettingsDialog<'a> {
             // The index changes while the dialog is open.
             self.show_preview();
         }
-        self.main.show_settings_page(self.window, page);
+        self.main
+            .settings
+            .show_settings_page(self.main, self.window, page);
         if page == Some(SettingsPage::Index) {
             dialog.set_timer(INDEX_TIMER, INDEX_REFRESH_MS);
             self.refresh_index(dialog);
@@ -1641,7 +1668,7 @@ impl<'a> SettingsDialog<'a> {
         if self.page(SettingsPage::Index).is_none() {
             return;
         }
-        let captions = self.main.index_captions();
+        let captions = self.main.settings.index_captions(self.main);
         // Stored first, because the drive list asks for its empty text
         // while its rows change.
         let shown = self.index.replace(Some(captions.clone()));
@@ -1812,22 +1839,23 @@ impl<'a> SettingsDialog<'a> {
         if edited == last {
             return true;
         }
-        let registration =
-            match self
-                .main
-                .prepare_shortcut(self.window, &edited.choices, &last.choices)
-            {
-                Err(message) => {
-                    self.refuse(
-                        dialog,
-                        SettingsPage::Keyboard,
-                        ControlId::KeyboardShortcut,
-                        &message,
-                    );
-                    return false;
-                }
-                Ok(registration) => registration,
-            };
+        let registration = match self.main.tray.prepare_shortcut(
+            self.main,
+            self.window,
+            &edited.choices,
+            &last.choices,
+        ) {
+            Err(message) => {
+                self.refuse(
+                    dialog,
+                    SettingsPage::Keyboard,
+                    ControlId::KeyboardShortcut,
+                    &message,
+                );
+                return false;
+            }
+            Ok(registration) => registration,
+        };
         let registration = if let Some(mut prepared) = registration {
             match prepared.poll() {
                 None => {
@@ -1843,9 +1871,12 @@ impl<'a> SettingsDialog<'a> {
                     return false;
                 }
                 Some(Err(error)) => {
-                    let message = self
-                        .main
-                        .shortcut_message(prepared.shortcut(), &error, false);
+                    let message = self.main.tray.shortcut_message(
+                        self.main,
+                        prepared.shortcut(),
+                        &error,
+                        false,
+                    );
                     self.refuse(
                         dialog,
                         SettingsPage::Keyboard,
@@ -1871,8 +1902,13 @@ impl<'a> SettingsDialog<'a> {
         after: AfterSave,
         registration: Option<Registration>,
     ) -> bool {
-        self.main
-            .apply_choices(self.window, &edited.choices, &last.choices, registration);
+        self.main.settings.apply_choices(
+            self.main,
+            self.window,
+            &edited.choices,
+            &last.choices,
+            registration,
+        );
         self.draft
             .borrow_mut()
             .choices_applied(edited.choices.clone());
@@ -1881,7 +1917,10 @@ impl<'a> SettingsDialog<'a> {
             .clone()
             .filter(|_| edited.include != last.include);
         let saving = if edited.start_at_sign_in != last.start_at_sign_in {
-            let id = self.main.set_sign_in(edited.start_at_sign_in);
+            let id = self
+                .main
+                .settings
+                .set_sign_in(self.main, edited.start_at_sign_in);
             self.saving.replace(Some(Awaited::SignIn {
                 id,
                 on: edited.start_at_sign_in,
@@ -1920,6 +1959,7 @@ impl<'a> SettingsDialog<'a> {
     /// Gives the push buttons of the dialog and its pages their icons, as
     /// they show while icons show or are hidden.
     fn show_button_glyphs(&self, dialog: Hwnd) {
+        self.apply_shield.set(None);
         dialog::show_glyphs(
             dialog,
             &DialogCaptions::new(DialogId::Settings, &self.strings),
@@ -1948,7 +1988,7 @@ impl<'a> SettingsDialog<'a> {
     /// The balloon says when both boxes already hold the command, because
     /// the link changes nothing then.
     fn total_commander_found(&self, dialog: Hwnd) {
-        let Some(found) = self.main.take_total_commander() else {
+        let Some(found) = self.main.settings.take_total_commander() else {
             return;
         };
         let link = self.control(
@@ -2249,7 +2289,7 @@ impl DialogProc for SettingsDialog<'_> {
         dialog.kill_timer(WAIT_TIMER);
         self.capture.take();
         self.saving.take();
-        self.main.settings_closed(dialog);
+        self.main.settings.settings_closed(dialog);
     }
 
     fn init(&self, dialog: Hwnd) -> Opened {
@@ -2287,7 +2327,7 @@ impl DialogProc for SettingsDialog<'_> {
             search.set_cue(self.strings.text("settings.search_cue"));
         }
         self.add_status_bar(dialog, &mut fonts);
-        self.main.settings_opened(dialog);
+        self.main.settings.settings_opened(self.main, dialog);
         self.show_page(dialog, Some(SettingsPage::General));
         if let Some(label) = self
             .page(SettingsPage::General)
@@ -2404,7 +2444,7 @@ impl DialogProc for SettingsDialog<'_> {
                 on_row
             }
             DialogMessage::Timer { id: INDEX_TIMER } => {
-                self.main.refresh_volume_labels();
+                self.main.settings.refresh_volume_labels(self.main);
                 self.refresh_index(dialog);
                 self.show_status(dialog);
                 return true;
@@ -2433,7 +2473,7 @@ impl DialogProc for SettingsDialog<'_> {
                 return true;
             }
             DialogMessage::LinkActivated { id } if is(id, ControlId::ContextMenuTotalCommander) => {
-                self.main.find_total_commander();
+                self.main.settings.find_total_commander(self.main);
                 true
             }
             DialogMessage::Focus { .. }

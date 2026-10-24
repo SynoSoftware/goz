@@ -2,9 +2,10 @@
 //! snapshots and reserves ids; only the session worker calls engine decisions.
 
 use crate::core::file_operations::ExitCounts;
-use crate::core::work::{INLINE_ITEMS, Retirement};
+use crate::core::work::{INLINE_ITEMS, Replacement, Retirement, Waiting};
 use crate::win::wake::OpenWaker;
-use crate::win::work::OffThread;
+use crate::win::work::{OffThread, Task};
+use gozler_client::CancelToken;
 use gozler_fileops::{
     Comparison, Operation, OperationId, OrderRefused, Queue, Request, ReservedId, SpeedSettings,
     Taken, TransferLimit,
@@ -18,6 +19,96 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, Sender, SyncSender, TrySendError, channel, sync_channel};
+use std::time::Instant;
+
+struct QueueStart {
+    path: PathBuf,
+    waker: OpenWaker,
+}
+
+pub(in crate::app) struct Work {
+    loading: Task<QueueStart, Option<Ready>>,
+    session: Option<Task<Session, ()>>,
+    waker: OpenWaker,
+}
+
+impl Work {
+    pub(super) fn new(waker: OpenWaker) -> Self {
+        Self {
+            loading: Task::new(waker.clone(), Replacement::Cancel, restore_queue)
+                .with_size(|_| INLINE_ITEMS + 1),
+            session: Some(
+                Task::new(
+                    waker.clone(),
+                    Replacement::Finish,
+                    |session: Session, worker, _| session.run(worker),
+                )
+                .with_size(|_| INLINE_ITEMS + 1),
+            ),
+            waker: waker.for_message(crate::win::file_operations::QUEUE_CHANGED),
+        }
+    }
+
+    pub(in crate::app) fn restore(&mut self, path: PathBuf) {
+        self.loading.submit(
+            QueueStart {
+                path,
+                waker: self.waker.clone(),
+            },
+            |_, new| new,
+        );
+    }
+
+    pub(in crate::app) fn take(&mut self) -> Option<Ready> {
+        self.loading.take().and_then(|(_, queue)| queue)
+    }
+
+    pub(in crate::app) fn adopt(&mut self, ready: Ready) -> Client {
+        let (client, session) = ready.adopt();
+        self.session
+            .as_mut()
+            .expect("the work owner remains open during queue adoption")
+            .replace(session);
+        client
+    }
+
+    pub(super) fn waiting(&self, now: Instant) -> Option<Waiting> {
+        self.loading.waiting(now)
+    }
+
+    pub(super) fn tick(&mut self, now: Instant) -> bool {
+        self.loading.tick(now).is_some()
+    }
+
+    pub(super) fn take_retired(&mut self) -> Retirement {
+        let mut retired = self.loading.take_retired();
+        if let Some(session) = &mut self.session {
+            retired.append(session.take_retired());
+        }
+        retired
+    }
+
+    pub(super) fn close(
+        &mut self,
+    ) -> (Retirement, impl FnOnce(&OffThread) + Send + 'static + use<>) {
+        self.loading.cancel();
+        let mut retired = self.loading.close_delivery();
+        retired.append(self.take_retired());
+        let session = self.session.take();
+        (retired, move |worker| {
+            if let Some(session) = session {
+                session.finish(worker);
+            }
+        })
+    }
+}
+
+fn restore_queue(start: QueueStart, worker: &OffThread, cancel: &CancelToken) -> Option<Ready> {
+    if cancel.is_cancelled() {
+        return None;
+    }
+    Some(restore(start.path, start.waker, worker))
+}
 
 const BATCH: usize = 32;
 

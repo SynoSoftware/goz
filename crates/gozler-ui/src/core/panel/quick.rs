@@ -1,9 +1,10 @@
 //! Quick-search keystrokes run in order against shared rows. Navigation and
 //! newer native interaction invalidate a late focus change.
 
+use super::rows::Folding;
 use super::*;
 use crate::core::fetch::CachedRows;
-use std::collections::VecDeque;
+use std::collections::{HashSet, VecDeque};
 
 #[derive(Clone, Copy, Debug)]
 pub(crate) enum QuickAction {
