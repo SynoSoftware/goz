@@ -1099,8 +1099,13 @@ impl MainWindow {
     }
 
     fn update_message(&self) {
+        let message = self.list_message();
+        self.controls().search.show_message(self, message.as_ref());
+    }
+
+    fn list_message(&self) -> Option<ListCaption> {
         let slow = self.slow_list_work(List::Search);
-        let message = if slow.is_some() && self.model.borrow().mode() == Mode::Search {
+        if slow.is_some() && self.model.borrow().mode() == Mode::Search {
             let model = self.model.borrow();
             let path = match slow {
                 Some(Awaited::Request(_) | Awaited::Selection(_)) => {
@@ -1120,8 +1125,7 @@ impl MainWindow {
             })
         } else {
             captions::list_message(&self.model.borrow())
-        };
-        self.controls().search.show_message(self, message.as_ref());
+        }
     }
 
     pub(super) fn slow_list_work(&self, list: List) -> Option<Awaited> {
@@ -1211,10 +1215,9 @@ impl MainWindow {
         self.poll_work(hwnd);
     }
 
-    /// Places a list's `message` control, which shows `text`, below the
-    /// header of `list`, `header` tall, and `buttons` in a row below it,
-    /// centred under a centred message, as a panel's.
-    fn place_message(
+    /// Returns the places for a list's `message` below its `header` and
+    /// `buttons` below the text, centred for a panel's message.
+    fn message_moves(
         &self,
         list: Rect,
         header: Px,
@@ -1222,7 +1225,7 @@ impl MainWindow {
         text: &str,
         buttons: &[Hwnd],
         centred: bool,
-    ) {
+    ) -> Vec<(Hwnd, Rect)> {
         let created = self.created();
         let metrics = created.metrics.get();
         let area = MessageArea::new(list, header, metrics.dpi);
@@ -1239,7 +1242,7 @@ impl MainWindow {
         };
         let mut moves = vec![(message, text)];
         moves.extend(buttons.iter().copied().zip(rects));
-        win::move_children(&moves);
+        moves
     }
 
     /// Places every control where `Layout::compute` says (DESIGN.md:
@@ -1306,6 +1309,7 @@ impl MainWindow {
             controls.search.list.hwnd(),
         ];
         let mut moves = Vec::new();
+        let mut shown = Vec::new();
         match &layout.body {
             Body::Search(placed) => moves.extend(strip.into_iter().zip([
                 placed.search,
@@ -1319,10 +1323,7 @@ impl MainWindow {
                 },
                 placed.list,
             ])),
-            Body::TwoPanels { panels, key_bar } => {
-                for (panel, placed) in controls.panels.sides.iter().zip(panels.iter()) {
-                    moves.extend(panel.placed(placed));
-                }
+            Body::TwoPanels { key_bar, .. } => {
                 moves.extend(
                     controls
                         .key_bar
@@ -1356,12 +1357,9 @@ impl MainWindow {
         // The inspector's texts are fitted again only when it moved or its
         // size changed, because fitting them measures each text. Their
         // controls move in this batch with the others (DESIGN.md: Painting).
-        let mut inspector_fit = selection_inspector
+        let inspector_fit = selection_inspector
             .filter(|_| inspector_moved)
             .map(|placed| self.controls().inspector.inspector_fit(self, placed));
-        if let Some(fit) = &mut inspector_fit {
-            moves.append(&mut fit.moves);
-        }
         if let Some(placed) = selection_inspector {
             moves.push((inspector.icon.hwnd(), placed.icon));
             moves.push((inspector.hide.hwnd(), placed.hide));
@@ -1387,6 +1385,65 @@ impl MainWindow {
                 .map(|divider| divider.hwnd())
                 .zip(layout.dividers.iter().copied()),
         );
+        for control in strip {
+            shown.push((control, search.is_some() && !maximized));
+        }
+        for side in Side::BOTH {
+            let placed = match &layout.body {
+                Body::TwoPanels { panels, .. } => Some(&panels[side.index()]),
+                Body::Search(_) => None,
+            };
+            controls
+                .panels
+                .prepare_panel(self, side, placed, &mut moves, &mut shown);
+        }
+        for button in controls.key_bar.buttons {
+            shown.push((button.hwnd(), search.is_none() && !maximized));
+        }
+        let visible = filters.is_some() && !maximized;
+        for control in [pane.title.hwnd(), pane.tools.hwnd(), pane.pane] {
+            shown.push((control, visible));
+        }
+        shown.push((pane.show.hwnd(), show_filters.is_some() && !maximized));
+        let visible = selection_inspector.is_some();
+        for control in [
+            inspector.icon.hwnd(),
+            inspector.heading.hwnd(),
+            inspector.hide.hwnd(),
+            inspector.copy_path.hwnd(),
+        ] {
+            shown.push((control, visible));
+        }
+        shown.extend(inspector.buttons.map(|button| (button.hwnd(), visible)));
+        inspector.prepare_fields(
+            self,
+            selection_inspector,
+            inspector_fit,
+            &mut moves,
+            &mut shown,
+        );
+        for (index, divider) in controls.dividers.iter().enumerate() {
+            shown.push((divider.hwnd(), index < layout.dividers.len() && !maximized));
+        }
+        let message = self.list_message();
+        let message_focus_lost = controls.search.prepare_message(
+            self,
+            message.as_ref(),
+            search.map(|placed| placed.list),
+            &mut moves,
+            &mut shown,
+        );
+        if let Some(operations) = self.file_operations.get() {
+            let view = self.model.borrow().operation_view();
+            operations.prepare_place(
+                placed_inspector.filter(|_| transfers).map(|i| i.area),
+                panes.flipped,
+                maximized,
+                view,
+                &mut moves,
+                &mut shown,
+            );
+        }
         let search_width = search.map(|placed| {
             (
                 placed.list.width,
@@ -1434,7 +1491,7 @@ impl MainWindow {
         // Fit shrinking columns before the move can introduce a horizontal
         // scroll bar; widening makes room before columns grow.
         fill_columns(true);
-        win::move_children(&moves);
+        win::place_children(&moves, &shown);
         fill_columns(false);
         if let Some(filters) = filters {
             self.controls()
@@ -1444,73 +1501,16 @@ impl MainWindow {
             // The paths are shortened to the list's new width.
             self.controls().filters.update_locations(self);
         }
-        for control in strip {
-            control.set_visible(search.is_some() && !maximized);
-        }
-        // A panel's path row and status line show as its kind says
-        // (`show_panel`).
-        for panel in &controls.panels.sides {
-            for control in [panel.drive.hwnd(), panel.list.hwnd()] {
-                control.set_visible(search.is_none() && !maximized);
-            }
-        }
-        for button in controls.key_bar.buttons {
-            button.hwnd().set_visible(search.is_none() && !maximized);
-        }
-        let shown = filters.is_some() && !maximized;
-        for control in [pane.title.hwnd(), pane.tools.hwnd(), pane.pane] {
-            control.set_visible(shown);
-        }
-        pane.show
-            .hwnd()
-            .set_visible(show_filters.is_some() && !maximized);
-        let shown = selection_inspector.is_some();
-        inspector.icon.hwnd().set_visible(shown);
-        inspector.heading.hwnd().set_visible(shown);
-        inspector.hide.hwnd().set_visible(shown);
-        inspector.copy_path.hwnd().set_visible(shown);
-        for button in inspector.buttons {
-            button.hwnd().set_visible(shown);
-        }
-        for (index, divider) in controls.dividers.iter().enumerate() {
-            divider
-                .hwnd()
-                .set_visible(index < layout.dividers.len() && !maximized);
-        }
         let status = StatusCaptions::new(&self.model.borrow(), &*self.numbers.borrow());
         controls
             .status
             .place_in_window(&layout.status, &status.right, status.memory.as_ref());
         controls.status.set_visible(!maximized);
-        if let Some(operations) = self.file_operations.get() {
-            operations.place(
-                placed_inspector.filter(|_| transfers).map(|i| i.area),
-                panes.flipped,
-                maximized,
-            );
-        }
         created.layout.replace(Some(layout));
-        // Each panel's message is placed for its text in its list.
-        for side in Side::BOTH {
-            self.controls().panels.show_panel(self, side);
-        }
-        if maximized {
-            for panel in &controls.panels.sides {
-                for control in panel.hwnds() {
-                    control.set_visible(false);
-                }
-            }
-            controls.search.message.hwnd().set_visible(false);
-            for button in controls.search.message_buttons {
-                button.hwnd().set_visible(false);
-            }
-        }
-        if inspector_moved {
-            self.controls().inspector.show_field_rows(self);
-            self.controls().inspector.show_inspector_fit(inspector_fit);
+        if message_focus_lost {
+            controls.search.row.input.hwnd().focus();
         }
         self.update_status();
-        self.update_message();
     }
 
     fn on_dpi_changed(&self, hwnd: Hwnd, dpi: Dpi, suggested: Rect) {

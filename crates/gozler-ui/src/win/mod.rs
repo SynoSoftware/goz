@@ -45,10 +45,10 @@ use windows::Win32::UI::WindowsAndMessaging::{
     GetClassNameW, GetClientRect, GetParent, GetWindowLongPtrW, GetWindowPlacement, GetWindowRect,
     GetWindowTextLengthW, GetWindowTextW, IsChild, IsIconic, IsWindowVisible, PostMessageW,
     SET_WINDOW_POS_FLAGS, SW_HIDE, SW_RESTORE, SW_SHOW, SW_SHOWDEFAULT, SW_SHOWMINNOACTIVE,
-    SW_SHOWNA, SW_SHOWNORMAL, SWP_NOACTIVATE, SWP_NOCOPYBITS, SWP_NOZORDER, SendMessageW,
-    SetForegroundWindow, SetWindowPos, SetWindowTextW, ShowWindow, UIS_CLEAR, UISF_HIDEFOCUS,
-    WINDOW_EX_STYLE, WINDOW_STYLE, WINDOWPLACEMENT, WM_CHANGEUISTATE, WM_SETREDRAW,
-    WPF_RESTORETOMAXIMIZED, WS_VISIBLE,
+    SW_SHOWNA, SW_SHOWNORMAL, SWP_HIDEWINDOW, SWP_NOACTIVATE, SWP_NOCOPYBITS, SWP_NOMOVE,
+    SWP_NOSIZE, SWP_NOZORDER, SWP_SHOWWINDOW, SendMessageW, SetForegroundWindow, SetWindowPos,
+    SetWindowTextW, ShowWindow, UIS_CLEAR, UISF_HIDEFOCUS, WINDOW_EX_STYLE, WINDOW_STYLE,
+    WINDOWPLACEMENT, WM_CHANGEUISTATE, WM_SETREDRAW, WPF_RESTORETOMAXIMIZED, WS_VISIBLE,
 };
 use windows::core::HSTRING;
 
@@ -404,22 +404,59 @@ impl Hwnd {
 /// resize that moves every control one at a time falls far behind the
 /// mouse.
 pub(crate) fn move_children(moves: &[(Hwnd, Rect)]) {
-    let moves: Vec<&(Hwnd, Rect)> = moves
-        .iter()
-        .filter(|(child, rect)| !child.is_placed_at(*rect))
-        .collect();
-    if moves.is_empty() {
+    place_children(moves, &[]);
+}
+
+/// Places and shows children in one native batch. All children must have
+/// the same parent; a child omitted from `moves` keeps its rectangle.
+pub(crate) fn place_children(moves: &[(Hwnd, Rect)], shown: &[(Hwnd, bool)]) {
+    let visibility = |child: Hwnd, visible| {
+        if child.styles().0.contains(WS_VISIBLE) == visible {
+            SET_WINDOW_POS_FLAGS(0)
+        } else if visible {
+            SWP_SHOWWINDOW
+        } else {
+            SWP_HIDEWINDOW
+        }
+    };
+    let mut placements = Vec::new();
+    for &(child, rect) in moves {
+        let moved = !child.is_placed_at(rect);
+        let show = shown
+            .iter()
+            .find(|(hwnd, _)| *hwnd == child)
+            .map_or(SET_WINDOW_POS_FLAGS(0), |&(_, visible)| {
+                visibility(child, visible)
+            });
+        if moved || show.0 != 0 {
+            // Copied client pixels can contain a sibling's old drawing.
+            let geometry = if moved {
+                SWP_NOCOPYBITS
+            } else {
+                SWP_NOMOVE | SWP_NOSIZE
+            };
+            placements.push((child, rect, geometry | show));
+        }
+    }
+    for &(child, visible) in shown {
+        if moves.iter().any(|(hwnd, _)| *hwnd == child) {
+            continue;
+        }
+        let show = visibility(child, visible);
+        if show.0 != 0 {
+            placements.push((child, Rect::default(), SWP_NOMOVE | SWP_NOSIZE | show));
+        }
+    }
+    if placements.is_empty() {
         return;
     }
-    // Copied client pixels can contain a sibling's old drawing during a
-    // coordinated resize; let each changed child paint its new rectangle.
-    let flags = SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOCOPYBITS;
+    let flags = SWP_NOZORDER | SWP_NOACTIVATE;
     // SAFETY: plain values. Each DeferWindowPos takes the batch handle and
     // returns the next one; EndDeferWindowPos, or a failed DeferWindowPos,
     // frees it.
     let applied = unsafe {
-        let mut batch = BeginDeferWindowPos(moves.len() as i32).ok();
-        for (child, rect) in &moves {
+        let mut batch = BeginDeferWindowPos(placements.len() as i32).ok();
+        for (child, rect, change) in &placements {
             batch = batch.and_then(|b| {
                 DeferWindowPos(
                     b,
@@ -429,7 +466,7 @@ pub(crate) fn move_children(moves: &[(Hwnd, Rect)]) {
                     rect.y.0,
                     rect.width.0,
                     rect.height.0,
-                    flags,
+                    flags | *change,
                 )
                 .ok()
             });
@@ -437,8 +474,8 @@ pub(crate) fn move_children(moves: &[(Hwnd, Rect)]) {
         batch.is_some_and(|b| EndDeferWindowPos(b).is_ok())
     };
     if !applied {
-        for (child, rect) in moves {
-            child.position(*rect, flags);
+        for (child, rect, change) in placements {
+            child.position(rect, flags | change);
         }
     }
 }

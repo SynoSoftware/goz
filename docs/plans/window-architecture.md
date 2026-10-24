@@ -47,11 +47,12 @@ runtime verification.
 **Stages1–3 and5–7 are complete;4 and8–9 remain incomplete.** The architecture
 is implemented and independently reviewed, but the visual gate is open.
 Retained commits:5fc49ca (architecture),7e0bfb1 (native layout),570711d
-(idle caption and structural mode/card redraw). Full50 is green: formatting,
-clippy, workspace tests and docs; UI282 passed,14 ignored. Full attempts:50.
-Log: `V:/temp/gozler-window-integrated-build50.log`.
+(idle caption and structural mode/card redraw). Full51 is green: formatting,
+clippy, workspace tests and docs; UI282 passed,14 ignored. Full attempts:51.
+Log: `V:/temp/gozler-window-integrated-build51.log`.
 Previous resumption used three full runs:48 failed only under the restricted
-token;49 and50 passed outside it. No further full build has run.
+token;49 and50 passed outside it. This continuation used one full run,51,
+outside the restricted token, after the retained batch and source reviews.
 
 **Causal investigation completed.** Three disposable focused attempts:
 cause1 stopped before READY because keyboard foreground was refused;
@@ -97,17 +98,38 @@ cause and complete affected-region restoration, never an unowned bit change.
 Also restore WS_CLIPSIBLINGS on the transfer child-window constructor,
 consistent with the other child windows.
 
-The retained native-control implementer owns the coupled batch in win/mod.rs,
+The retained native-control implementer completed the coupled batch in win/mod.rs,
 win/window.rs child creation, MainWindow layout, required Panel/Inspector
 visibility helpers, Search's message placement, and app/file_operations.rs
 placement/view code. MainWindow's existing message geometry gains a collection
 form reused by its callers; no message/focus rules are duplicated. Native pane
 WM_SIZE reentry and readiness before reveal remain required contracts. Root owns
 shared contracts, docs, integration and the only build. Foreign status work
-must remain intact. Expected round: one coherent implementation, one retained
-adversarial affected-contract review, the existing finite paired observation,
-then the consolidated required build. No further diagnostic expansion is
-planned. Do not review paths scheduled for replacement inside this batch.
+remains intact. The seven-file batch is frozen and root's source read plus
+the independent six-pass affected-contract delta are clean after one correction:
+`V:/temp/gozler-window-native-publication-review2.md`.
+Publication1 exposed a real first-open regression: optional View availability
+incorrectly gated pane visibility. The one-line correction restores visibility
+from the requested layout; an available current View is still applied first.
+No copied idle state, Queue snapshot query or follower scheduling change was added.
+Publication2 passed19.14seconds, including the real8MiB copy and completed shared
+pane. The two disposable module includes were removed before green Full51.
+No permanent test or Bench run was added. The native observation watches first
+open, actual transfer completion and layout publication, rather than getters.
+
+All516 desktop frames/126 changing groups and169 HWND frames were inspected.
+Final idle and Completed views are coherent; the earlier white control outlines
+and caption-cleared completion gap were not sampled. First reveal has one blank
+gray sample (33ms movie retention); preparation has one partial sample (50ms).
+Resize toolbar/count fragments remain. These captures establish intermediate
+publication, not persistent wrong native endpoints or physical scanout. Practical
+normal-speed acceptance remains unverified; do not claim all captured frames
+became atomic or delete the plan on the strength of a functional pass alone.
+Media: `V:/temp/gozler-window-paint-cause/publication2-media-audit.md`.
+Permanent Painting documentation describes the implemented rules, independently
+reviewed clean in `V:/temp/gozler-window-native-publication-doc-review.md`.
+No further diagnostic expansion or unproven paint mechanism is authorized by
+these observations alone; use the existing evidence for the next decision.
 
 Existing proofs remain reusable within their scope: native attempt6 selected2
 by Ctrl+click and100,000 by Shift+End, and verified an ended move's Summary,

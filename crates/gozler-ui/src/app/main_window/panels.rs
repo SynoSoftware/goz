@@ -467,15 +467,28 @@ impl Panels {
     /// the list's message and Retry, placed for their text. A path box with
     /// the focus keeps what the person types.
     pub(super) fn show_panel(&self, window: &MainWindow, side: Side) {
+        let placed = self.panel_layout(window, side);
+        let mut moves = Vec::new();
+        let mut shown = Vec::new();
+        self.prepare_panel(window, side, placed.as_ref(), &mut moves, &mut shown);
+        win::place_children(&moves, &shown);
+    }
+
+    pub(super) fn prepare_panel(
+        &self,
+        window: &MainWindow,
+        side: Side,
+        placed: Option<&PanelLayout>,
+        moves: &mut Vec<(Hwnd, Rect)>,
+        shown: &mut Vec<(Hwnd, bool)>,
+    ) {
         window.retire_model();
         let panes = window.model.borrow().panes();
         if panes.inspector
             && panes.maximized
             && panes.content == crate::core::layout::InspectorContent::Transfers
         {
-            for hwnd in self.panel(side).hwnds() {
-                hwnd.set_visible(false);
-            }
+            shown.extend(self.panel(side).hwnds().map(|hwnd| (hwnd, false)));
             return;
         }
         self.show_panel_kind(window, side);
@@ -494,25 +507,52 @@ impl Panels {
             c.look_in
                 .select(LookIn::ALL.iter().position(|l| *l == look_in).unwrap_or(0));
         }
-        let shown = window.model.borrow().mode() == Mode::TwoPanels;
+        let visible = self.panel_visible(window);
         let all_drives = kind == Some(LookIn::AllDrives);
-        c.path.hwnd().set_visible(shown && kind.is_none());
+        shown.extend([
+            (c.drive.hwnd(), visible),
+            (c.list.hwnd(), visible),
+            (c.path.hwnd(), visible && kind.is_none()),
+            (c.quick.hwnd(), visible && captions.quick),
+            (c.counts.hwnd(), visible && !captions.quick),
+            (c.free.hwnd(), visible && !captions.quick && !all_drives),
+            (c.folder.hwnd(), visible && !captions.quick && all_drives),
+        ]);
         for control in [c.search.hwnd(), c.look_in_label.hwnd(), c.look_in.hwnd()] {
-            control.set_visible(shown && kind.is_some());
+            shown.push((control, visible && kind.is_some()));
         }
-        c.quick.hwnd().set_visible(shown && captions.quick);
-        c.counts.hwnd().set_visible(shown && !captions.quick);
-        c.free
-            .hwnd()
-            .set_visible(shown && !captions.quick && !all_drives);
-        c.folder
-            .hwnd()
-            .set_visible(shown && !captions.quick && all_drives);
-        self.show_panel_message(window, side);
+        if let Some(placed) = placed {
+            moves.extend(c.placed(placed));
+        }
+        self.prepare_panel_message(window, side, placed, moves, shown);
         window.controls().key_bar.update_key_bar(window);
     }
 
+    fn panel_visible(&self, window: &MainWindow) -> bool {
+        let model = window.model.borrow();
+        let panes = model.panes();
+        model.mode() == Mode::TwoPanels
+            && !(panes.inspector
+                && panes.maximized
+                && panes.content == crate::core::layout::InspectorContent::Transfers)
+    }
+
     pub(super) fn show_panel_message(&self, window: &MainWindow, side: Side) {
+        let placed = self.panel_layout(window, side);
+        let mut moves = Vec::new();
+        let mut shown = Vec::new();
+        self.prepare_panel_message(window, side, placed.as_ref(), &mut moves, &mut shown);
+        win::place_children(&moves, &shown);
+    }
+
+    fn prepare_panel_message(
+        &self,
+        window: &MainWindow,
+        side: Side,
+        placed: Option<&PanelLayout>,
+        moves: &mut Vec<(Hwnd, Rect)>,
+        shown: &mut Vec<(Hwnd, bool)>,
+    ) {
         let folder_slow = window
             .created()
             .work
@@ -522,7 +562,7 @@ impl Panels {
             == Some(Waiting::Slow);
         let slow_request = window.slow_list_work(List::Panel(side));
         let slow = folder_slow || slow_request.is_some();
-        let (message, button, key, caption, shown) = {
+        let (message, button, key, caption) = {
             let model = window.model.borrow();
             let panel = model.panels().panel(side);
             let (mut message, retry) = captions::panel_message(&model, side);
@@ -538,35 +578,37 @@ impl Panels {
                 message = Some(crate::core::work::waiting(model.strings(), path));
             }
             let key = if slow { "button.cancel" } else { "panel.retry" };
-            let panes = model.panes();
-            let shown = model.mode() == Mode::TwoPanels
-                && !(panes.inspector
-                    && panes.maximized
-                    && panes.content == crate::core::layout::InspectorContent::Transfers);
             (
                 message,
                 slow || retry && panel.reading_generation().is_none(),
                 key,
                 model.strings().text(key).to_owned(),
-                shown,
             )
         };
+        let visible = self.panel_visible(window);
         let c = self.panel(side);
         let text = message.as_deref().unwrap_or_default();
         show_text(c.message.hwnd(), text);
         show_text(c.retry.hwnd(), &caption);
         c.retry.set_glyph(captions::button_glyph(key));
-        if shown
+        if visible
             && message.is_some()
-            && let Some(placed) = self.panel_layout(window, side)
+            && let Some(placed) = placed
         {
             let header = c.list.header().screen_rect().height;
             let retry = [c.retry.hwnd()];
             let buttons = if button { &retry[..] } else { &[] };
-            window.place_message(placed.list, header, c.message.hwnd(), text, buttons, true);
+            moves.extend(window.message_moves(
+                placed.list,
+                header,
+                c.message.hwnd(),
+                text,
+                buttons,
+                true,
+            ));
         }
-        c.message.hwnd().set_visible(shown && message.is_some());
-        c.retry.hwnd().set_visible(shown && button);
+        shown.push((c.message.hwnd(), visible && message.is_some()));
+        shown.push((c.retry.hwnd(), visible && button));
     }
 
     pub(super) fn panel_message_clicked(&self, window: &MainWindow, hwnd: Hwnd, side: Side) {
@@ -634,9 +676,8 @@ impl Panels {
         true
     }
 
-    /// Makes `side`'s controls follow the panel when it became a search
-    /// panel, left its search, or searches elsewhere: the search row or
-    /// the path box, the Folder column, and the status line's parts.
+    /// Prepares the Folder column before a changed panel's rows refresh;
+    /// [`Self::show_panel`] places and shows its controls together.
     pub(super) fn show_panel_kind(&self, window: &MainWindow, side: Side) {
         let wanted = window
             .model
@@ -670,9 +711,6 @@ impl Panels {
             }
             self.show_panel_sort(window, side);
             self.fill_panel_columns(window);
-        }
-        if let Some(placed) = self.panel_layout(window, side) {
-            win::move_children(&c.placed(&placed));
         }
     }
 

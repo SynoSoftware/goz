@@ -143,8 +143,6 @@ impl Inspector {
 pub(super) struct InspectorFit {
     pub(super) moves: Vec<(Hwnd, Rect)>,
     pub(super) texts: Vec<(Edit, String)>,
-    pub(super) one_entry: bool,
-    pub(super) folder_shown: bool,
 }
 
 impl Inspector {
@@ -193,7 +191,7 @@ impl Inspector {
         }
         let icon_changed = self.shown_icon.replace(icon) != icon;
         self.show_age(window);
-        self.show_fields(window);
+        self.fit_inspector(window);
         if icon_changed {
             inspector.icon.show_file_icon(self.large_images.zip(icon));
         }
@@ -219,40 +217,6 @@ impl Inspector {
         inspector.age.hwnd().set_text(age.as_deref().unwrap_or(""));
     }
 
-    pub(super) fn show_fields(&self, window: &MainWindow) {
-        self.show_field_rows(window);
-        self.fit_inspector(window);
-    }
-
-    /// Shows each field row that has a field and room in the pane, and
-    /// hides the others; the note and the age likewise.
-    pub(super) fn show_field_rows(&self, window: &MainWindow) {
-        let (rows, note, age) = {
-            let layout = window.created().layout.borrow();
-            let transfers = window.model.borrow().panes().content
-                == crate::core::layout::InspectorContent::Transfers;
-            let placed = layout
-                .as_ref()
-                .and_then(Layout::inspector)
-                .filter(|_| !transfers);
-            let room = placed.map_or(0, |i| i.fields.len());
-            let shown = InspectorCaptions::new(&window.model.borrow(), &*window.numbers.borrow());
-            let rows = room.min(shown.fields.len());
-            (
-                rows,
-                placed.is_some_and(|i| i.note.is_some()) && shown.note().is_some(),
-                MODIFIED_ROW < rows && shown.modified().is_some(),
-            )
-        };
-        let inspector = self;
-        for (index, (label, value)) in inspector.fields.iter().enumerate() {
-            label.hwnd().set_visible(index < rows);
-            value.hwnd().set_visible(index < rows);
-        }
-        inspector.note.hwnd().set_visible(note);
-        inspector.age.hwnd().set_visible(age);
-    }
-
     /// Fits the inspector's texts to their lines in the shown layout
     /// ([`Self::inspector_fit`]), when they change apart from a layout.
     pub(super) fn fit_inspector(&self, window: &MainWindow) {
@@ -260,10 +224,16 @@ impl Inspector {
         {
             return;
         }
-        let fit = (window.created().layout.borrow().as_ref())
+        let placed = (window.created().layout.borrow().as_ref())
             .and_then(Layout::inspector)
+            .cloned();
+        let fit = placed
+            .as_ref()
             .map(|placed| self.inspector_fit(window, placed));
-        self.show_inspector_fit(fit);
+        let mut moves = Vec::new();
+        let mut shown = Vec::new();
+        self.prepare_fields(window, placed.as_ref(), fit, &mut moves, &mut shown);
+        win::place_children(&moves, &shown);
     }
 
     /// Fits the inspector's texts to their lines in `placed`: a copy icon
@@ -288,7 +258,6 @@ impl Inspector {
         let focused = Hwnd::focused();
         let mut moves = Vec::new();
         let mut heading = placed.heading;
-        let mut folder_shown = false;
         if one_entry {
             let width = TextMeter::new(&fonts.heading).plain_width(&shown.heading);
             let (text, icon) = placed.copy_beside(heading, width);
@@ -307,7 +276,6 @@ impl Inspector {
                 let (fitted, icon) = placed.copy_beside(rect, meter.plain_width(text) + margins);
                 rect = fitted;
                 moves.push((inspector.copy_folder.hwnd(), icon));
-                folder_shown = true;
             } else if index == MODIFIED_ROW && shown.modified().is_some() {
                 let (fitted, age) = placed.age_beside(
                     rect,
@@ -327,35 +295,49 @@ impl Inspector {
             };
             texts.push((value, fitting));
         }
-        InspectorFit {
-            moves,
-            texts,
-            one_entry,
-            folder_shown,
-        }
+        InspectorFit { moves, texts }
     }
 
-    /// Shows `fit`: sets its texts, moves the controls it still moves and
-    /// shows the copy icons it places, or hides them for `None`, while the
-    /// inspector is hidden.
-    pub(super) fn show_inspector_fit(&self, fit: Option<InspectorFit>) {
-        let inspector = self;
-        let Some(fit) = fit else {
-            for copy in [inspector.copy_name, inspector.copy_folder] {
-                copy.hwnd().set_visible(false);
-            }
-            return;
-        };
-        // A new text notifies the window, whose handlers may borrow what
-        // `inspector_fit` borrowed, so no borrow is held here.
-        for (value, text) in fit.texts {
-            if value.text() != text {
+    pub(super) fn prepare_fields(
+        &self,
+        window: &MainWindow,
+        placed: Option<&InspectorLayout>,
+        fit: Option<InspectorFit>,
+        moves: &mut Vec<(Hwnd, Rect)>,
+        shown: &mut Vec<(Hwnd, bool)>,
+    ) {
+        if let Some(fit) = fit {
+            // A new text notifies the window, whose handlers may borrow what
+            // `inspector_fit` borrowed, so no borrow is held here.
+            for (value, text) in fit.texts {
                 value.hwnd().set_text(&text);
             }
+            moves.extend(fit.moves);
         }
-        win::move_children(&fit.moves);
-        inspector.copy_name.hwnd().set_visible(fit.one_entry);
-        inspector.copy_folder.hwnd().set_visible(fit.folder_shown);
+        let captions = InspectorCaptions::new(&window.model.borrow(), &*window.numbers.borrow());
+        let rows = placed
+            .map_or(0, |i| i.fields.len())
+            .min(captions.fields.len());
+        let one_entry = placed.is_some() && matches!(captions.inspected, Inspected::One { .. });
+        for (index, (label, value)) in self.fields.iter().enumerate() {
+            shown.push((label.hwnd(), index < rows));
+            shown.push((value.hwnd(), index < rows));
+        }
+        shown.extend([
+            (
+                self.note.hwnd(),
+                placed.is_some_and(|i| i.note.is_some()) && captions.note().is_some(),
+            ),
+            (
+                self.age.hwnd(),
+                MODIFIED_ROW < rows && captions.modified().is_some(),
+            ),
+            (self.copy_name.hwnd(), one_entry),
+            (
+                self.copy_folder.hwnd(),
+                one_entry && placed.is_some_and(|i| !i.fields.is_empty()),
+            ),
+        ]);
     }
 
     pub(super) fn remember_inspector_focus(&self, window: &MainWindow) {

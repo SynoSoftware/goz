@@ -443,7 +443,15 @@ impl FileOperations {
         hwnd.set_visible(true);
     }
 
-    pub(super) fn place(&self, area: Option<Rect>, flipped: bool, maximized: bool) {
+    pub(super) fn prepare_place(
+        &self,
+        area: Option<Rect>,
+        flipped: bool,
+        maximized: bool,
+        view: Option<Arc<View>>,
+        moves: &mut Vec<(Hwnd, Rect)>,
+        shown: &mut Vec<(Hwnd, bool)>,
+    ) {
         let Some(window) = (if area.is_some() {
             self.window()
         } else {
@@ -458,11 +466,21 @@ impl FileOperations {
         if window.maximized.replace(maximized) != maximized {
             window.apply_strings();
         }
-        if let Some(area) = area {
-            win::move_children(&[(hwnd, area)]);
-            window.layout(hwnd);
+        if area.is_some()
+            && let Some(view) = view
+        {
+            window.show_view(hwnd, view);
         }
-        hwnd.set_visible(area.is_some());
+        if let Some(area) = area {
+            let size = hwnd.client_size();
+            // A size change lays out the children through WM_SIZE; a move
+            // alone must still apply a changed flip before showing the pane.
+            if size.width == area.width && size.height == area.height {
+                window.layout(hwnd);
+            }
+            moves.push((hwnd, area));
+        }
+        shown.push((hwnd, area.is_some()));
     }
 
     pub(super) fn key(&self, target: Hwnd, key: crate::core::commands::Keystroke) -> bool {
@@ -992,7 +1010,7 @@ impl Pane {
     }
 
     fn layout(&self, hwnd: Hwnd) {
-        let view = self.view.borrow();
+        let view = self.view.borrow().clone();
         let multiple = view.as_ref().is_some_and(|v| v.rows.len() > 1);
         let report = view.as_ref().is_some_and(|v| v.report.is_some());
         let card = view.as_ref().and_then(|v| v.card.as_ref());
@@ -1015,83 +1033,98 @@ impl Pane {
         }
         let old_layout = self.layout.replace(layout);
         let c = self.controls();
-        if old_layout != layout {
-            let moves = [
-                (c.heading.hwnd(), layout.heading),
-                (c.count.hwnd(), layout.count),
-                (c.all.hwnd(), layout.all),
-                (c.flip.hwnd(), layout.flip),
-                (c.maximize.hwnd(), layout.maximize),
-                (c.hide.hwnd(), layout.hide),
-                (c.queue.hwnd(), layout.queue),
-                (c.list.hwnd(), layout.list),
-                (c.icon.hwnd(), layout.icon),
-                (c.title.hwnd(), layout.title),
-                (c.status.hwnd(), layout.status),
-                (c.rate.hwnd(), layout.rate),
-                (c.files_rate.hwnd(), layout.files_rate),
-                (c.doing.hwnd(), layout.doing),
-                (c.file.hwnd(), layout.file),
-                (c.file_bar.hwnd(), layout.file_bar),
-                (c.file_percent.hwnd(), layout.file_percent),
-                (c.file_bytes.hwnd(), layout.file_bytes),
-                (c.from_label.hwnd(), layout.from_label),
-                (c.from.hwnd(), layout.from),
-                (c.to_label.hwnd(), layout.to_label),
-                (c.to.hwnd(), layout.to),
-                (c.overall.hwnd(), layout.overall),
-                (c.total_bar.hwnd(), layout.total_bar),
-                (c.percent.hwnd(), layout.percent),
-                (c.items.hwnd(), layout.items),
-                (c.bytes.hwnd(), layout.bytes),
-                (c.pause.hwnd(), layout.pause),
-                (c.cancel.hwnd(), layout.cancel),
-                (c.report.hwnd(), layout.report),
-                (c.summary.hwnd(), layout.summary),
-            ];
-            win::move_children(&moves);
+        let moves = [
+            (c.heading.hwnd(), layout.heading),
+            (c.count.hwnd(), layout.count),
+            (c.all.hwnd(), layout.all),
+            (c.flip.hwnd(), layout.flip),
+            (c.maximize.hwnd(), layout.maximize),
+            (c.hide.hwnd(), layout.hide),
+            (c.queue.hwnd(), layout.queue),
+            (c.list.hwnd(), layout.list),
+            (c.icon.hwnd(), layout.icon),
+            (c.title.hwnd(), layout.title),
+            (c.status.hwnd(), layout.status),
+            (c.rate.hwnd(), layout.rate),
+            (c.files_rate.hwnd(), layout.files_rate),
+            (c.doing.hwnd(), layout.doing),
+            (c.file.hwnd(), layout.file),
+            (c.file_bar.hwnd(), layout.file_bar),
+            (c.file_percent.hwnd(), layout.file_percent),
+            (c.file_bytes.hwnd(), layout.file_bytes),
+            (c.from_label.hwnd(), layout.from_label),
+            (c.from.hwnd(), layout.from),
+            (c.to_label.hwnd(), layout.to_label),
+            (c.to.hwnd(), layout.to),
+            (c.overall.hwnd(), layout.overall),
+            (c.total_bar.hwnd(), layout.total_bar),
+            (c.percent.hwnd(), layout.percent),
+            (c.items.hwnd(), layout.items),
+            (c.bytes.hwnd(), layout.bytes),
+            (c.pause.hwnd(), layout.pause),
+            (c.cancel.hwnd(), layout.cancel),
+            (c.report.hwnd(), layout.report),
+            (c.summary.hwnd(), layout.summary),
+        ];
+        let mut shown = vec![
+            (c.list.hwnd(), queue),
+            (c.flip.hwnd(), multiple && card.is_some()),
+            (c.all.hwnd(), multiple),
+            (c.queue.hwnd(), queue),
+            (c.title.hwnd(), card.is_some() || !queue),
+            (c.status.hwnd(), card.is_some()),
+            (
+                c.icon.hwnd(),
+                card.is_some() && crate::win::gdi::icons_shown(),
+            ),
+        ];
+        for control in [
+            c.from_label.hwnd(),
+            c.from.hwnd(),
+            c.to_label.hwnd(),
+            c.to.hwnd(),
+            c.overall.hwnd(),
+            c.percent.hwnd(),
+            c.items.hwnd(),
+            c.bytes.hwnd(),
+            c.rate.hwnd(),
+        ] {
+            shown.push((control, card.is_some() && !report));
         }
-        c.list.hwnd().set_visible(queue);
-        c.flip.hwnd().set_visible(multiple && card.is_some());
-        c.all.hwnd().set_visible(multiple);
-        c.queue.hwnd().set_visible(queue);
-        for control in c.card_labels() {
-            control.set_visible(card.is_some() && !report);
-        }
-        c.title.hwnd().set_visible(card.is_some() || !queue);
-        c.status.hwnd().set_visible(card.is_some());
-        c.icon
-            .hwnd()
-            .set_visible(card.is_some() && crate::win::gdi::icons_shown());
         let meter = card.is_some_and(|card| card.file_bar.is_some()) && !report;
         for control in [
             c.file_bar.hwnd(),
             c.file_percent.hwnd(),
             c.file_bytes.hwnd(),
         ] {
-            control.set_visible(meter);
+            shown.push((control, meter));
         }
         let current = card.is_some_and(|card| !card.file.is_empty()) && !report;
         for control in [c.doing.hwnd(), c.file.hwnd()] {
-            control.set_visible(current);
+            shown.push((control, current));
         }
-        c.total_bar.hwnd().set_visible(card.is_some() && !report);
-        c.report.hwnd().set_visible(report);
-        c.summary.hwnd().set_visible(report);
         let buttons = card.map(|card| card.phase.buttons());
-        c.pause
-            .hwnd()
-            .set_visible(report || buttons.is_some_and(|b| b.run.is_some()));
-        c.cancel.hwnd().set_visible(report || card.is_some());
+        shown.extend([
+            (c.total_bar.hwnd(), card.is_some() && !report),
+            (c.report.hwnd(), report),
+            (c.summary.hwnd(), report),
+            (
+                c.pause.hwnd(),
+                report || buttons.is_some_and(|b| b.run.is_some()),
+            ),
+            (c.cancel.hwnd(), report || card.is_some()),
+            (
+                c.files_rate.hwnd(),
+                card.is_some()
+                    && !report
+                    && layout.files_rate.width > Px(0)
+                    && layout.title.width > px(70, hwnd),
+            ),
+        ]);
         c.cancel
             .hwnd()
             .set_enabled(report || card.is_some_and(|c| c.phase != RowPhase::Cancelling));
-        c.files_rate.hwnd().set_visible(
-            card.is_some()
-                && !report
-                && layout.files_rate.width > Px(0)
-                && layout.title.width > px(70, hwnd),
-        );
+        win::place_children(if old_layout != layout { &moves } else { &[] }, &shown);
         if old_layout.list != layout.list {
             c.list.set_tile_width(layout.list.width - px(21, hwnd));
         }

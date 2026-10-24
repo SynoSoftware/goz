@@ -2,8 +2,8 @@ use super::{
     Button, ButtonIcon, Cell, Column, ColumnFit, ColumnSizing, CommandId, ControlId, CustomDraw,
     DEFERRED, DispInfo, Dpi, DrawAnswer, DrawStage, DropDownList, Edit, Hwnd, LRESULT, Label,
     Layout, List, ListButton, ListCaption, ListNotify, ListView, MainWindow, MatchMode, Matching,
-    MenuItem, Px, Range, RefCell, ResultEnter, SELECTION_LIMIT, SortDir, TextMeter, Tool, Toolbar,
-    Tooltip, captions, clear_glyph, layout, matched_width, win,
+    MenuItem, Px, Range, Rect, RefCell, ResultEnter, SELECTION_LIMIT, SortDir, TextMeter, Tool,
+    Toolbar, Tooltip, captions, clear_glyph, layout, matched_width, win,
 };
 
 pub(super) struct Search {
@@ -102,6 +102,26 @@ impl Search {
 
     /// Shows the list's message and its buttons, or hides them.
     pub(super) fn show_message(&self, window: &MainWindow, message: Option<&ListCaption>) {
+        let list = (window.created().layout.borrow().as_ref())
+            .and_then(Layout::search)
+            .map(|search| search.list);
+        let mut moves = Vec::new();
+        let mut shown = Vec::new();
+        let focus_lost = self.prepare_message(window, message, list, &mut moves, &mut shown);
+        win::place_children(&moves, &shown);
+        if focus_lost {
+            self.row.input.hwnd().focus();
+        }
+    }
+
+    pub(super) fn prepare_message(
+        &self,
+        window: &MainWindow,
+        message: Option<&ListCaption>,
+        list: Option<Rect>,
+        moves: &mut Vec<(Hwnd, Rect)>,
+        shown: &mut Vec<(Hwnd, bool)>,
+    ) -> bool {
         let panes = window.model.borrow().panes();
         let maximized = panes.inspector
             && panes.maximized
@@ -141,9 +161,6 @@ impl Search {
                 .set(button.hwnd(), tip.unwrap_or_default());
         }
         // A hidden message is placed when it shows again.
-        let list = (window.created().layout.borrow().as_ref())
-            .and_then(Layout::search)
-            .map(|search| search.list);
         if message.is_some()
             && let Some(list) = list
         {
@@ -152,30 +169,24 @@ impl Search {
                 .take(buttons.len())
                 .map(|button| button.hwnd())
                 .collect();
-            window.place_message(
+            moves.extend(window.message_moves(
                 list,
                 header,
                 controls.search.message.hwnd(),
                 text,
                 &shown,
                 false,
-            );
+            ));
         }
-        controls
-            .search
-            .message
-            .hwnd()
-            .set_visible(message.is_some());
+        shown.push((controls.search.message.hwnd(), message.is_some()));
         let mut focus_lost = false;
         for (index, button) in controls.search.message_buttons.iter().enumerate() {
             let usable = buttons.get(index).is_some_and(|shown| shown.enabled);
             focus_lost |= !usable && focused == Some(button.hwnd());
-            button.hwnd().set_visible(index < buttons.len());
+            shown.push((button.hwnd(), index < buttons.len()));
         }
         // A hidden or disabled button would keep the focus but take no key.
-        if focus_lost {
-            controls.search.row.input.hwnd().focus();
-        }
+        focus_lost
     }
 
     /// Fills the list's width with its columns when the width changed
