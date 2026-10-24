@@ -1058,9 +1058,8 @@ impl Pane {
         for control in c.card_labels() {
             control.set_visible(card.is_some() && !report);
         }
-        for control in [c.title.hwnd(), c.status.hwnd()] {
-            control.set_visible(card.is_some());
-        }
+        c.title.hwnd().set_visible(card.is_some() || !queue);
+        c.status.hwnd().set_visible(card.is_some());
         c.icon
             .hwnd()
             .set_visible(card.is_some() && crate::win::gdi::icons_shown());
@@ -1139,12 +1138,31 @@ impl Pane {
     }
 
     fn show_view(&self, hwnd: Hwnd, view: Arc<View>) {
-        let c = self.controls();
-        let strings = self.strings.borrow().clone();
         let previous = self.view.borrow().clone();
         if previous.as_ref().is_some_and(|old| Arc::ptr_eq(old, &view)) {
             return;
         }
+        let shape = |view: &View| {
+            (
+                view.card.as_ref().map(|card| card.id),
+                view.report.is_some(),
+                view.rows.is_empty(),
+                view.rows.len() > 1,
+            )
+        };
+        if previous
+            .as_ref()
+            .is_none_or(|old| shape(old) != shape(&view))
+        {
+            hwnd.draw_now_after(|| self.apply_view(hwnd, view, previous));
+        } else {
+            self.apply_view(hwnd, view, previous);
+        }
+    }
+
+    fn apply_view(&self, hwnd: Hwnd, view: Arc<View>, previous: Option<Arc<View>>) {
+        let c = self.controls();
+        let strings = self.strings.borrow().clone();
         let old_card = previous.as_ref().and_then(|v| v.card.as_ref());
         let old_report = previous.as_ref().and_then(|v| v.report.as_ref());
         show_text(c.count.hwnd(), &view.queue);

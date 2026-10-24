@@ -45,70 +45,83 @@ runtime verification.
 ### Execution status
 
 **Resumed unattended; no owner questions are queued.** The architectural
-refactoring is implemented and reviewed. Full49 is green: formatting, clippy,
-workspace tests and documentation; UI:282 passed,14 ignored. This continuation
-used two full runs:48 hit known restricted-token named-pipe, ACL and working-set
-failures;49 passed outside that restriction without a source/test change.
-Root should have reused that environment first. Log:
-`V:/temp/gozler-window-integrated-build49.log`. Full attempts:49.
-Base for this layout batch:124ad99, after architecture commit5fc49ca.
-All four disposable current-tree probe includes are removed.
+refactoring is implemented and reviewed. Full50 passed formatting, clippy,
+workspace tests and documentation (UI:282 passed,14 ignored), including the
+retained structural redraw batch. Full attempts completed:50.
+This continuation used three full runs:48 hit known restricted-token pipe,
+ACL and working-set failures;49 and50 passed outside that restriction.
+Root should have reused that environment first.
+Log: `V:/temp/gozler-window-integrated-build50.log`.
+Architecture commit:5fc49ca; native layout commit:7e0bfb1.
+All disposable current-tree probe includes are removed.
 
 **Stages1–3 and5–7 are complete; stages4 and8–9 remain incomplete.**
-Retained native layout changes are reviewed and built: column fits before
-shrinking/after growing, actual post-move panel client widths, redraw only
-for changed columns, no layout-wide invalidation, and changed-child
-NOCOPYBITS with fallback parity. Review3 resolved review2's scrollbar-width
-finding: `V:/temp/gozler-window-stage4-layout-delta-review3.md`.
-No display tests, new painted surfaces, compositor or framework.
+Native layout changes are reviewed and built: column fits before shrinking/
+after growing, actual post-move panel client widths, redraw only for changed
+columns, no layout-wide invalidation, and changed-child NOCOPYBITS with
+fallback parity. Review3 resolved the scrollbar-width finding:
+`V:/temp/gozler-window-stage4-layout-delta-review3.md`.
+No display tests, painted surfaces, compositor or framework.
 
-**Native attempt6 passed** in1.91seconds: Ctrl+click selected2;
-Shift+End selected100,000 in native/model state; ended move reached its
-successful Summary, correct destination and no progress bar. Log:
-`V:/temp/gozler-window-final-native-proof6.log`.
-Handler samples: status2.068ms, key1.482ms, resize58.959ms,
-splitter70.031ms, Ctrl+click150.166ms, Shift+End49.049ms; move
-receipt0.167ms, Wake-handler sum6.589ms over2wakes. Different fixture and
-boundaries from8db8f37; no speedup claim. Native attempt5's nonreturning
-boundary remains unknown; a later pass does not explain it. Its in-thread
-deadline could not interrupt native nesting. Disposable checkpoints were
-added; no product timeout was lengthened. Potential remaining shell-icon
-waits are tracked in#148, separate from closed#87's migrated drag/open work.
+**Native attempt6 passed** in1.91seconds: Ctrl+click selected2; Shift+End
+selected100,000 in native/model state; an ended move reached its successful
+Summary, correct destination and no progress bar.
+Log: `V:/temp/gozler-window-final-native-proof6.log`.
+Handler samples: status2.068ms, key1.482ms, resize58.959ms, splitter70.031ms,
+Ctrl+click150.166ms, Shift+End49.049ms; move receipt0.167ms and Wake sum6.589ms
+over2wakes. Different fixture/boundaries from8db8f37; no speedup claim.
+Attempt5's nonreturning native boundary remains unknown; its in-thread deadline
+could not interrupt native nesting. Later success does not explain that run.
+Remaining suspected shell-icon waits are in#148, separate from closed#87.
 
-**Visual proof is not clean.** Historical74128aa and current real-window
-hosts completed the same finite border/splitter/typing/status/mode/copy
-sequence. Each copied8MiB and verified Summary, destination and shared pane.
-GDI outside-client artifacts are excluded. Authoritative WGC captures show
-95 baseline frames,97 initial current,105 correction1,113 correction2.
-All frames were inspected. Final audit:
-`V:/temp/gozler-window-stage4-8-wgc-correction2-audit.md`.
-Correction2 has no observed lost Search message or Search scrollbar flash.
-Mixed mode frames56–60, partial bottom controls62/64/66/70/75/77 and
-blank/partial completed-transfer card102–108 remain. Root independently
-expanded final frames26/77/105. Do not claim these resolved or delete the
-plan. Movies, frames, reports and immutable baseline remain saved in
-`V:/temp/gozler-window-*`; fixture data is disposable.
+**The visual acceptance gate remains open.** Historical74128aa and current
+real-window hosts completed the same finite border/splitter/typing/status/
+mode/copy sequence. Each copied8MiB and verified Summary and destination.
+GDI outside-client artifacts are excluded; WGC is authoritative. Saved runs:
+95 baseline frames,97 initial current,105 correction1,113 correction2,
+113 structural1 and115 structural2. Reports and all frames remain in
+`V:/temp/gozler-window-*`.
 
-Remaining work is the visual acceptance gate, followed by plan closure.
-No claim is made that independent HWND painting makes this impossible:
-the partial frames need a confirmed causal distinction between model
-presentation, native control state and native painting before another fix.
-This plan prohibits WS_EX_COMPOSITED; no new renderer is silently substituted.
-Installation and environment-specific checks remain in ui-after-install.md.
+Structural1 visibly fixes the hidden idle caption and removes the prior
+Clear-with-blank-completion-card interval. It substantially reduces mixed
+mode publication, but old inspector commands remain for one mode frame;
+Search resize/splitter and panel bottom-control fragments remain.
+Audit: `V:/temp/gozler-window-stage4-8-wgc-structural1-audit.md`.
+Root independently expanded15/52/62 and inspected completion sheets.
+
+A source-supported experiment flushed only already-pending native paints
+at layout return, without new invalidation or suppression. Structural2 still
+shows the same artifact classes; no benefit is demonstrated. Its helper,
+call and extraction are removed, restoring the exact reviewed structural1
+source (verified against the saved two-file snapshot). Do not retain
+unproven synchronous work or claim the strict all-frame criterion passed.
+The structural2 audit records exact remaining frames:
+`V:/temp/gozler-window-stage4-8-wgc-structural2-audit.md`. All115 frames were
+inspected, including20 expanded originals; root independently expanded50/63/107.
+That run includes an idle/partial/Clear publication before the settled completed
+card, so structural1's clean completion is run-specific evidence, not a
+universal paint guarantee. No further renderer experiment is in progress.
 
 #### Current batch and ownership
 
-Lead owns contracts, permanent docs, integration and the only build. Retained
-source is frozen, including the evidence-gated Stage4 native layout correction
-completed by the retained native-control implementer in MainWindow layout,
-Search/Panel column fitting, native positioning/list redraw and transfer-pane
-layout. It preserves foreign status changes and temporary probe includes.
-The correction1 frames show horizontal-scrollbar flashes, enabling Stage4's
-next conditional step: fit to the planned smaller width before moving. Native
-pixel copying and the partial transfer card are traced in the same batch.
-No owner questions, framework, new painted surface or display tests. All
-implementers/reviewers have returned ownership; the retained batch is green
-in Full49. The unresolved visual gate above remains the next plan item.
+Lead owns contracts, permanent docs, integration and the only build. The
+retained native-control implementer returned the idle visibility fix and
+structural mode/card redraw batch. Root and the retained flow reviewer read
+the affected contracts; all six delta perspectives were clean:
+`V:/temp/gozler-window-native-structural-review1.md`.
+One native redraw implementation adds UPDATENOW only for actual mode/card
+structure changes; ordinary resizing/progress retain their existing path.
+No model state, renderer, custom paint or display tests are added. Foreign
+status changes are preserved. The pending-paint experiment's clean safety
+review does not establish a visual benefit; that source slice is removed.
+
+Remaining work is the visual acceptance gate, followed by plan closure.
+No claim is made that independent HWND painting makes it impossible; the
+remaining transient publication needs a demonstrated cause and remedy,
+rather than another speculative rendering change. This plan prohibits
+WS_EX_COMPOSITED; no new renderer is silently substituted. Environment-
+specific checks remain in ui-after-install.md. Do not delete this plan or
+call the full refactoring finished while this gate remains open.
 All six final specialist
 reviews finished: five clean; flow found one Panel cancellation defect. Its owner
 fixed recovery after navigation cancellation and explicit Retry after cancelling

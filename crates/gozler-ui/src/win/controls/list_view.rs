@@ -100,7 +100,7 @@ impl ListView {
 
     /// Batches column changes without erasing the list's native buffer.
     pub(crate) fn draw_once_after(self, change: impl FnOnce()) {
-        self.0.redraw_after(change, false);
+        self.0.redraw_after(change, Default::default());
     }
 
     pub(crate) fn insert_column(self, index: usize, column: &ListColumn) {

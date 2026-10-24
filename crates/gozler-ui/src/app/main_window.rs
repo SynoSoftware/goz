@@ -1245,6 +1245,26 @@ impl MainWindow {
     /// Places every control where `Layout::compute` says (DESIGN.md:
     /// window rule 7), and shows only the controls of the shown mode.
     fn layout(&self, hwnd: Hwnd) {
+        let mode = self.model.borrow().mode();
+        let mode_changed = self
+            .created()
+            .layout
+            .borrow()
+            .as_ref()
+            .is_some_and(|previous| {
+                matches!(
+                    (&previous.body, mode),
+                    (Body::Search(_), Mode::TwoPanels) | (Body::TwoPanels { .. }, Mode::Search)
+                )
+            });
+        if mode_changed {
+            hwnd.draw_now_after(|| self.place_controls(hwnd));
+        } else {
+            self.place_controls(hwnd);
+        }
+    }
+
+    fn place_controls(&self, hwnd: Hwnd) {
         let created = self.created();
         let controls = &created.controls;
         let metrics = created.metrics.get();

@@ -37,7 +37,7 @@ use crate::core::settings::Placement;
 use windows::Win32::Foundation::{HWND, LPARAM, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::{
     InvalidateRect, MapWindowPoints, RDW_ALLCHILDREN, RDW_ERASE, RDW_FRAME, RDW_INVALIDATE,
-    RedrawWindow,
+    RDW_UPDATENOW, REDRAW_WINDOW_FLAGS, RedrawWindow,
 };
 use windows::Win32::UI::Input::KeyboardAndMouse::{GetFocus, IsWindowEnabled, SetFocus};
 use windows::Win32::UI::WindowsAndMessaging::{
@@ -293,10 +293,16 @@ impl Hwnd {
     /// visible, as a regional-format change would make the main window
     /// while it is hidden in the notification area.
     pub(crate) fn draw_once_after(self, change: impl FnOnce()) {
-        self.redraw_after(change, true);
+        self.redraw_after(change, RDW_ERASE);
     }
 
-    fn redraw_after(self, change: impl FnOnce(), erase: bool) {
+    /// As [`Self::draw_once_after`], but processes pending native paints
+    /// before returning.
+    pub(crate) fn draw_now_after(self, change: impl FnOnce()) {
+        self.redraw_after(change, RDW_ERASE | RDW_UPDATENOW);
+    }
+
+    fn redraw_after(self, change: impl FnOnce(), flags: REDRAW_WINDOW_FLAGS) {
         if !self.styles().0.contains(WS_VISIBLE) {
             change();
             return;
@@ -311,10 +317,7 @@ impl Hwnd {
                 Some(self.0),
                 None,
                 None,
-                RDW_FRAME
-                    | RDW_INVALIDATE
-                    | RDW_ALLCHILDREN
-                    | if erase { RDW_ERASE } else { Default::default() },
+                RDW_FRAME | RDW_INVALIDATE | RDW_ALLCHILDREN | flags,
             );
         }
     }
