@@ -46,8 +46,8 @@ use crate::core::layout::{
     MessageArea, Px, Rect, ScrollRequest, Size, StatusLayout, ToolHeights,
 };
 use crate::core::model::{
-    Accepted, Change, Column, ExportError, ExportFormat, Job, Model, SaveScope, ScopeCheck,
-    SearchBoxEnter, Then,
+    Accepted, Change, Column, ExportError, ExportFormat, Instance, Job, Model, SaveScope,
+    ScopeCheck, SearchBoxEnter, Then,
 };
 use crate::core::open::{Commands, Entries, EntryAction, Selected};
 use crate::core::operations::{
@@ -62,7 +62,7 @@ use crate::core::query::{
 use crate::core::results::{Fix, ListButton};
 use crate::core::search_list::Deselect;
 use crate::core::selection::{DRAG_LIMIT, RowSelection, SELECTION_LIMIT, Selection, wide_path};
-use crate::core::settings::{Choices, Mode, ResultEnter, SettingsValues};
+use crate::core::settings::{Choices, Mode, ResultEnter, SettingsPage, SettingsValues};
 use crate::core::shortcuts::{CommandShortcuts, ShowShortcut};
 use crate::core::text::{LanguageChoice, Numbers, Strings, without_access_key};
 use crate::core::work::{Id, Retirement, Waiting};
@@ -112,70 +112,8 @@ mod synchronize;
 use drops::DragIn;
 use panels::{KEY_BAR, KEY_TIPS, PanelControls};
 
-mod timer {
-    use crate::core::fetch::List;
-
-    /// Search as you type waits this long after the last keystroke.
-    pub(super) const SEARCH: usize = 1;
-    pub(super) const STATUS: usize = 2;
-    /// The selection is read this long after it last changed.
-    pub(super) const SELECTION: usize = 3;
-    /// The inspector's age of the modification time, while it shows one.
-    pub(super) const AGE: usize = 4;
-    /// Scrolls the list while dragged files rest at its top or bottom edge.
-    pub(super) const DROP_SCROLL: usize = 6;
-    /// `ui.json` is saved this long after the window's saved state last
-    /// changed, so a change survives a window that does not exit, and a
-    /// splitter drag saves once.
-    pub(super) const SAVE: usize = 7;
-    /// Each panel's folder sizes and free space are read again this long
-    /// after the last change in its folder, by side.
-    pub(super) const PANEL_SETTLE: [usize; 2] = [8, 9];
-    /// Each panel asks for its folder sizes once more after an operation in
-    /// it ended, by side.
-    pub(super) const PANEL_AGAIN: [usize; 2] = [10, 11];
-    /// Each search panel's search waits this long after the last keystroke,
-    /// by side.
-    pub(super) const PANEL_SEARCH: [usize; 2] = [12, 13];
-    /// Each search panel's selection is read this long after it last changed,
-    /// by side.
-    pub(super) const PANEL_SELECTION: [usize; 2] = [14, 15];
-    /// Reads a running file operation's counts, which change without a
-    /// wake.
-    pub(super) const OPERATIONS_POLL: usize = 16;
-    /// Names Search's search as running in the status bar once it has run
-    /// this long.
-    pub(super) const SEARCHING: usize = 18;
-    /// The same for each search panel's search, by side.
-    pub(super) const PANEL_SEARCHING: [usize; 2] = [19, 20];
-    pub(super) const DATES: usize = 21;
-    pub(super) const CLIPBOARD: usize = 22;
-    pub(super) const WORK: usize = 23;
-
-    /// The timer of `list`'s search.
-    pub(super) fn search(list: List) -> usize {
-        match list {
-            List::Search => SEARCH,
-            List::Panel(side) => PANEL_SEARCH[side.index()],
-        }
-    }
-
-    /// The timer that names `list`'s search as running.
-    pub(super) fn searching(list: List) -> usize {
-        match list {
-            List::Search => SEARCHING,
-            List::Panel(side) => PANEL_SEARCHING[side.index()],
-        }
-    }
-
-    /// The timer that reads `list`'s selection.
-    pub(super) fn selection(list: List) -> usize {
-        match list {
-            List::Search => SELECTION,
-            List::Panel(side) => PANEL_SELECTION[side.index()],
-        }
-    }
-}
+mod timer;
+use timer::Timer;
 
 const SEARCH_DELAY_MS: u32 = 150;
 /// A search that answers within this time keeps the previous counts until
@@ -796,21 +734,28 @@ struct OpenSettings {
     follow_fix: bool,
 }
 
-/// Which Gozler of the session a window is (DESIGN.md: Window lifetime).
 #[derive(Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Instance {
-    /// The first: it has the tray icon and the shortcut to show Gozler, and
-    /// checks for updates.
-    First,
-    /// A later start while "Allow only one Gozler window" is off: Close
-    /// ends it, and it saves only what Settings applies, so closing it
-    /// never undoes a setting that another window saved.
-    Another,
+enum Ending {
+    Running,
+    ForSetup,
+    ForReset,
+}
+
+#[derive(Clone, Copy)]
+enum RangeList {
+    Idle,
+    Closing(RangeFilter, ListClosing),
+    Closed(RangeFilter),
+}
+
+enum IncludeSave {
+    Idle,
+    Saving,
+    Saved(Result<(), NotSaved>),
 }
 
 pub(crate) struct MainWindow {
     created: OnceCell<Created>,
-    instance: Instance,
     model: RefCell<Model>,
     numbers: RefCell<WindowsNumbers>,
     dates: RefCell<Dates>,
@@ -834,18 +779,9 @@ pub(crate) struct MainWindow {
     column_dragged: Cell<bool>,
     /// The filter pane's scroll position.
     filter_scroll: Cell<Px>,
-    /// How the open Date modified or Size list is closing, between its
-    /// `CBN_SELENDOK` or `CBN_SELENDCANCEL` and its `CBN_CLOSEUP`.
-    range_closing: Cell<Option<(RangeFilter, ListClosing)>>,
-    /// The range list that closed on a choice, whose Custom… opens its
-    /// dialog in [`Message::Deferred`], after the list has said which item
-    /// it closed on, in whichever order it sends that.
-    range_closed: Cell<Option<RangeFilter>>,
-    /// Whether the downloaded setup started, so the window closes once its
-    /// message loop has ended.
-    closing_for_setup: Cell<bool>,
-    /// Whether the window exited for Settings' Reset all.
-    resetting: Cell<bool>,
+    /// Custom opens from Deferred, after the list's final selection notice.
+    range_list: Cell<RangeList>,
+    ending: Cell<Ending>,
     /// What the inspector shows, so a reply that changes none of it sets no
     /// text, and the index of its icon in the system image lists.
     inspector_shown: RefCell<(InspectorCaptions, Option<i32>)>,
@@ -884,8 +820,7 @@ pub(crate) struct MainWindow {
     /// The open Settings dialog, from its WM_INITDIALOG until it closes.
     settings: Cell<Option<OpenSettings>>,
     total_commander: RefCell<Option<Result<Option<String>, DaemonFailure>>>,
-    /// The acknowledged Include save or index rebuild for Settings.
-    include_saved: RefCell<Option<Result<(), NotSaved>>>,
+    include_save: RefCell<IncludeSave>,
     sign_in_saved: RefCell<Option<(Id, io::Result<()>)>>,
     /// A Paste whose thread reads the clipboard.
     pasting: RefCell<HashMap<OperationId, PathBuf>>,
@@ -1013,7 +948,6 @@ impl MainWindow {
         model: Model,
         settings_file: PathBuf,
         show_message: u32,
-        instance: Instance,
         sign_in: bool,
     ) -> (Hwnd, Rc<MainWindow>) {
         let placement = model.placement();
@@ -1021,9 +955,9 @@ impl MainWindow {
             .expect("the accelerator table builds");
         let viewers = Viewers::new(model.viewer());
         let dates = Dates::new(model.choices().date_format, jiff::Zoned::now());
+        let instance = model.instance();
         let window = Rc::new(MainWindow {
             created: OnceCell::new(),
-            instance,
             model: RefCell::new(model),
             numbers: RefCell::new(WindowsNumbers::new()),
             dates: RefCell::new(dates),
@@ -1038,10 +972,8 @@ impl MainWindow {
             told: Default::default(),
             column_dragged: Cell::new(false),
             filter_scroll: Cell::new(Px(0)),
-            range_closing: Cell::new(None),
-            range_closed: Cell::new(None),
-            closing_for_setup: Cell::new(false),
-            resetting: Cell::new(false),
+            range_list: Cell::new(RangeList::Idle),
+            ending: Cell::new(Ending::Running),
             inspector_shown: RefCell::new((InspectorCaptions::default(), None)),
             status_right: RefCell::new(Vec::new()),
             status_memory: RefCell::new(None),
@@ -1059,7 +991,7 @@ impl MainWindow {
             unshown: Cell::new(false),
             settings: Cell::new(None),
             total_commander: RefCell::new(None),
-            include_saved: RefCell::new(None),
+            include_save: RefCell::new(IncludeSave::Idle),
             sign_in_saved: RefCell::new(None),
             pasting: RefCell::new(HashMap::new()),
             shutdown: RefCell::new(None),
@@ -1115,6 +1047,10 @@ impl MainWindow {
         self.created
             .get()
             .expect("the window procedure runs a handler only after WM_CREATE made the controls")
+    }
+
+    fn instance(&self) -> Instance {
+        self.model.borrow().instance()
     }
 
     fn on_create(&self, hwnd: Hwnd) -> bool {
@@ -1386,6 +1322,7 @@ impl MainWindow {
             let model = self.model.borrow();
             let state = State {
                 model: &model,
+                operations_ready: self.file_operations.get().is_some(),
                 focus: Focus::Other,
                 list: model.active_list(),
             };
@@ -1462,9 +1399,9 @@ impl MainWindow {
             .hwnd()
             .set_text(captions.note().unwrap_or(""));
         if captions.modified().is_some() {
-            hwnd.set_timer(timer::AGE, AGE_REFRESH_MS);
+            hwnd.set_timer(Timer::Age.id(), AGE_REFRESH_MS);
         } else {
-            hwnd.kill_timer(timer::AGE);
+            hwnd.kill_timer(Timer::Age.id());
         }
         // The shell call can dispatch messages, so no borrow is held
         // (DESIGN.md: window rule 1).
@@ -1971,7 +1908,7 @@ impl MainWindow {
     /// Closes the window after its message loop has ended, when the setup
     /// asked for it in [`MainWindow::run_setup`].
     pub(super) fn close_for_setup(&self, hwnd: Hwnd) {
-        if self.closing_for_setup.get() {
+        if self.ending.get() == Ending::ForSetup {
             self.exit(hwnd);
         }
     }
@@ -2088,7 +2025,7 @@ impl MainWindow {
             }
         }
         if awaited == Awaited::Clipboard {
-            hwnd.kill_timer(timer::CLIPBOARD);
+            hwnd.kill_timer(Timer::Clipboard.id());
         }
         self.update_message();
         if let List::Panel(side) = list {
@@ -2720,6 +2657,7 @@ impl MainWindow {
         let global_cancel = self.main_waiting().is_some_and(Awaited::can_cancel);
         let state = State {
             model: &model,
+            operations_ready: self.file_operations.get().is_some(),
             focus,
             list: context.list,
         };
@@ -2790,6 +2728,7 @@ impl MainWindow {
             let model = self.model.borrow();
             item.enabled(&State {
                 model: &model,
+                operations_ready: self.file_operations.get().is_some(),
                 focus,
                 list,
             }) || (item == MenuItem::Run(CommandId::Cancel)
@@ -2993,7 +2932,7 @@ impl MainWindow {
     /// Search's Location uses its last background observation; a search panel's
     /// folder is the one the panel just showed.
     fn search(&self, hwnd: Hwnd, list: List) {
-        hwnd.kill_timer(timer::search(list));
+        hwnd.kill_timer(Timer::Search(list).id());
         let start = QueryStart {
             now: jiff::Timestamp::now(),
             time_zone: jiff::tz::TimeZone::system(),
@@ -3008,7 +2947,7 @@ impl MainWindow {
         };
         let accepted = self.model.borrow_mut().start_search(list, &start, scope);
         if accepted.change == Change::Searching(list) {
-            hwnd.set_timer(timer::searching(list), SEARCHING_NAMED_MS);
+            hwnd.set_timer(Timer::Searching(list).id(), SEARCHING_NAMED_MS);
         }
         self.apply(hwnd, accepted);
     }
@@ -3016,7 +2955,7 @@ impl MainWindow {
     /// Names `list`'s search as running, once it has run
     /// [`SEARCHING_NAMED_MS`] without an answer.
     fn name_search(&self, hwnd: Hwnd, list: List) {
-        hwnd.kill_timer(timer::searching(list));
+        hwnd.kill_timer(Timer::Searching(list).id());
         let accepted = self.model.borrow_mut().name_search(list);
         self.apply(hwnd, accepted);
     }
@@ -3173,7 +3112,7 @@ impl MainWindow {
     /// The selection timer of `list` ran out: its selected rows are asked
     /// for.
     fn fetch_selection(&self, hwnd: Hwnd, list: List) {
-        hwnd.kill_timer(timer::selection(list));
+        hwnd.kill_timer(Timer::Selection(list).id());
         let fetch = self.model.borrow_mut().read_selection(list);
         if let Some(fetch) = fetch {
             self.start(fetch);
@@ -3194,10 +3133,12 @@ impl MainWindow {
                     self.search(hwnd, list);
                 }
             }
-            Some(Then::SearchSoon(list)) => hwnd.set_timer(timer::search(list), SEARCH_DELAY_MS),
+            Some(Then::SearchSoon(list)) => {
+                hwnd.set_timer(Timer::Search(list).id(), SEARCH_DELAY_MS)
+            }
             Some(Then::ReadSelectionSoon(list)) => {
                 self.cancel_request(Purpose::Selection(list));
-                hwnd.set_timer(timer::selection(list), SELECTION_DELAY_MS);
+                hwnd.set_timer(Timer::Selection(list).id(), SELECTION_DELAY_MS);
             }
             Some(Then::Cancel(purpose)) => self.cancel_request(purpose),
             Some(Then::AskLatestRelease) => self.ask_latest_release(),
@@ -3472,7 +3413,7 @@ impl MainWindow {
             model.saved_state_changed()
         };
         if changed {
-            hwnd.set_timer(timer::SAVE, SAVE_DELAY_MS);
+            hwnd.set_timer(Timer::Save.id(), SAVE_DELAY_MS);
         }
     }
 
@@ -3582,7 +3523,7 @@ impl MainWindow {
                             None => {
                                 // Setup waits for Gozler to close. Native modal
                                 // loops must unwind before its HWND is destroyed.
-                                self.closing_for_setup.set(true);
+                                self.ending.set(Ending::ForSetup);
                                 win::window::quit_modal_loops();
                             }
                         }
@@ -3669,9 +3610,9 @@ impl MainWindow {
         let polls = self.model.borrow().polls_status(on_screen);
         if polls != self.polling.replace(polls) {
             if polls {
-                hwnd.set_timer(timer::STATUS, STATUS_POLL_MS);
+                hwnd.set_timer(Timer::Status.id(), STATUS_POLL_MS);
             } else {
-                hwnd.kill_timer(timer::STATUS);
+                hwnd.kill_timer(Timer::Status.id());
             }
         }
     }
@@ -3691,9 +3632,9 @@ impl MainWindow {
     fn follow_dates(&self, hwnd: Hwnd) {
         if self.dates.borrow().format == DateFormat::Relative && hwnd.is_on_screen() {
             self.refresh_dates();
-            hwnd.set_timer(timer::DATES, AGE_REFRESH_MS);
+            hwnd.set_timer(Timer::Dates.id(), AGE_REFRESH_MS);
         } else {
-            hwnd.kill_timer(timer::DATES);
+            hwnd.kill_timer(Timer::Dates.id());
         }
     }
 
@@ -3807,7 +3748,7 @@ impl MainWindow {
         let copied = self.created().work.borrow_mut().take_copied();
         match copied {
             Some(CopyNotice::Retry) => hwnd.set_timer(
-                timer::CLIPBOARD,
+                Timer::Clipboard.id(),
                 crate::core::clipboard::RETRY_AFTER.as_millis() as u32,
             ),
             Some(CopyNotice::Failed(id, error)) => {
@@ -3934,9 +3875,9 @@ impl MainWindow {
             }
         }
         if polled.active {
-            hwnd.set_timer(timer::WORK, 250);
+            hwnd.set_timer(Timer::Work.id(), 250);
         } else {
-            hwnd.kill_timer(timer::WORK);
+            hwnd.kill_timer(Timer::Work.id());
         }
     }
 
@@ -4206,12 +4147,14 @@ impl MainWindow {
         } else if let Some(range) = pane.range_of(event.sender()) {
             let list = pane.range(range);
             if let Some(closing) = list.closing(event) {
-                self.range_closing.set(Some((range, closing)));
-            } else if list.closed(event)
-                && self.range_closing.take() == Some((range, ListClosing::Chosen))
-            {
-                self.range_closed.set(Some(range));
-                hwnd.post(DEFERRED);
+                self.range_list.set(RangeList::Closing(range, closing));
+            } else if list.closed(event) {
+                let closing = self.range_list.replace(RangeList::Idle);
+                if matches!(closing, RangeList::Closing(each, ListClosing::Chosen) if each == range)
+                {
+                    self.range_list.set(RangeList::Closed(range));
+                    hwnd.post(DEFERRED);
+                }
             }
         } else if let Some(index) = pane
             .attributes
@@ -4398,8 +4341,9 @@ impl MainWindow {
                 None
             }
             ListNotify::ColumnDragEnded => {
-                self.column_dragged.set(true);
-                hwnd.post(DEFERRED);
+                if !self.column_dragged.replace(true) {
+                    hwnd.post(DEFERRED);
+                }
                 None
             }
             ListNotify::Focused
@@ -4780,7 +4724,7 @@ impl MainWindow {
         self.redraw_drop_rows(drag.target.as_ref().map(|target| target.row));
         if drag.scrolling.is_some() {
             let window = self.created().controls.list.hwnd().parent();
-            window.kill_timer(timer::DROP_SCROLL);
+            window.kill_timer(Timer::DropScroll.id());
         }
     }
 
@@ -4796,7 +4740,7 @@ impl MainWindow {
             .as_ref()
             .and_then(|drag| Some((drag.scrolling?, drag.over?)));
         let Some((edge, (point, keys, allowed))) = state else {
-            hwnd.kill_timer(timer::DROP_SCROLL);
+            hwnd.kill_timer(Timer::DropScroll.id());
             return;
         };
         // A source that ended without a drop sends no DragLeave.
@@ -4829,12 +4773,12 @@ impl MainWindow {
             model.search_list().selection().shared_files()
         };
         let Some(files) = files else { return };
-        hwnd.kill_timer(timer::CLIPBOARD);
+        hwnd.kill_timer(Timer::Clipboard.id());
         self.created().work.borrow_mut().copy(files, format);
     }
 
     fn cancel_copy(&self, hwnd: Hwnd) {
-        hwnd.kill_timer(timer::CLIPBOARD);
+        hwnd.kill_timer(Timer::Clipboard.id());
         self.created().work.borrow_mut().cancel_copy();
     }
 
@@ -4874,7 +4818,6 @@ impl MainWindow {
         let operations = FileOperations::new(hwnd, queue, strings, error_log);
         operations.set_transfer_limit(self.model.borrow().choices().transfers_per_device);
         let _ = self.file_operations.set(operations);
-        self.model.borrow_mut().offer_file_operations();
         self.update_key_bar();
         // Enrichment may have woken before adoption; explicitly read the restored state.
         hwnd.post(QUEUE_CHANGED);
@@ -5204,9 +5147,9 @@ impl MainWindow {
             operations.show_taskbar(progress.taskbar);
         }
         if progress.polls {
-            hwnd.set_timer(timer::OPERATIONS_POLL, OPERATIONS_POLL_MS);
+            hwnd.set_timer(Timer::OperationsPoll.id(), OPERATIONS_POLL_MS);
         } else {
-            hwnd.kill_timer(timer::OPERATIONS_POLL);
+            hwnd.kill_timer(Timer::OperationsPoll.id());
         }
     }
 
@@ -5726,7 +5669,7 @@ impl MainWindow {
     /// notification area, the first time with a notification that says so,
     /// and exits otherwise (DESIGN.md: Window lifetime).
     fn close(&self, hwnd: Hwnd) {
-        if self.instance == Instance::Another || !self.model.borrow().choices().keep_running {
+        if self.instance() == Instance::Another || !self.model.borrow().choices().keep_running {
             self.exit(hwnd);
             return;
         }
@@ -5790,7 +5733,7 @@ impl MainWindow {
     /// Window lifetime).
     fn update_tray(&self, _hwnd: Hwnd) {
         let keeps_running =
-            self.instance == Instance::First && self.model.borrow().choices().keep_running;
+            self.instance() == Instance::First && self.model.borrow().choices().keep_running;
         let tip = self
             .model
             .borrow()
@@ -5976,7 +5919,7 @@ impl MainWindow {
         let accepted = self.model.borrow_mut().forget_total_commander();
         self.apply(hwnd, accepted);
         self.forget_included_count(hwnd);
-        self.show_index_page(hwnd, false);
+        self.show_settings_page(hwnd, None);
         if dialog.resets() {
             self.reset_all(hwnd);
         }
@@ -5995,15 +5938,15 @@ impl MainWindow {
     /// opens the window again, as a new installation (DESIGN.md: Settings
     /// dialog).
     fn reset_all(&self, hwnd: Hwnd) {
-        self.resetting.set(true);
+        self.ending.set(Ending::ForReset);
         if !self.exit(hwnd) {
-            self.resetting.set(false);
+            self.ending.set(Ending::Running);
         }
     }
 
     /// Whether the window exited for Settings' Reset all.
     pub(super) fn resets_settings(&self) -> bool {
-        self.resetting.get()
+        self.ending.get() == Ending::ForReset
     }
 
     pub(super) fn prepare_shortcut(
@@ -6014,7 +5957,7 @@ impl MainWindow {
     ) -> Result<Option<Registration>, String> {
         // Another window saves the shortcut for the first window's next
         // start, because the first window holds it.
-        if self.instance != Instance::First || edited.show_shortcut == last.show_shortcut {
+        if self.instance() != Instance::First || edited.show_shortcut == last.show_shortcut {
             return Ok(None);
         }
         edited
@@ -6040,7 +5983,7 @@ impl MainWindow {
         last: &Choices,
         registration: Option<Registration>,
     ) {
-        if self.instance == Instance::First && edited.show_shortcut != last.show_shortcut {
+        if self.instance() == Instance::First && edited.show_shortcut != last.show_shortcut {
             self.starting_shortcut.take();
             if let Some(registration) = &registration {
                 registration.activate();
@@ -6132,12 +6075,10 @@ impl MainWindow {
         self.created().work.borrow().registry_is_current(id)
     }
 
-    /// Settings shows or hides its Index page, which follows the service's
-    /// state while it shows (DESIGN.md: The Drives and service page).
-    pub(super) fn show_index_page(&self, hwnd: Hwnd, shown: bool) {
-        self.model.borrow_mut().show_index_page(shown);
+    pub(super) fn show_settings_page(&self, hwnd: Hwnd, page: Option<SettingsPage>) {
+        self.model.borrow_mut().show_settings_page(page);
         self.update_poll(hwnd);
-        if shown {
+        if page == Some(SettingsPage::Index) {
             self.ask_status();
         }
     }
@@ -6254,7 +6195,9 @@ impl MainWindow {
     /// while one runs.
     pub(super) fn run_as_administrator(&self, _hwnd: Hwnd, job: Elevated) {
         let mut work = self.created().work.borrow_mut();
-        work.elevated.start(job);
+        if work.elevated.start(job) {
+            self.include_save.replace(IncludeSave::Saving);
+        }
         let retired = work.elevated.take_retired();
         work.retire(retired);
     }
@@ -6271,13 +6214,20 @@ impl MainWindow {
             let fetch = self.model.borrow_mut().settings_saved();
             self.start(fetch);
         }
-        self.include_saved.replace(Some(answer));
+        self.include_save.replace(IncludeSave::Saved(answer));
         self.post_settings_reply();
     }
 
     /// The Include save's answer, once it arrived.
     pub(super) fn take_include_saved(&self) -> Option<Result<(), NotSaved>> {
-        self.include_saved.take()
+        let mut save = self.include_save.borrow_mut();
+        match std::mem::replace(&mut *save, IncludeSave::Idle) {
+            IncludeSave::Saved(answer) => Some(answer),
+            current => {
+                *save = current;
+                None
+            }
+        }
     }
 
     /// The Use Total Commander link: searches the index for Total
@@ -6297,7 +6247,7 @@ impl MainWindow {
     /// what its Settings and its Language menu apply. A failure is shown
     /// once per session, and not while Windows ends the session.
     fn save_settings(&self, report_failure: bool) {
-        let scope = match self.instance {
+        let scope = match self.instance() {
             Instance::First => SaveScope::Everything,
             Instance::Another => SaveScope::Choices,
         };
@@ -6311,6 +6261,39 @@ impl MainWindow {
                 .work
                 .borrow_mut()
                 .save(&self.settings_file, changes, report_failure);
+        }
+    }
+
+    fn on_timer(&self, hwnd: Hwnd, timer: Timer) {
+        match timer {
+            Timer::Search(list) => self.search(hwnd, list),
+            Timer::Searching(list) => self.name_search(hwnd, list),
+            Timer::Selection(list) => self.fetch_selection(hwnd, list),
+            Timer::PanelSettle(side) => self.on_panel_settled(hwnd, side),
+            Timer::PanelAgain(side) => {
+                hwnd.kill_timer(timer.id());
+                self.ask_panel_sizes(side);
+            }
+            Timer::Status => self.ask_status(),
+            Timer::Age => {
+                self.show_age();
+                self.fit_inspector();
+            }
+            Timer::Dates => self.refresh_dates(),
+            Timer::Clipboard => {
+                hwnd.kill_timer(timer.id());
+                let left = self.created().work.borrow_mut().retry_copy();
+                if let Some(left) = left {
+                    hwnd.set_timer(timer.id(), left.as_millis().max(1) as u32);
+                }
+            }
+            Timer::DropScroll => self.drop_scroll(hwnd),
+            Timer::Save => {
+                hwnd.kill_timer(timer.id());
+                self.save_settings(true);
+            }
+            Timer::Work => self.poll_work(hwnd),
+            Timer::OperationsPoll => self.poll_operations(hwnd),
         }
     }
 
@@ -6494,83 +6477,10 @@ impl WindowProc for MainWindow {
                 let list = controls.list.notification(notification)?;
                 self.on_list_notify(hwnd, list)
             }
-            Message::Timer(id) if timer::PANEL_SETTLE.contains(&id) => {
-                let side = Side::BOTH[usize::from(id == timer::PANEL_SETTLE[1])];
-                self.on_panel_settled(hwnd, side);
+            Message::Timer(id) => {
+                self.on_timer(hwnd, Timer::from_id(id)?);
                 Some(LRESULT(0))
             }
-            Message::Timer(id) if timer::PANEL_AGAIN.contains(&id) => {
-                hwnd.kill_timer(id);
-                let side = Side::BOTH[usize::from(id == timer::PANEL_AGAIN[1])];
-                self.ask_panel_sizes(side);
-                Some(LRESULT(0))
-            }
-            Message::Timer(id) if timer::PANEL_SEARCH.contains(&id) => {
-                let side = Side::BOTH[usize::from(id == timer::PANEL_SEARCH[1])];
-                self.search(hwnd, List::Panel(side));
-                Some(LRESULT(0))
-            }
-            Message::Timer(id) if timer::PANEL_SELECTION.contains(&id) => {
-                let side = Side::BOTH[usize::from(id == timer::PANEL_SELECTION[1])];
-                self.fetch_selection(hwnd, List::Panel(side));
-                Some(LRESULT(0))
-            }
-            Message::Timer(timer::SEARCH) => {
-                self.search(hwnd, List::Search);
-                Some(LRESULT(0))
-            }
-            Message::Timer(timer::SEARCHING) => {
-                self.name_search(hwnd, List::Search);
-                Some(LRESULT(0))
-            }
-            Message::Timer(id) if timer::PANEL_SEARCHING.contains(&id) => {
-                let side = Side::BOTH[usize::from(id == timer::PANEL_SEARCHING[1])];
-                self.name_search(hwnd, List::Panel(side));
-                Some(LRESULT(0))
-            }
-            Message::Timer(timer::STATUS) => {
-                self.ask_status();
-                Some(LRESULT(0))
-            }
-            Message::Timer(timer::AGE) => {
-                self.show_age();
-                self.fit_inspector();
-                Some(LRESULT(0))
-            }
-            Message::Timer(timer::DATES) => {
-                self.refresh_dates();
-                Some(LRESULT(0))
-            }
-            Message::Timer(timer::CLIPBOARD) => {
-                hwnd.kill_timer(timer::CLIPBOARD);
-                let left = self.created().work.borrow_mut().retry_copy();
-                if let Some(left) = left {
-                    hwnd.set_timer(timer::CLIPBOARD, left.as_millis().max(1) as u32);
-                }
-                Some(LRESULT(0))
-            }
-            Message::Timer(timer::DROP_SCROLL) => {
-                self.drop_scroll(hwnd);
-                Some(LRESULT(0))
-            }
-            Message::Timer(timer::SAVE) => {
-                hwnd.kill_timer(timer::SAVE);
-                self.save_settings(true);
-                Some(LRESULT(0))
-            }
-            Message::Timer(timer::WORK) => {
-                self.poll_work(hwnd);
-                Some(LRESULT(0))
-            }
-            Message::Timer(timer::SELECTION) => {
-                self.fetch_selection(hwnd, List::Search);
-                Some(LRESULT(0))
-            }
-            Message::Timer(timer::OPERATIONS_POLL) => {
-                self.poll_operations(hwnd);
-                Some(LRESULT(0))
-            }
-            Message::Timer(_) => None,
             Message::Wake => {
                 self.on_wake(hwnd);
                 Some(LRESULT(0))
@@ -6593,7 +6503,8 @@ impl WindowProc for MainWindow {
                 if self.select_search.replace(false) {
                     self.created().controls.search.select_all();
                 }
-                if let Some(range) = self.range_closed.take() {
+                if let RangeList::Closed(range) = self.range_list.get() {
+                    self.range_list.set(RangeList::Idle);
                     self.choose_custom(hwnd, range);
                 }
                 self.show_shortcut_failure(hwnd);
@@ -6785,7 +6696,9 @@ impl WindowProc for MainWindow {
             Message::Destroy => {
                 // A window gone before the loop ended leaves nothing for
                 // close_for_setup to close.
-                self.closing_for_setup.set(false);
+                if self.ending.get() == Ending::ForSetup {
+                    self.ending.set(Ending::Running);
+                }
                 // Exit can come inside a modal step's loop, and the steps
                 // that wait for it would run against the destroyed window.
                 let steps = std::mem::take(&mut *self.modal_steps.borrow_mut());

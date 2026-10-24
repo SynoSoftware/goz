@@ -44,7 +44,7 @@ runtime verification.
 
 ### Execution status
 
-**Stages 1–2 are complete; stages 3–9 are incomplete.**
+**Stages 1–2 and 5 are complete; stages 3–4 and 6–9 are incomplete.**
 Lead owns shared contracts, integration and the only build. Stage 2 passed
 integrated review and Build 38: formatting, clippy, all workspace tests and docs;
 262 UI tests passed, 14 ignored. Its three full runs were 36–38: first integration
@@ -166,11 +166,29 @@ Current milestone:
   watches hover expiry rejecting stale IDs and stopping replay without clearing
   newer drag intent. No focused test, benchmark, UI or UAC check ran. Platform
   cfg, Ubuntu, MSRV and core-purity checks remain with CI; no dependencies changed.
-- Next coherent batch: Stage 5 state ownership/types, with the independent
-  feature-caption split from Stage 6. Lead owns Model/MainWindow and shared
-  contracts; the caption implementer owns only `core/captions.rs` and its new
-  children, retaining the existing reader interface. One consolidated retained
-  review and integrated build follow stable implementation.
+- Stage 5 state ownership/types, Stage 6 feature captions and the control
+  owners' marquee flags are implemented and integrated. Queue recovery became
+  asynchronous in Stage 2, so
+  Instance denotes eligibility, not engine readiness: command State reads
+  readiness from the sole FileOperations OnceCell. Its existing regression now
+  also rejects file commands before adoption. IncludeSave records bridge phase
+  and acknowledgment only; the existing Work group remains the task owner,
+  rather than reintroducing an app Saving handle. Existing Search/Settings
+  tests retain their assertions; feature caption tests moved with their owners.
+  No display/getter tests or instrumentation were added. Retained review is
+  clean: `V:/temp/gozler-window-state-areas-review1.md`. Build 41 caught two
+  panel integration omissions (Timer import and command readiness field),
+  corrected together. Build 42 passed formatting, clippy, all workspace tests
+  (269 UI passed, 14 ignored) and docs:
+  `V:/temp/gozler-window-state-areas-build42.log`. No focused test or benchmark
+  ran, no new standalone test was added, and the same platform/CI checks remain
+  deferred. Caption functions and their existing tests now live with six
+  feature owners; shared primitives/aggregation keep one implementation.
+- Next Stage 6 batch has exclusive ownership: window-feature implementer owns
+  coupled MainWindow/Model areas; folder implementer owns private Panel row
+  algorithms; lead owns Work's typed composition, shared contracts and only
+  build. Read-only preparation overlapped Build 42. Each complete deliverable
+  freezes before review; one integrated build follows the combined source.
 - Stage 2 settled interfaces: persistent Viewer session and fixed panel slots
   retain blocked work until actual resource cleanup. `Task::interrupt_io` only
   interrupts a native call, preserving session lifetime; Cancel also ends it.

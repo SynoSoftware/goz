@@ -223,21 +223,11 @@ impl CommandId {
                 // Delete, Cut and Paste are keys of the list (control_key).
                 C::CopyToFolder => ("command.copy_to_folder", &[], transfer, None),
                 C::MoveToFolder => ("command.move_to_folder", &[], transfer, None),
-                C::Synchronize => (
-                    "command.synchronize",
-                    &[],
-                    |s| s.model.offers_file_operations(),
-                    None,
-                ),
+                C::Synchronize => ("command.synchronize", &[], operations_available, None),
                 C::Delete => ("command.delete", &[], file_operation, None),
                 C::Cut => ("command.cut", &[], cut, None),
                 C::Paste => ("command.paste", &[], paste, None),
-                C::FileOperations => (
-                    "command.file_operations",
-                    &[],
-                    |s| s.model.offers_file_operations(),
-                    None,
-                ),
+                C::FileOperations => ("command.file_operations", &[], operations_available, None),
                 C::TwoPanels => (
                     "command.two_panels",
                     &[],
@@ -265,7 +255,7 @@ impl CommandId {
                     "command.new_folder",
                     &[],
                     |s| {
-                        s.model.offers_file_operations()
+                        operations_available(s)
                             && matches!(s.list, List::Panel(side) if matches!(s.model.panels().panel(side).view(), View::Folder))
                     },
                     None,
@@ -385,6 +375,7 @@ pub(crate) struct Command {
 /// context menu yields, even if the person activates another panel.
 pub(crate) struct State<'a> {
     pub(crate) model: &'a Model,
+    pub(crate) operations_ready: bool,
     pub(crate) focus: Focus,
     pub(crate) list: List,
 }
@@ -455,11 +446,15 @@ fn one_file(state: &State) -> bool {
     chosen(state) == 1
 }
 
+fn operations_available(state: &State) -> bool {
+    state.operations_ready && state.model.offers_file_operations()
+}
+
 /// Copy to folder…, Move to folder…, Delete and Cut act on the chosen
 /// entries, in the window that owns the file operations
 /// (DESIGN.md: Commands, Commands in Two panels).
 fn file_operation(state: &State) -> bool {
-    state.model.offers_file_operations() && chosen(state) > 0
+    operations_available(state) && chosen(state) > 0
 }
 
 /// Copy to folder… and Move to folder…, which in Two panels also need a
@@ -484,7 +479,7 @@ fn cut(state: &State) -> bool {
 /// text itself.
 fn paste(state: &State) -> bool {
     state.focus == Focus::List
-        && state.model.offers_file_operations()
+        && operations_available(state)
         && state.model.clipboard_holds_files()
         && (state.model.search_list().selection().files())
             .is_some_and(|files| matches!(files, [folder] if folder.is_dir))
@@ -1953,6 +1948,7 @@ mod tests {
     fn enabled(model: &Model, command: CommandId) -> bool {
         MenuItem::Run(command).enabled(&State {
             model,
+            operations_ready: true,
             focus: Focus::List,
             list: model.active_list(),
         })
@@ -1989,11 +1985,10 @@ mod tests {
     /// (DESIGN.md: Commands in Two panels).
     #[test]
     fn two_panels_file_commands_follow_the_chosen_entries() {
-        use crate::core::model::tests::model;
+        use crate::core::model::{Instance, tests::model_for};
         use crate::core::panel::tests::{file, list};
-        let mut model = model();
+        let mut model = model_for(Instance::First);
         model.show_mode(Mode::TwoPanels);
-        model.offer_file_operations();
         list(
             model.panels_mut(),
             r"C:\f",
@@ -2019,8 +2014,21 @@ mod tests {
         assert!(!enabled(&model, CommandId::Delete));
         let source = State {
             model: &model,
+            operations_ready: false,
             focus: Focus::Panel,
             list: List::Panel(Side::Left),
+        };
+        for command in [
+            CommandId::Delete,
+            CommandId::NewFolder,
+            CommandId::FileOperations,
+            CommandId::Synchronize,
+        ] {
+            assert!(!MenuItem::Run(command).enabled(&source));
+        }
+        let source = State {
+            operations_ready: true,
+            ..source
         };
         assert!(MenuItem::Run(CommandId::Delete).enabled(&source));
         model.panels_mut().activate(Side::Left);

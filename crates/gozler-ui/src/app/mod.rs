@@ -15,11 +15,11 @@ mod viewer;
 pub(crate) mod work;
 
 use crate::core::ids::IconId;
-use crate::core::model::Model;
+use crate::core::model::{Instance, Model};
 use crate::core::settings::Mode;
 use crate::core::text::{LANGUAGES, Language, Strings};
 use crate::win;
-use main_window::{Instance, MainWindow};
+use main_window::MainWindow;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::{Duration, Instant, SystemTime};
@@ -134,7 +134,7 @@ pub(crate) fn run() {
         .language
         .resolve(&win::locale::display_languages());
     set_panic_report(|report| report.language = Some(language));
-    let mut model = Model::new(Strings::load(language), settings);
+    let mut model = Model::new(Strings::load(language), settings, instance);
     if let Some(folder) = arguments.location {
         // The window's first search runs with it, in Search, whose filter
         // Location is (DESIGN.md: Two panels' window).
@@ -154,7 +154,6 @@ pub(crate) fn run() {
         model,
         settings_file,
         show_message,
-        instance,
         arguments.sign_in,
     );
     win::window::run_message_loop(hwnd, &|| window.accelerators());

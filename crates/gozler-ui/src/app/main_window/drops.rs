@@ -77,7 +77,7 @@ impl MainWindow {
                 .list
                 .hwnd()
                 .parent()
-                .kill_timer(timer::DROP_SCROLL);
+                .kill_timer(Timer::DropScroll.id());
         }
         self.redraw_drop_rows(row);
     }
@@ -291,8 +291,8 @@ impl DropHandler for MainWindow {
         }
         let window = list.hwnd().parent();
         match (scrolling, edge) {
-            (None, Some(_)) => window.set_timer(timer::DROP_SCROLL, DROP_SCROLL_MS),
-            (Some(_), None) => window.kill_timer(timer::DROP_SCROLL),
+            (None, Some(_)) => window.set_timer(Timer::DropScroll.id(), DROP_SCROLL_MS),
+            (Some(_), None) => window.kill_timer(Timer::DropScroll.id()),
             _ => {}
         }
         effect
@@ -313,7 +313,7 @@ impl DropHandler for MainWindow {
                 .list
                 .hwnd()
                 .parent()
-                .kill_timer(timer::DROP_SCROLL);
+                .kill_timer(Timer::DropScroll.id());
         }
     }
 

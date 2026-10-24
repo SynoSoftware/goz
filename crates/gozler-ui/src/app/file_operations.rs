@@ -101,11 +101,13 @@ struct Controls {
     doing: Label,
     file: PathLabel,
     file_bar: ProgressBar,
+    file_bar_moving: Cell<bool>,
     from_label: Label,
     from: PathLabel,
     to_label: Label,
     to: PathLabel,
     total_bar: ProgressBar,
+    total_bar_moving: Cell<bool>,
     percent: Label,
     items: Label,
     bytes: Label,
@@ -774,11 +776,13 @@ impl Pane {
             doing: label(ControlId::FileOperationsDoing)?,
             file,
             file_bar: bar(ControlId::FileOperationsFileBar)?,
+            file_bar_moving: Cell::new(false),
             from_label: label(ControlId::FileOperationsFromLabel)?,
             from,
             to_label: label(ControlId::FileOperationsToLabel)?,
             to,
             total_bar: bar(ControlId::FileOperationsTotalBar)?,
+            total_bar_moving: Cell::new(false),
             percent: right(ControlId::FileOperationsPercent)?,
             items: label(ControlId::FileOperationsItems)?,
             bytes: right(ControlId::FileOperationsBytes)?,
@@ -1168,6 +1172,7 @@ impl Pane {
             if let Some(bar) = card.file_bar {
                 match bar {
                     Bar::Measured(measure) => {
+                        c.file_bar_moving.set(false);
                         c.file_bar.set_measured(measure.done, measure.total);
                         show_text(
                             c.file_percent.hwnd(),
@@ -1178,10 +1183,9 @@ impl Pane {
                         );
                     }
                     Bar::Moving => {
-                        if old_card.is_none_or(|old| {
-                            old.file_bar != Some(Bar::Moving) || old.paused != card.paused
-                        }) {
-                            c.file_bar.set_moving(!card.paused);
+                        let moving = !card.paused;
+                        if c.file_bar_moving.replace(moving) != moving {
+                            c.file_bar.set_moving(moving);
                         }
                         show_text(c.file_percent.hwnd(), "");
                     }
@@ -1191,6 +1195,7 @@ impl Pane {
             }
             match card.total_bar {
                 Bar::Measured(measure) => {
+                    c.total_bar_moving.set(false);
                     c.total_bar.set_measured(measure.done, measure.total);
                     show_text(
                         c.percent.hwnd(),
@@ -1199,10 +1204,9 @@ impl Pane {
                     );
                 }
                 Bar::Moving => {
-                    if old_card
-                        .is_none_or(|old| old.total_bar != Bar::Moving || old.paused != card.paused)
-                    {
-                        c.total_bar.set_moving(!card.paused);
+                    let moving = !card.paused;
+                    if c.total_bar_moving.replace(moving) != moving {
+                        c.total_bar.set_moving(moving);
                     }
                     show_text(
                         c.percent.hwnd(),

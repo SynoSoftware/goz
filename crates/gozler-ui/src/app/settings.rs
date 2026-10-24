@@ -1530,13 +1530,12 @@ impl<'a> SettingsDialog<'a> {
             // The index changes while the dialog is open.
             self.show_preview();
         }
+        self.main.show_settings_page(self.window, page);
         if page == Some(SettingsPage::Index) {
-            self.main.show_index_page(self.window, true);
             dialog.set_timer(INDEX_TIMER, INDEX_REFRESH_MS);
             self.refresh_index(dialog);
         } else if previous == Some(SettingsPage::Index) {
             dialog.kill_timer(INDEX_TIMER);
-            self.main.show_index_page(self.window, false);
         }
     }
 

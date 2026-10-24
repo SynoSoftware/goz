@@ -5,7 +5,7 @@
 //! The selection).
 
 use super::super::dialogs::{NewFolder, TransferStart};
-use super::{EntryAction, MainWindow, Selected, timer};
+use super::{EntryAction, MainWindow, Selected, Timer};
 use crate::core::captions::{self, ButtonIcon, PanelCaptions};
 use crate::core::commands::{
     self, CommandId, Focus, Key, Keystroke, Mark, MenuItem, MenuNode, PanelAction, PanelKey, State,
@@ -565,6 +565,7 @@ impl MainWindow {
             let model = self.model.borrow();
             let state = State {
                 model: &model,
+                operations_ready: self.file_operations.get().is_some(),
                 focus: Focus::Panel,
                 list: model.active_list(),
             };
@@ -775,8 +776,8 @@ impl MainWindow {
     /// the ended operations that its folder kept.
     fn end_folder_work(&self, hwnd: Hwnd, side: Side) {
         self.cancel_request(Purpose::FolderSizes(side));
-        hwnd.kill_timer(timer::PANEL_SETTLE[side.index()]);
-        hwnd.kill_timer(timer::PANEL_AGAIN[side.index()]);
+        hwnd.kill_timer(Timer::PanelSettle(side).id());
+        hwnd.kill_timer(Timer::PanelAgain(side).id());
     }
 
     /// Ends what `side` does as a search panel: its search's and its
@@ -785,8 +786,8 @@ impl MainWindow {
     fn end_search_work(&self, hwnd: Hwnd, side: Side) {
         self.cancel_request(Purpose::Results(List::Panel(side)));
         self.cancel_request(Purpose::Selection(List::Panel(side)));
-        hwnd.kill_timer(timer::PANEL_SEARCH[side.index()]);
-        hwnd.kill_timer(timer::PANEL_SELECTION[side.index()]);
+        hwnd.kill_timer(Timer::Search(List::Panel(side)).id());
+        hwnd.kill_timer(Timer::Selection(List::Panel(side)).id());
     }
 
     /// `side` left its search, whose box is empty for the next one.
@@ -959,7 +960,7 @@ impl MainWindow {
             self.show_awaited(side, &update.place);
         }
         if matches!(update.kind, UpdatedKind::Watch) {
-            hwnd.set_timer(timer::PANEL_SETTLE[side.index()], SETTLE_MS);
+            hwnd.set_timer(Timer::PanelSettle(side).id(), SETTLE_MS);
         }
         if update.read_again {
             let ask = self.model.borrow_mut().panels_mut().read_again(side);
@@ -1106,7 +1107,7 @@ impl MainWindow {
     /// The settle timer of `side` ran out: its sizes and free space are
     /// read again.
     pub(super) fn on_panel_settled(&self, hwnd: Hwnd, side: Side) {
-        hwnd.kill_timer(timer::PANEL_SETTLE[side.index()]);
+        hwnd.kill_timer(Timer::PanelSettle(side).id());
         self.ask_panel_sizes(side);
         let folder = self.model.borrow().panels().panel(side).folder().to_owned();
         if !folder.is_empty() {
@@ -2150,7 +2151,7 @@ impl MainWindow {
             }
             if follow.sizes {
                 self.ask_panel_sizes(side);
-                hwnd.set_timer(timer::PANEL_AGAIN[side.index()], AGAIN_MS);
+                hwnd.set_timer(Timer::PanelAgain(side).id(), AGAIN_MS);
             }
         }
     }

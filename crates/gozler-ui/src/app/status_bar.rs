@@ -55,6 +55,7 @@ pub(super) struct StatusBar {
     text: Label,
     activity: Label,
     progress: ProgressBar,
+    progress_moving: Cell<bool>,
     cancel: Button,
     /// The main window's Show details, a toolbar of its one icon.
     show_details: Option<Toolbar>,
@@ -97,6 +98,7 @@ impl StatusBar {
             text: Label::create_line(bar.hwnd(), ControlId::StatusText.id())?,
             activity: Label::create_line(bar.hwnd(), ControlId::StatusActivity.id())?,
             progress: ProgressBar::create(bar.hwnd(), ControlId::StatusProgress.id())?,
+            progress_moving: Cell::new(false),
             cancel: Button::create(bar.hwnd(), ControlId::StatusCancel.id())?,
             show_details: None,
             part_tips: Some(Tooltip::create_areas(bar.hwnd(), 5)?),
@@ -568,9 +570,16 @@ impl StatusBar {
         // A long result ends in an ellipsis, so the tooltip shows it whole.
         self.bar.set_tip(JOB_GROUP, &job.text);
         match job.progress {
-            JobProgress::None => self.progress.set_moving(false),
-            JobProgress::Unmeasured => self.progress.set_moving(true),
-            JobProgress::Measured { done, total } => self.progress.set_measured(done, total),
+            JobProgress::None | JobProgress::Unmeasured => {
+                let moving = job.progress == JobProgress::Unmeasured;
+                if self.progress_moving.replace(moving) != moving {
+                    self.progress.set_moving(moving);
+                }
+            }
+            JobProgress::Measured { done, total } => {
+                self.progress_moving.set(false);
+                self.progress.set_measured(done, total);
+            }
         }
         self.progress
             .hwnd()

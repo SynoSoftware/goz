@@ -27,6 +27,7 @@ pub(crate) mod panel;
 pub(crate) mod programs;
 pub(crate) mod query;
 pub(crate) mod results;
+mod search;
 pub(crate) mod search_list;
 pub(crate) mod selection;
 pub(crate) mod settings;
