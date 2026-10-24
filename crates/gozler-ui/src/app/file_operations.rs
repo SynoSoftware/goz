@@ -443,6 +443,11 @@ impl FileOperations {
         hwnd.set_visible(true);
     }
 
+    pub(super) fn min_height(&self) -> Option<Px> {
+        let pane = self.window()?;
+        Some(Layout::min_height(pane.metrics(pane.hwnd.get()?)))
+    }
+
     pub(super) fn prepare_place(
         &self,
         area: Option<Rect>,
@@ -1277,6 +1282,14 @@ impl Pane {
                     show_text(c.pause.hwnd(), strings.text(run.caption()));
                 }
                 show_text(c.cancel.hwnd(), strings.text(buttons.end.caption()));
+                c.tips.set(
+                    c.cancel.hwnd(),
+                    strings.text(if buttons.end == QueueAction::Clear {
+                        "file_operations.clear_tip"
+                    } else {
+                        buttons.end.caption()
+                    }),
+                );
             }
         } else {
             show_text(c.title.hwnd(), &view.idle);
@@ -1292,6 +1305,8 @@ impl Pane {
             show_text(c.title.hwnd(), &report.title);
             show_text(c.pause.hwnd(), strings.text("file_operations.close"));
             show_text(c.cancel.hwnd(), strings.text("file_operations.clear"));
+            c.tips
+                .set(c.cancel.hwnd(), strings.text("file_operations.clear_tip"));
             let text =
                 |code| crate::win::error_text(&std::io::Error::from_raw_os_error(code as i32));
             show_text(c.summary.hwnd(), &report.summary(&strings, &text));

@@ -268,6 +268,8 @@ impl ToolHeights {
 /// the window measures.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct CaptionWidths {
+    /// The transfer pane's own measured minimum, while it is open.
+    pub(crate) transfers_height: Px,
     match_label: Px,
     match_modes: Px,
     search_tools: Px,
@@ -426,6 +428,7 @@ impl CaptionWidths {
             .map(|(caption, shielded)| (caption, *shielded || captions.icons))
             .chain([(&captions.retry, captions.icons)]);
         CaptionWidths {
+            transfers_height: Px(0),
             match_label: measure(&captions.match_label),
             match_modes: widest(&captions.match_modes),
             search_tools: controls.search_tools,
@@ -1311,7 +1314,7 @@ impl Layout {
         mode: Mode,
         panes: &Panes,
     ) -> Layout {
-        let mut layout = match mode {
+        let compute = |client| match mode {
             Mode::Search => {
                 Layout::compute_search(client, dpi, font_height, status_height, captions, panes)
             }
@@ -1319,6 +1322,15 @@ impl Layout {
                 Layout::compute_two_panels(client, dpi, font_height, status_height, captions, panes)
             }
         };
+        let mut layout = compute(client);
+        let fitted = Size {
+            width: client.width.max(layout.min_client.width),
+            height: client.height.max(layout.min_client.height),
+        };
+        if fitted != client {
+            layout = compute(fitted);
+        }
+        let client = fitted;
         if panes.inspector
             && panes.content == InspectorContent::Transfers
             && let Some(placed) = &layout.inspector
@@ -1338,7 +1350,8 @@ impl Layout {
             };
             let mut inspector =
                 InspectorLayout::compute(area, placed.max_height, dpi, font_height, captions);
-            inspector.min_height = Dip(300).to_px(dpi);
+            inspector.min_height = captions.transfers_height;
+            inspector.max_height = inspector.max_height.max(inspector.min_height);
             if panes.maximized {
                 inspector.splitter = Rect::default();
             }
@@ -1346,6 +1359,13 @@ impl Layout {
                 && let Some(filters) = &mut search.filters
             {
                 filters.pane.height = (inspector.splitter.y - filters.pane.y).max(Px(0));
+                for divider in layout
+                    .dividers
+                    .iter_mut()
+                    .filter(|line| line.width == Px(1))
+                {
+                    divider.height = (inspector.splitter.y - divider.y).max(Px(0));
+                }
             }
             layout.inspector = Some(inspector);
         }
@@ -1428,7 +1448,7 @@ impl Layout {
             + margin;
         let panel_min_width = list_min_width.max(search_row);
         let inspector_min = if show_inspector {
-            Dip(300).to_px(dpi) + px(GROUP)
+            captions.transfers_height + px(GROUP)
         } else {
             Px(0)
         };
@@ -1457,7 +1477,7 @@ impl Layout {
             let pane_height = panes
                 .inspector_height
                 .to_px(dpi)
-                .max(Dip(300).to_px(dpi))
+                .max(captions.transfers_height)
                 .min(room);
             let area = Rect {
                 x: margin,
@@ -1673,7 +1693,7 @@ impl Layout {
             (
                 px(panes.inspector_height)
                     .max(if panes.content == InspectorContent::Transfers {
-                        px(Dip(300))
+                        captions.transfers_height
                     } else {
                         Px(0)
                     })
@@ -1730,7 +1750,7 @@ impl Layout {
         let inspector_min = if panes.inspector {
             group
                 + if panes.content == InspectorContent::Transfers {
-                    px(Dip(300))
+                    captions.transfers_height
                 } else {
                     InspectorLayout::min_height(dpi, font_height)
                 }
@@ -2298,7 +2318,9 @@ mod tests {
             },
             location_row: Dip(19).to_px(dpi),
         };
-        CaptionWidths::measure(&captions, &measure, controls)
+        let mut widths = CaptionWidths::measure(&captions, &measure, controls);
+        widths.transfers_height = Dip(300).to_px(dpi);
+        widths
     }
 
     fn overlaps(a: Rect, b: Rect) -> bool {
@@ -2344,6 +2366,32 @@ mod tests {
                 inspector.area
             );
         }
+    }
+
+    /// Opening transfers can raise the minimum above a saved window's size;
+    /// dragging the splitter must not panic on reversed clamp bounds.
+    #[test]
+    fn opening_transfers_in_a_short_window_keeps_the_splitter_bounds_valid() {
+        let dpi = Dpi::new(96).expect("96 is not zero");
+        let mut captions = captions(dpi, 1.0, false);
+        captions.transfers_height = Px(335);
+        let layout = Layout::compute(
+            Size {
+                width: Px(1400),
+                height: Px(400),
+            },
+            dpi,
+            Px(20),
+            Px(28),
+            &captions,
+            Mode::Search,
+            &Panes {
+                content: InspectorContent::Transfers,
+                ..Panes::default()
+            },
+        );
+        let inspector = layout.inspector().expect("the transfer pane is open");
+        assert_eq!(inspector.dragged(inspector.height(), Px(1000)), Dip(335));
     }
 
     /// Asserts that every control of `placed` lies in `client` above the

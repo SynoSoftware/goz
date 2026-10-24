@@ -137,14 +137,6 @@ impl Layout {
         let mut y = y + title_line + line + gap;
         let value = x + m.label_width + gap;
         let percent_x = end - m.percent_width;
-        l.doing = rect(x, y, m.label_width, line);
-        l.file = rect(value, y, end - value, line);
-        y = y + line;
-        l.file_bar = rect(value, y, percent_x - gap - value, d(18));
-        l.file_percent = rect(percent_x, y, m.percent_width, line);
-        y = y + d(18);
-        l.file_bytes = rect(value, y, end - value, line);
-        y = y + line;
         l.from_label = rect(x, y, m.label_width, line);
         l.from = rect(value, y, end - value, line);
         y = y + line;
@@ -154,9 +146,17 @@ impl Layout {
         l.overall = rect(x, y, m.label_width, line);
         l.total_bar = rect(value, y, percent_x - gap - value, d(18));
         l.percent = rect(percent_x, y, m.percent_width, line);
-        y = y + d(18);
+        y = y + d(18).max(line);
         l.items = rect(x, y, Px(width.0 / 2), line);
         l.bytes = rect(x + Px(width.0 / 2), y, width - Px(width.0 / 2), line);
+        y = y + line + gap;
+        l.doing = rect(x, y, m.label_width, line);
+        l.file = rect(value, y, end - value, line);
+        y = y + line;
+        l.file_bar = rect(value, y, percent_x - gap - value, d(18));
+        l.file_percent = rect(percent_x, y, m.percent_width, line);
+        y = y + d(18).max(line);
+        l.file_bytes = rect(value, y, end - value, line);
         l.cancel = rect(end - m.hide_width, bottom - button, m.hide_width, button);
         l.pause = rect(
             l.cancel.x - gap - m.hide_width,
@@ -172,6 +172,12 @@ impl Layout {
             l.cancel.y - gap - l.status.bottom() - gap,
         );
         l
+    }
+
+    /// Fits every progress row above the actions, also with a larger Windows font.
+    pub(crate) fn min_height(m: Metrics) -> Px {
+        let layout = Self::compute(Size::default(), m, false, false, true);
+        (layout.file_bytes.bottom() + px(8, m.dpi) + m.line + px(24, m.dpi)).max(px(300, m.dpi))
     }
 }
 

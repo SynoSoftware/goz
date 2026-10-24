@@ -285,10 +285,9 @@ impl Hwnd {
         let _ = unsafe { InvalidateRect(Some(self.0), None, true) };
     }
 
-    /// Runs `change`, which changes many of the window's controls, with the
-    /// window's drawing stopped (`WM_SETREDRAW`), then draws the window, its
-    /// menu bar and every control once, instead of each control drawing
-    /// itself as it changes. A hidden window only runs `change`, because
+    /// Runs `change` with redraw disabled on this window, then invalidates
+    /// its client, frame and descendants for native repainting. Descendants
+    /// paint independently. A hidden window only runs `change`, because
     /// `DefWindowProc` answers `WM_SETREDRAW` TRUE by making the window
     /// visible, as a regional-format change would make the main window
     /// while it is hidden in the notification area.

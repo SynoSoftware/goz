@@ -44,12 +44,42 @@ runtime verification.
 
 ### Execution status
 
+**Current owner priority: native layout and usability.** Painting capture
+experiments are stopped; the earlier strict visual gate remains unmet, so
+the architecture plan is not complete and must not be deleted. Existing stable
+Search, Two panels and transfer pictures were assessed independently for layout
+defects, reading order and feature organization. The retained refinement:
+- derives the transfer minimum from its measured fonts, fits an undersized
+  Search layout and grows the window when opening a pane raises its minimum;
+- keeps the splitter bounds valid and ends the filter divider above transfers;
+- places From/To, Overall and totals before current-file detail, with fixed
+  positions across progress states;
+- explains the initial empty inspector, consistently names the opening command
+  File transfers, and explains Clear without widening its button.
+
+Independent retained review and divider delta are clean:
+`V:/temp/gozler-interface-retained-review.md`. Two disposable native checks
+through `build.ps1 -Test native_interface_layout_check` passed. They verify
+the initial note, opening from a400px client, native splitter dragging and
+automatic minimum growth. Stable screenshots show a synthetic completed card;
+they do not claim new engine/copy proof. Saved in
+`V:/temp/gozler-interface-check/`; confirmation removes the stray divider.
+Both temporary module hooks are removed. One lasting test pins the prior
+splitter-clamp panic; no display snapshot test is retained. Full53 is green:
+formatting, clippy, workspace tests and docs; UI283 passed,14 ignored. All310
+recorded source/build inputs stayed unchanged. This usability batch used one
+full run (53 cumulative); the two focused native runs passed in1.43s and1.14s.
+No benchmark or dependency was added. Ubuntu/MSRV and CI-only platform checks
+remain left to CI; installation, uncommon system fonts, high contrast and
+cross-monitor checks were not performed. Log:
+`V:/temp/gozler-window-integrated-build53.log`.
+
 **Stages1–3 and5–7 are complete;4 and8–9 remain incomplete.** The architecture
 is implemented and independently reviewed, but the visual gate is open.
 Retained commits:5fc49ca (architecture),7e0bfb1 (native layout),570711d
 (idle caption and structural mode/card redraw),6640402 (geometry/visibility
-batching). Full52 is green: formatting, clippy, workspace tests and docs;
-UI282 passed,14 ignored. Full attempts:52. Log:
+batching). The prior Full52 baseline was green: formatting, clippy, workspace
+tests and docs; UI282 passed,14 ignored. Its log:
 `V:/temp/gozler-window-integrated-build52.log`. This continuation used one
 full run,52, after removal of the unsuccessful painting candidate. All297
 source/build input hashes remained unchanged during verification. The retained
@@ -86,7 +116,7 @@ overall correction and remains removed. Before this new production batch,
 all448 Full50 input hashes matched again except this plan; no probe hook
 remains in the product source. Historical capture artifacts remain saved.
 
-#### Current batch and ownership
+#### Retained architecture decisions and investigation history
 
 **Settled lead contract:** combine desired geometry and visibility in one
 per-parent DeferWindowPos application, using native SHOWWINDOW/HIDEWINDOW.
@@ -178,6 +208,33 @@ the retained change is initial text, not a lasting pure-rule regression. Ubuntu
 cfg compilation, minimum Rust and the applicable CI-only checks remain with CI;
 the environment checks remain in ui-after-install.md. There is no dependency
 change. The finite test window, its recorders and decoder processes have exited.
+
+**Valid-region1 is rejected.** The Main-only WM_NCCALCSIZE candidate kept native
+frame calculation and supplied empty preserved source/destination rectangles
+through WVR_VALIDRECTS for actual size changes. The same finite check passed
+16.34seconds and copied8MiB. All137 HWND frames were inspected: count copies
+remain in86, toolbar breaks in16, and count/keyrow fragments in82/88. No desktop
+stream was recorded, because initial crop ownership cannot prevent later
+occlusion. First-pane idle, Preparing and Completed samples are coherent.
+Report: `V:/temp/gozler-window-paint-cause/valid-region1-media-audit.md`.
+Root removed the entire two-file candidate; no new full build is needed for
+returning those sources to their Full52-verified state.
+
+**Transitions1 is rejected as a mitigation.** The fixture-only diagnostic set
+DWMWA_TRANSITIONS_FORCEDISABLED on its dedicated HWND before capture (HRESULT0).
+The native caption shifts/clips in the earlier recordings despite a requested
+fixed position; disabling transitions did not remove the acquired pattern.
+The same finite sequence passed13.91seconds and copied8MiB. Root inspected all
+121 HWND frames: toolbar2 and count/keyrow66/70/84 still contain partials;
+fixed-size card105 shows old idle text with new fields before coherent Preparing.
+Report: `V:/temp/gozler-window-paint-cause/transitions1-media-audit.md`.
+No production resize, redraw or DWM policy is retained, and no desktop capture
+or system-wide setting was used. Both disposable includes are removed; all297
+Full52 source/build hashes match. No further full build or permanent test was
+added. Stage4/8 remain open; absence of a proven remedy does not establish
+that the native constraints are impossible or authorize relaxing the gate.
+Attribute contract:
+[DWMWINDOWATTRIBUTE](https://learn.microsoft.com/en-us/windows/win32/api/dwmapi/ne-dwmapi-dwmwindowattribute).
 
 Existing proofs remain reusable within their scope: native attempt6 selected2
 by Ctrl+click and100,000 by Shift+End, and verified an ended move's Summary,

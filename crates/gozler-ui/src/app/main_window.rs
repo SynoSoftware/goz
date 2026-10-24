@@ -1285,15 +1285,29 @@ impl MainWindow {
             let model = self.model.borrow();
             (model.mode(), model.panes())
         };
+        let mut captions = metrics.captions;
+        if panes.inspector && panes.content == crate::core::layout::InspectorContent::Transfers {
+            captions.transfers_height = self
+                .file_operations
+                .get()
+                .and_then(FileOperations::min_height)
+                .unwrap_or_default();
+        }
         let layout = Layout::compute(
             client,
             metrics.dpi,
             metrics.font_height,
             status_height,
-            &metrics.captions,
+            &captions,
             mode,
             &panes,
         );
+        let minimum = layout.min_client;
+        let grow = (client.width < minimum.width || client.height < minimum.height)
+            && created.layout.borrow().as_ref().is_none_or(|previous| {
+                minimum.width > previous.min_client.width
+                    || minimum.height > previous.min_client.height
+            });
         let search = layout.search();
         let filters = search.and_then(|search| search.filters.as_ref());
         let show_filters = search.and_then(|search| search.show_filters);
@@ -1511,6 +1525,15 @@ impl MainWindow {
             controls.search.row.input.hwnd().focus();
         }
         self.update_status();
+        if grow && !hwnd.is_minimized() {
+            let outer = win::window::window_size(hwnd, minimum, metrics.dpi);
+            let rect = hwnd.screen_rect();
+            hwnd.set_rect(Rect {
+                width: rect.width.max(outer.width),
+                height: rect.height.max(outer.height),
+                ..rect
+            });
+        }
     }
 
     fn on_dpi_changed(&self, hwnd: Hwnd, dpi: Dpi, suggested: Rect) {

@@ -35,8 +35,7 @@ pub(crate) enum Inspected {
     /// No results show.
     #[default]
     Nothing,
-    /// Results show and none is selected; the gray note under the heading
-    /// says how to see an entry's details.
+    /// No entry is selected; the note says how to see an entry's details.
     NothingSelected { note: String },
     /// The selection is being read.
     Reading,
@@ -89,7 +88,12 @@ impl InspectorCaptions {
                         note: label("inspector.nothing_selected"),
                     },
                 },
-                Shown::Nothing | Shown::Message(_) => InspectorCaptions::default(),
+                Shown::Nothing | Shown::Message(_) => InspectorCaptions {
+                    inspected: Inspected::NothingSelected {
+                        note: label("inspector.nothing_selected"),
+                    },
+                    ..InspectorCaptions::default()
+                },
             },
             Selection::TooMany(count) => InspectorCaptions {
                 heading: too_many(strings, numbers, *count),
