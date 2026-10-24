@@ -904,6 +904,9 @@ impl Pane {
     fn apply_strings(&self) {
         let strings = self.strings.borrow();
         let c = self.controls();
+        if self.view.borrow().is_none() {
+            show_text(c.title.hwnd(), strings.text("file_operations.preparing"));
+        }
         for (control, key) in [
             (c.heading.hwnd(), "file_operations.transfers"),
             (c.from_label.hwnd(), "file_operations.from"),

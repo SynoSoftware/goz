@@ -126,6 +126,9 @@ owner has run it, and file an issue for each item that fails.
   settings persistence proceeds independently of that prompt.
 - While Paste waits for another program, cancel it and navigate elsewhere.
   Late clipboard data cannot start the cancelled transfer or change its target.
+- While another program holds the clipboard open, Copy and Paste leave the UI
+  usable. Release it and check the pending command's result; cancel a waiting
+  command and verify that it cannot publish or start a transfer later.
 - Open Indexed folders on a sleeping volume, close and reopen it, then expand
   folders on another volume. The dialog stays usable, the independent volume
   lists, and the earlier dialog's results never enter the new tree.

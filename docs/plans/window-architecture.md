@@ -47,12 +47,13 @@ runtime verification.
 **Stages1–3 and5–7 are complete;4 and8–9 remain incomplete.** The architecture
 is implemented and independently reviewed, but the visual gate is open.
 Retained commits:5fc49ca (architecture),7e0bfb1 (native layout),570711d
-(idle caption and structural mode/card redraw). Full51 is green: formatting,
-clippy, workspace tests and docs; UI282 passed,14 ignored. Full attempts:51.
-Log: `V:/temp/gozler-window-integrated-build51.log`.
-Previous resumption used three full runs:48 failed only under the restricted
-token;49 and50 passed outside it. This continuation used one full run,51,
-outside the restricted token, after the retained batch and source reviews.
+(idle caption and structural mode/card redraw),6640402 (geometry/visibility
+batching). Full52 is green: formatting, clippy, workspace tests and docs;
+UI282 passed,14 ignored. Full attempts:52. Log:
+`V:/temp/gozler-window-integrated-build52.log`. This continuation used one
+full run,52, after removal of the unsuccessful painting candidate. All297
+source/build input hashes remained unchanged during verification. The retained
+initial Preparing title is covered; the rejected redraw changes are not shipped.
 
 **Causal investigation completed.** Three disposable focused attempts:
 cause1 stopped before READY because keyboard foreground was refused;
@@ -122,14 +123,61 @@ Final idle and Completed views are coherent; the earlier white control outlines
 and caption-cleared completion gap were not sampled. First reveal has one blank
 gray sample (33ms movie retention); preparation has one partial sample (50ms).
 Resize toolbar/count fragments remain. These captures establish intermediate
-publication, not persistent wrong native endpoints or physical scanout. Practical
-normal-speed acceptance remains unverified; do not claim all captured frames
-became atomic or delete the plan on the strength of a functional pass alone.
+publication, not persistent wrong native endpoints or physical scanout. Stage4's
+explicit frame-by-frame bar remains unmet: a sampled cleared, half-drawn or
+doubled control is a defect. Ordinary-speed uncertainty cannot waive that rule;
+do not delete the plan on the strength of a functional pass alone.
 Media: `V:/temp/gozler-window-paint-cause/publication2-media-audit.md`.
 Permanent Painting documentation describes the implemented rules, independently
 reviewed clean in `V:/temp/gozler-window-native-publication-doc-review.md`.
-No further diagnostic expansion or unproven paint mechanism is authorized by
-these observations alone; use the existing evidence for the next decision.
+Root-redraw1 changed only the disposable root's class style from0to3
+(CS_HREDRAW|CS_VREDRAW); the same finite check passed16.09seconds and copied8MiB.
+All621 desktop frames/138 changing groups still include the target toolbar and
+count fragments. That candidate is rejected and the scratch class mutation
+removed; no production change or further full build followed it.
+Reports: `V:/temp/gozler-window-paint-cause/root-resize-source-audit.md` and
+`V:/temp/gozler-window-paint-cause/root-redraw1-media-audit.md`.
+
+**Native-integrated1 is rejected except for its initial Preparing title.** The
+five-file candidate added deferred NOREDRAW restoration to place_children,
+Main's flush after completed layout, a Main-only root resize no-copy policy,
+native toolbar buffering and an initial Preparing title. There is no immediate
+paint inside the shared positioning helper: Viewer and nested pane ordering
+require their owners to finish first. The independent affected-contract source
+review is clean (`V:/temp/gozler-window-native-integrated-review1.md`).
+
+The actual production-path check, native-integrated1, passed43.13seconds and
+verified a real8MiB copy. All197 HWND frames and130 exact-pixel groups covering
+1,049 desktop frames were inspected. The same toolbar fragments, doubled panel
+counts, mixed mode and completion-card partials remain: Stage4's gate failed.
+Desktop254–257 was obscured by another window and is excluded; initial ROI
+ownership did not prove uninterrupted coverage. The other positive desktop
+samples are unobscured. Report:
+`V:/temp/gozler-window-paint-cause/native-integrated1-media-audit.md`.
+The initial title improvement was observed repeatedly and its three-line change
+is retained. The production resize policy did not reproduce the earlier scratch
+root-no-copy1 result. Microsoft documents that some flag changes during
+WM_WINDOWPOSCHANGING are ignored, but does not specifically classify NOCOPYBITS;
+no ignored-flag or copy/callback timing claim is supported. Changing only the
+programmatic root setter would leave interactive sizing uncovered.
+
+The native owner recommends removing the resize policy, toolbar buffering and
+NOREDRAW/restoration plus pending-flush slice together: no target-removal benefit
+was demonstrated in the integrated sequence. Root removed them, preserving
+6640402's geometry/visibility batching, clipping and structural scopes. Both
+disposable includes are removed. No permanent display test, tracing, renderer
+or compositor is retained. Stage4 still fails; the native owner has identified
+no evidence-backed next correction within this batch. Required verification
+of the retained title change follows the existing clean source review; all
+other candidate changes are removed before any full build.
+
+Full52 then passed all Windows checks. The focused
+`-Test timing_window_paint_cause` run passed its functional assertions but failed
+the separate frame inspection, as above. No permanent test or Bench was added:
+the retained change is initial text, not a lasting pure-rule regression. Ubuntu
+cfg compilation, minimum Rust and the applicable CI-only checks remain with CI;
+the environment checks remain in ui-after-install.md. There is no dependency
+change. The finite test window, its recorders and decoder processes have exited.
 
 Existing proofs remain reusable within their scope: native attempt6 selected2
 by Ctrl+click and100,000 by Shift+End, and verified an ended move's Summary,
