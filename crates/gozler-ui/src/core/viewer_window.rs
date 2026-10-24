@@ -11,7 +11,7 @@
 
 use super::commands::{Key, Keystroke, Mark, MenuNode};
 use super::glyph::Glyph;
-use super::layout::{Dpi, Px, Size};
+use super::layout::{Dpi, Px, Rect, Size};
 use super::text::{self, Numbers, Strings, menu_label};
 use super::viewer::{self, Detected, HEX_ROW_BYTES, LINE_BYTES, Mode, Place, SNIFF_BYTES};
 use std::borrow::Cow;
@@ -143,13 +143,19 @@ enum After {
 /// What the document does until its page is complete.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Task {
+    Idle,
     /// Adds rows to the page from [`Document::after`].
     Page,
     /// Moves up by `rows` rows from `at`, then shows the page there.
-    Up { at: RowAt, rows: usize },
+    Up {
+        at: RowAt,
+        rows: usize,
+    },
     /// Shows the page from the first line that starts at or after
     /// `offset`.
-    Jump { offset: u64 },
+    Jump {
+        offset: u64,
+    },
 }
 
 /// The rows of the line decoded last, which the rows of one wrapped line
@@ -326,7 +332,7 @@ impl Document {
                     rows,
                 };
             }
-            Task::Up { .. } | Task::Jump { .. } => {}
+            Task::Idle | Task::Up { .. } | Task::Jump { .. } => {}
         }
     }
 
@@ -336,6 +342,7 @@ impl Document {
     pub(crate) fn advance(&mut self, ansi: &dyn Fn(&[u8]) -> String) -> Option<u64> {
         loop {
             let waits = match self.task {
+                Task::Idle => return None,
                 Task::Jump { offset } => match self.jump_line(offset) {
                     Ok(line) => {
                         self.show_from(RowAt { line, row: 0 });
@@ -382,6 +389,16 @@ impl Document {
                 },
             };
             return Some(waits);
+        }
+    }
+
+    pub(crate) fn cancel(&mut self) {
+        self.task = Task::Idle;
+    }
+
+    pub(crate) fn resume(&mut self) {
+        if self.task == Task::Idle {
+            self.show_from(self.top);
         }
     }
 
@@ -563,7 +580,7 @@ impl Document {
 
     /// Whether the page shows the file's last row.
     fn end_shown(&self) -> bool {
-        self.task == Task::Page && self.after == After::End
+        matches!(self.task, Task::Page | Task::Idle) && self.after == After::End
     }
 
     /// Moves down by `rows` rows, as far as the last row at the bottom.
@@ -767,6 +784,7 @@ impl ScrollBar {
 pub(crate) enum Shown {
     /// Until the first block arrives.
     Reading,
+    Cancelled,
     File(Document),
     /// Windows could not open the file, or, when `opened`, read it.
     Failed {
@@ -798,6 +816,7 @@ impl Shown {
         Some(match self {
             Shown::File(_) => return None,
             Shown::Reading => (strings.text("panel.reading").to_owned(), false),
+            Shown::Cancelled => (strings.text("work.cancelled").to_owned(), true),
             Shown::Failed { opened, reason } => {
                 let key = if *opened {
                     "viewer.cannot_read"
@@ -851,6 +870,36 @@ const INSET: (i32, i32) = (8, 4);
 pub(crate) fn text_inset(dpi: Dpi) -> (Px, Px) {
     let at = |px: i32| Px(px).rescale(Dpi::new(96).expect("96 is not zero"), dpi);
     (at(INSET.0), at(INSET.1))
+}
+
+pub(crate) fn waiting_layout(
+    area: Rect,
+    text_height: Px,
+    button: Size,
+    dpi: Dpi,
+) -> (Rect, Rect, Rect) {
+    let (x, y) = text_inset(dpi);
+    let width = button.width.min((area.width - x - x).max(Px(0)));
+    let height = text_height.max(button.height);
+    let message = Rect {
+        x: area.x + x,
+        y: area.y + y,
+        width: (area.width - width - x - x - x).max(Px(0)),
+        height,
+    };
+    let button = Rect {
+        x: area.right() - x - width,
+        y: area.y + y,
+        width,
+        height: button.height,
+    };
+    let top = (message.bottom() + y).min(area.bottom());
+    let page = Rect {
+        y: top,
+        height: (area.bottom() - top).max(Px(0)),
+        ..area
+    };
+    (page, message, button)
 }
 
 /// The characters and the whole rows that fit an area of `size` inside
@@ -979,7 +1028,9 @@ pub(crate) fn menu_states(mode: Option<Mode>, wrap: bool) -> [(u16, bool, bool);
 /// What a key does in a Viewer.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ViewerKey {
-    /// `Esc` or `F3`, as in Norton Commander.
+    /// `Esc` cancels a pending read, and otherwise closes the Viewer.
+    Cancel,
+    /// `F3`, as in Norton Commander.
     Close,
     /// `F4`: Text to Hex, or Hex to Text.
     SwitchMode,
@@ -1001,7 +1052,8 @@ pub(crate) fn viewer_key(keystroke: Keystroke) -> Option<ViewerKey> {
         return None;
     }
     Some(match (keystroke.key, keystroke.ctrl) {
-        (Key::Escape | Key::Function(3), false) => ViewerKey::Close,
+        (Key::Escape, false) => ViewerKey::Cancel,
+        (Key::Function(3), false) => ViewerKey::Close,
         (Key::Function(4), false) => ViewerKey::SwitchMode,
         (Key::Function(2), false) => ViewerKey::Wrap,
         (Key::Up, false) => ViewerKey::LineUp,
@@ -1117,5 +1169,19 @@ mod tests {
         assert_eq!(document.blocks.len, file.len() as u64);
         assert_eq!(texts(&document), ["x"; 3]);
         assert!(document.end_shown());
+    }
+
+    #[test]
+    fn cancelled_move_does_not_request_its_block_again_after_layout() {
+        let mut document = Document::new((BLOCK_BYTES * 3) as u64, vec![0; BLOCK_BYTES], false);
+        document.set_area(80, 3);
+        assert_eq!(document.advance(&latin1), None);
+        document.end();
+        assert_eq!(document.advance(&latin1), Some(2));
+        document.cancel();
+        document.set_area(80, 5);
+        assert_eq!(document.advance(&latin1), None);
+        document.end();
+        assert_eq!(document.advance(&latin1), Some(2));
     }
 }

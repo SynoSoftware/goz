@@ -51,6 +51,7 @@ integrated review and Build 38: formatting, clippy, all workspace tests and docs
 compile corrections together, then one newly reachable fold lint corrected with
 a plain loop that polls every volume. Log:
 `V:/temp/gozler-window-stage2-build38.log`. No new focused or benchmark run.
+Stage 2 is committed as `f66011f`.
 
 Current milestone:
 - Integrated adversarial review:
@@ -93,14 +94,52 @@ Current milestone:
   endpoint closure. Focused review is clean at
   `V:/temp/gozler-window-stage2-worker-review3.md`; the known fetch_update/MSRV
   allowance is added. Earlier clean group evidence is reused from review 2.
-- Stage 3 preparation is read-only: `V:/temp/gozler-window-stage3-slow-inventory.md`
+- Stage 3 slow-task implementation is in progress. `V:/temp/gozler-window-stage3-slow-inventory.md`
   records actual idle/progress/expiry consumers; watchdog seams and its required
   native-loop evidence are in `V:/temp/gozler-window-stage3-watchdog-design.md`.
-  The independent watchdog owner is drafting only new, unwired modules; exclude
-  those files from the Stage 2 commit. Integration needs the existing `windows`
+  The watchdog draft remains unwired. Integration needs the existing `windows`
   dependency's `Win32_System_WindowsProgramming` feature for QueryThreadCycleTime,
   with no new crate or parallel FFI declaration. RAII handler scopes preserve
   outer context on the UI stack while the worker copies one ID-only record.
+  The disposable native probe was included only under cfg(test); that include
+  is now removed and production is not wired.
+  Evidence attempt 1 stopped before running on two SendMessageW argument types
+  in the disposable harness; both corrected together. Attempt 2 used posted
+  messages: menu, application/system dialog, resizing and controlled blocking
+  passed; moving did not enter and drag delivery was not demonstrated. Attempt 3
+  used asynchronous SendNotifyMessage and keyboard-initiated SC_MOVE: menu,
+  application/system dialog, size, move and controlled blocking passed. The
+  synthetic drag never reached GiveFeedback, so it proves nothing about delivery
+  inside OLE's loop. No further synthetic retries: the remaining prerequisite is
+  one valid native drag-loop acknowledgment observation. The watchdog stays
+  disabled until then. SendNotifyMessage also cannot diagnose a wait that itself
+  services nonqueued messages. Evidence: `V:/temp/gozler-window-stage3-watchdog-evidence3.log`
+  and `V:/temp/gozler-window-stage3-watchdog-implementation.md`. Attempts 1–2
+  used `-Timing` unnecessarily; attempt 3 used focused `-Test`. These are native
+  API checks, not full builds or performance benchmarks.
+- Stage 3 shared timing contract: Task exposes current waiting state and accepts
+  progress only after the caller validates input identity. Expiry reports once,
+  cancels interest and retains occupied execution until completion. Requests
+  returns purpose/generation/waiting observations; background Status and panel
+  folder-size expiry clear only matching owner latches. Folder/Viewer owners
+  implement their own existing message/Cancel surfaces. The lead owns shared
+  Model/Work integration and catalogue wording. No agent builds independently.
+- Stage 3 first retained batch passed integrated review and Build 39:
+  Search/search panels, initial folder listings, per-command Viewer waits,
+  Settings-owned work and Indexed folders; background Status/folder-size/program
+  expiry and natural retry. Existing native message/status/buttons are reused.
+  Six new lasting regressions cover expiry/occupied execution, status retry with
+  stale expiry/reply, search cancellation preserving export, program-cache retry,
+  folder cancellation identity and Viewer cancellation surviving layout. The
+  existing size-sum test also checks matching expiry. All passed. Review 1 found
+  the no-row-update size-expiry path did not refresh native counts; the existing
+  panel refresh now handles it. Correction review is clean:
+  `V:/temp/gozler-window-stage3-waiting-review2.md`. One full batch run passed
+  formatting, clippy, all workspace tests (268 UI passed, 14 ignored) and docs:
+  `V:/temp/gozler-window-stage3-waiting-build39.log`. No focused test of product
+  code or benchmark was added; native evidence attempt 3 is separately recorded.
+  Remaining Stage 3 work includes native shell/clipboard/path/location/pairing
+  waits, selection preparation waits and valid watchdog OLE-loop evidence.
 - Stage 2 settled interfaces: persistent Viewer session and fixed panel slots
   retain blocked work until actual resource cleanup. `Task::interrupt_io` only
   interrupts a native call, preserving session lifetime; Cancel also ends it.

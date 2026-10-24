@@ -5,7 +5,7 @@ use crate::core::fetch::{
     Ask, Chunk, ChunkAsk, DaemonFailure, ExportAsk, Fetch, Fetched, Generation, Outcome, Programs,
     Purpose, SelectionAsk, SelectionRows, WriteFailure,
 };
-use crate::core::work::{INLINE_ITEMS, Replacement, Retirement};
+use crate::core::work::{INLINE_ITEMS, Interest, Replacement, Retirement, Waiting};
 use crate::win::wake::OpenWaker;
 use crate::win::work::{OffThread, Task};
 use gozler_client::{CancelToken, Client, ClientError};
@@ -47,13 +47,18 @@ pub(in crate::app) struct Requests {
 impl Requests {
     pub(super) fn new(waker: OpenWaker, error_log: PathBuf) -> Self {
         let groups = Purpose::ALL
-            .map(|_| {
+            .map(|purpose| {
                 let (sender, interim) = sync_channel(1);
+                // Reply size is unknown until the service answers; disposal
+                // of a cancelled reply must not run on the window thread.
+                let task = Task::new(waker.clone(), Replacement::Cancel, execute)
+                    .with_size(|_| INLINE_ITEMS + 1);
+                let task = match purpose.interest() {
+                    Interest::Awaited => task,
+                    Interest::Background => task.background(),
+                };
                 Group {
-                    // Reply size is unknown until the service answers; disposal
-                    // of a cancelled reply must not run on the window thread.
-                    task: Task::new(waker.clone(), Replacement::Cancel, execute)
-                        .with_size(|_| INLINE_ITEMS + 1),
+                    task,
                     sender,
                     interim,
                     current: None,
@@ -98,9 +103,11 @@ impl Requests {
 
     pub(in crate::app) fn drain(&mut self) -> Vec<Fetched> {
         let mut replies = Vec::new();
+        let now = Instant::now();
         for group in &mut self.groups {
             if let Ok(fetched) = group.interim.try_recv() {
                 if group.current == Some(fetched.generation) {
+                    group.task.progress(now);
                     replies.push(fetched);
                 } else {
                     self.retired.push(fetched, INLINE_ITEMS + 1);
@@ -115,6 +122,27 @@ impl Requests {
             self.retired.append(group.task.take_retired());
         }
         replies
+    }
+
+    pub(in crate::app) fn waiting(&self, purpose: Purpose, now: Instant) -> Option<Waiting> {
+        let group = &self.groups[slot(purpose)];
+        group.current?;
+        group.task.waiting(now)
+    }
+
+    pub(super) fn tick(&mut self, now: Instant) -> Vec<(Purpose, Generation, Waiting)> {
+        let mut states = Vec::new();
+        for (purpose, group) in Purpose::ALL.into_iter().zip(&mut self.groups) {
+            if let Some(generation) = group.current
+                && let Some(waiting) = group.task.tick(now)
+            {
+                states.push((purpose, generation, waiting));
+                if waiting == Waiting::Expired {
+                    group.current = None;
+                }
+            }
+        }
+        states
     }
 
     pub(in crate::app) fn take_retired(&mut self) -> Retirement {

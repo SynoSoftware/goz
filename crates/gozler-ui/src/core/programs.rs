@@ -231,6 +231,27 @@ impl Cache {
             };
         }
     }
+
+    /// An expired background check gets another chance at the next refresh,
+    /// retaining the first answer if its timed-out retry was interrupted.
+    pub(crate) fn abandon(&mut self) {
+        self.0 = match self.0.take() {
+            Some((_, Entry::Running { first: None })) => None,
+            Some((
+                files,
+                Entry::Running {
+                    first: Some(programs),
+                },
+            )) => Some((
+                files,
+                Entry::Done {
+                    programs,
+                    retry_due: true,
+                },
+            )),
+            completed => completed,
+        };
+    }
 }
 
 #[cfg(test)]
@@ -430,5 +451,32 @@ mod tests {
         assert!(cache.ask(&rebuilt).start);
         cache.finish(&rebuilt, checked(true));
         assert!(cache.ask(&rebuilt).start);
+    }
+
+    #[test]
+    fn an_expired_check_can_retry_without_losing_its_first_answer() {
+        let current = files(10, 20);
+        let mut cache = Cache::new();
+        assert!(cache.ask(&current).start);
+        cache.abandon();
+        assert!(cache.ask(&current).start);
+        cache.finish(&current, checked(true));
+        assert!(cache.ask(&current).start);
+        cache.abandon();
+
+        let retry = cache.ask(&current);
+        assert!(retry.start);
+        assert_eq!(
+            retry.programs.beside,
+            Beside::SameAsService(PathBuf::from("local.exe"))
+        );
+        cache.finish(&current, checked(false));
+        cache.abandon();
+        let completed = cache.ask(&current);
+        assert!(!completed.start);
+        assert_eq!(
+            completed.programs.beside,
+            Beside::SameAsService(PathBuf::from("local.exe"))
+        );
     }
 }

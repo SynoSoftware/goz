@@ -1,7 +1,7 @@
 //! Indexed folders has one listing slot per volume. A blocked old dialog
 //! retains its slot; reopening queues work behind it instead of another thread.
 
-use crate::core::work::{INLINE_ITEMS, Replacement, Retirement};
+use crate::core::work::{INLINE_ITEMS, Interest, Replacement, Retirement, Waiting};
 use crate::win::wake::OpenWaker;
 use crate::win::work::{OffThread, Task};
 use gozler_client::CancelToken;
@@ -11,10 +11,12 @@ use std::time::Instant;
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(in crate::app) struct Session(u64);
 
+#[derive(Clone)]
 struct Reading {
     session: Session,
     node: usize,
     folder: String,
+    accepted: Instant,
 }
 
 pub(in crate::app) type Subfolders = Vec<(String, bool)>;
@@ -28,7 +30,7 @@ pub(in crate::app) struct Listed {
 
 struct Volume {
     task: Task<Reading, Listed>,
-    active: Option<Session>,
+    active: Option<Reading>,
     queued: VecDeque<Reading>,
     asked: HashSet<usize>,
 }
@@ -38,7 +40,7 @@ impl Volume {
         if !self.task.is_running()
             && let Some(reading) = self.queued.pop_front()
         {
-            self.active = Some(reading.session);
+            self.active = Some(reading.clone());
             self.task.replace(reading);
         }
     }
@@ -104,6 +106,7 @@ impl Work {
                 session,
                 node,
                 folder,
+                accepted: Instant::now(),
             });
             group.start();
         }
@@ -144,10 +147,43 @@ impl Work {
     pub(in crate::app) fn pending(&self, session: Session) -> bool {
         self.current == Some(session)
             && (!self.listed.is_empty()
-                || self
-                    .volumes
-                    .values()
-                    .any(|group| group.active == Some(session) || !group.queued.is_empty()))
+                || self.volumes.values().any(|group| {
+                    group
+                        .active
+                        .as_ref()
+                        .is_some_and(|active| active.session == session)
+                        || !group.queued.is_empty()
+                }))
+    }
+
+    pub(in crate::app) fn waiting(
+        &self,
+        session: Session,
+        now: Instant,
+    ) -> Option<(Waiting, String)> {
+        if self.current != Some(session) {
+            return None;
+        }
+        let reading = self
+            .volumes
+            .values()
+            .filter_map(|group| {
+                group
+                    .active
+                    .as_ref()
+                    .filter(|reading| reading.session == session)
+                    .or_else(|| {
+                        group
+                            .queued
+                            .front()
+                            .filter(|reading| reading.session == session)
+                    })
+            })
+            .min_by_key(|reading| reading.accepted)?;
+        Some((
+            Interest::Awaited.after(now.saturating_duration_since(reading.accepted)),
+            reading.folder.clone(),
+        ))
     }
 
     pub(in crate::app) fn end(&mut self, session: Session) {
@@ -158,7 +194,11 @@ impl Work {
         self.retired
             .push(std::mem::take(&mut self.listed), INLINE_ITEMS + 1);
         for group in self.volumes.values_mut() {
-            if group.active == Some(session) {
+            if group
+                .active
+                .as_ref()
+                .is_some_and(|active| active.session == session)
+            {
                 group.task.cancel();
             }
             self.retired

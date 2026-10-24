@@ -2,7 +2,7 @@
 //! return, while each panel keeps only its newest pending folder request.
 
 use crate::core::panel::{ReadAsk, ReadEvent, Side};
-use crate::core::work::{INLINE_ITEMS, Replacement, Retirement};
+use crate::core::work::{INLINE_ITEMS, Replacement, Retirement, Waiting};
 use crate::win::folder::{self, PanelEvent, ReadBack, Reading, Registration, Removal};
 use crate::win::wake::OpenWaker;
 use crate::win::work::Task;
@@ -69,6 +69,18 @@ impl Work {
             .is_some_and(|watching| !watching.suspended && watching.back.generation == generation)
     }
 
+    pub(crate) fn generation(&self, side: Side) -> Option<u64> {
+        self.watching[side.index()]
+            .as_ref()
+            .filter(|watching| watching.waiting && !watching.suspended)
+            .map(|watching| watching.back.generation)
+    }
+
+    pub(crate) fn waiting(&self, side: Side, now: Instant) -> Option<Waiting> {
+        self.generation(side)?;
+        self.readings[side.index()].waiting(now)
+    }
+
     pub(crate) fn read_free(&mut self, side: Side, folder: &str) {
         self.frees[side.index()].replace((side, folder.to_owned()));
     }
@@ -97,7 +109,9 @@ impl Work {
             if let Some(watching) = &mut self.watching[side.index()]
                 && !watching.suspended
             {
+                let mut progress = false;
                 if let Some(request) = watching.back.take_registration() {
+                    progress = true;
                     events.push(PanelEvent::Register {
                         side,
                         generation: watching.back.generation,
@@ -105,6 +119,10 @@ impl Work {
                     });
                 }
                 let (found, lost) = watching.back.mailbox.drain(&self.waker);
+                progress |= !found.is_empty();
+                if progress && watching.waiting {
+                    self.readings[side.index()].progress(Instant::now());
+                }
                 if found.iter().any(|event| {
                     matches!(
                         event,

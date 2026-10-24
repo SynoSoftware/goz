@@ -296,6 +296,7 @@ pub(crate) struct Place {
 pub(crate) enum View {
     /// The folder is open and its listing has not completed.
     Reading,
+    Cancelled,
     Folder,
     /// The shown drive was removed or stopped answering; Retry reads the
     /// folder again.
@@ -948,6 +949,10 @@ impl Panel {
         &self.view
     }
 
+    pub(crate) fn reading_generation(&self) -> Option<u64> {
+        self.read.as_ref().map(|read| read.generation)
+    }
+
     /// The folder that `F5` and `F6` offer to copy or move to when this is
     /// the other panel: the open folder, also while it is still read; none
     /// for a search, a drive that is not ready or a folder not yet open.
@@ -1010,14 +1015,14 @@ impl Panel {
     pub(crate) fn search(&self) -> Option<&PanelSearch> {
         match &self.view {
             View::Search(search) => Some(search),
-            View::Reading | View::Folder | View::NotReady { .. } => None,
+            View::Reading | View::Cancelled | View::Folder | View::NotReady { .. } => None,
         }
     }
 
     fn search_mut(&mut self) -> Option<&mut PanelSearch> {
         match &mut self.view {
             View::Search(search) => Some(search),
-            View::Reading | View::Folder | View::NotReady { .. } => None,
+            View::Reading | View::Cancelled | View::Folder | View::NotReady { .. } => None,
         }
     }
 
@@ -1040,7 +1045,7 @@ impl Panel {
         match &self.view {
             View::Folder => self.up_rows() + self.shown_len() as u64,
             View::Search(search) => search.list.results().count(),
-            View::Reading | View::NotReady { .. } => 0,
+            View::Reading | View::Cancelled | View::NotReady { .. } => 0,
         }
     }
 
@@ -2298,6 +2303,22 @@ impl Panels {
         }
     }
 
+    pub(crate) fn cancel_read(&mut self, side: Side, generation: u64) -> bool {
+        let panel = self.panel_mut(side);
+        if panel.reading_generation() != Some(generation) {
+            return false;
+        }
+        let read = panel.read.take().expect("the matching reading is present");
+        panel.invalidate();
+        if matches!(panel.view, View::Reading) {
+            if panel.folder.is_empty() {
+                panel.folder = read.path;
+            }
+            panel.set_view(View::Cancelled);
+        }
+        true
+    }
+
     /// The reading of `side` when Two panels shows: its folder again, or
     /// the first time its saved folder, or the nearest folder above it that
     /// exists; `first` is the folder of a panel that saved none, Documents
@@ -2342,7 +2363,7 @@ impl Panels {
         }
         let kind = match self.panel(side).view {
             View::Folder => ReadKind::Again,
-            View::Reading | View::NotReady { .. } => ReadKind::Go {
+            View::Reading | View::Cancelled | View::NotReady { .. } => ReadKind::Go {
                 focus: None,
                 typed: false,
             },
@@ -3108,6 +3129,15 @@ impl Panels {
         if let Some(update) = panel.submit(RowChange::Sizes(Box::new(outcome)), &taken) {
             panel.ready_update = Some(update);
         }
+        true
+    }
+
+    pub(crate) fn expire_sizes(&mut self, side: Side, generation: Generation) -> bool {
+        let panel = self.panel_mut(side);
+        if panel.sizes_asked != Some(generation) {
+            return false;
+        }
+        panel.sizes_asked = None;
         true
     }
 
@@ -4015,6 +4045,76 @@ pub(crate) mod tests {
         assert_eq!(folded(&panels), before);
     }
 
+    #[test]
+    fn a_cancelled_read_keeps_accepted_rows_and_rejects_its_late_candidate() {
+        let mut panels = showing(r"C:\old", vec![file("keep.txt", 1, 0)]);
+        let other = panels.go(Side::Right, r"D:\other".to_owned(), None);
+        let ask = panels.go(Side::Left, r"E:\blocked".to_owned(), None);
+        assert!(!panels.cancel_read(Side::Left, ask.generation + 1));
+        assert!(panels.cancel_read(Side::Left, ask.generation));
+        assert_eq!(names(&panels, Side::Left), ["..", "keep.txt"]);
+        assert_eq!(panels.panel(Side::Left).path_box(), r"C:\old");
+        assert_eq!(
+            panels
+                .accept_read(
+                    Side::Left,
+                    ReadEvent::Opened {
+                        generation: ask.generation,
+                        folder: ask.path,
+                    },
+                    None
+                )
+                .change,
+            ReadChange::Stale
+        );
+
+        let ask = panels.go(Side::Left, r"E:\large".to_owned(), None);
+        panels.accept_read(
+            Side::Left,
+            ReadEvent::Opened {
+                generation: ask.generation,
+                folder: ask.path.clone(),
+            },
+            None,
+        );
+        let listed = ReadEvent::Listed {
+            generation: ask.generation,
+            folder: ask.path.clone(),
+            entries: (0..work::INLINE_ITEMS + 1)
+                .map(|i| file(&format!("file {i}"), 1, 0))
+                .collect(),
+            focus: None,
+        };
+        assert_eq!(
+            panels.accept_read(Side::Left, listed, None).change,
+            ReadChange::Pending
+        );
+        let calculating = panels
+            .take_calculation(Side::Left)
+            .expect("a large listing is deferred");
+        assert!(panels.cancel_read(Side::Left, ask.generation));
+        assert!(
+            panels
+                .accept_calculation(Side::Left, calculating.run())
+                .is_none()
+        );
+        assert!(matches!(panels.panel(Side::Left).view(), View::Cancelled));
+        assert_eq!(panels.panel(Side::Left).path_box(), r"E:\large");
+        assert_eq!(panels.panel(Side::Left).count(), 0);
+        assert_eq!(
+            panels.panel(Side::Right).reading_generation(),
+            Some(other.generation)
+        );
+        let retry = panels
+            .read_again(Side::Left)
+            .expect("a cancelled reading can be retried");
+        assert!(!panels.cancel_read(Side::Left, ask.generation));
+        assert_eq!(
+            panels.panel(Side::Left).reading_generation(),
+            Some(retry.generation)
+        );
+    }
+
     /// A folder that cannot be opened while the panel reads another folder,
     /// or shows a drive that is not ready, is refused: the panel stays as it
     /// was instead of showing the failed folder's drive as not ready.
@@ -4343,10 +4443,21 @@ pub(crate) mod tests {
     /// with a subfolder (#114); once they did, a later ask, as after a
     /// change, keeps the sum.
     #[test]
-    fn a_sum_waits_for_the_first_sizes() {
+    fn the_first_size_wait_ends_only_on_its_reply_or_its_own_expiry() {
         let mut panels = showing(r"C:\d", vec![folder("Photos"), file("a", 5, 0)]);
         panels.ask_sizes(Side::Left, Generation(6));
         assert_eq!(panels.panel(Side::Left).counts().size, None);
+        assert!(!panels.expire_sizes(Side::Left, Generation(5)));
+        assert_eq!(panels.panel(Side::Left).counts().size, None);
+        assert!(panels.expire_sizes(Side::Left, Generation(6)));
+        assert_eq!(
+            panels
+                .panel(Side::Left)
+                .counts()
+                .size
+                .map(|size| size.unknown),
+            Some(1)
+        );
         give_sizes(&mut panels, &[]);
         panels.ask_sizes(Side::Left, Generation(8));
         let size = panels.panel(Side::Left).counts().size;

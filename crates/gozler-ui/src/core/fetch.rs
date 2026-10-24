@@ -4,6 +4,7 @@
 //! purposes and answers each [`Fetch`] with a [`Fetched`].
 
 use super::panel::Side;
+use super::work::Interest;
 use gozler_client::NotRunning;
 use gozler_core::include::IndexSettings;
 use gozler_core::output::ResultFormat;
@@ -78,6 +79,13 @@ impl Purpose {
         Purpose::FolderSizes(Side::Left),
         Purpose::FolderSizes(Side::Right),
     ];
+
+    pub(crate) fn interest(self) -> Interest {
+        match self {
+            Self::Status | Self::FolderSizes(_) => Interest::Background,
+            _ => Interest::Awaited,
+        }
+    }
 }
 
 /// Which request a reply answers; a newer request has a larger number, and

@@ -204,6 +204,10 @@ impl MainWindow {
         }
     }
 
+    pub(super) fn forget_selection_action(&self, list: List) {
+        self.native_selection(list).borrow_mut().action = None;
+    }
+
     fn selection_waiting(&self, list: List) -> bool {
         if self.native_deselection_pending(list) {
             return true;

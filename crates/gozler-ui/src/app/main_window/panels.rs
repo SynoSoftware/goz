@@ -6,7 +6,7 @@
 
 use super::super::dialogs::{NewFolder, TransferStart};
 use super::{EntryAction, MainWindow, Selected, timer};
-use crate::core::captions::{self, PanelCaptions};
+use crate::core::captions::{self, ButtonIcon, PanelCaptions};
 use crate::core::commands::{
     self, CommandId, Focus, Key, Keystroke, Mark, MenuItem, MenuNode, PanelAction, PanelKey, State,
 };
@@ -23,6 +23,7 @@ use crate::core::panel::{
 };
 use crate::core::selection::SELECTION_LIMIT;
 use crate::core::settings::Mode;
+use crate::core::work::Waiting;
 use crate::win::controls::{Button, DropDownList, Edit, Label, ListColumn, ListView};
 use crate::win::dialog::DialogEnd;
 use crate::win::folder::{self, PanelEvent, Removal};
@@ -34,6 +35,7 @@ use gozler_core::winpath::parent_of;
 use gozler_fileops::{Destination, Request};
 use std::cell::Cell;
 use std::path::PathBuf;
+use std::time::Instant;
 use windows::Win32::Foundation::LRESULT;
 
 /// Where a search panel's list puts its Folder column.
@@ -398,23 +400,6 @@ impl MainWindow {
         show_text(c.quick.hwnd(), &captions.counts);
         show_text(c.free.hwnd(), &captions.free);
         show_text(c.folder.hwnd(), &captions.folder);
-        let message = captions.message.as_deref().unwrap_or_default();
-        show_text(c.message.hwnd(), message);
-        if captions.message.is_some()
-            && let Some(placed) = self.panel_layout(side)
-        {
-            let header = c.list.header().screen_rect().height;
-            let retry = [c.retry.hwnd()];
-            let buttons = if captions.retry { &retry[..] } else { &[] };
-            self.place_message(
-                placed.list,
-                header,
-                c.message.hwnd(),
-                message,
-                buttons,
-                true,
-            );
-        }
         if let Some(look_in) = kind {
             c.look_in
                 .select(LookIn::ALL.iter().position(|l| *l == look_in).unwrap_or(0));
@@ -433,11 +418,103 @@ impl MainWindow {
         c.folder
             .hwnd()
             .set_visible(shown && !captions.quick && all_drives);
-        c.message
-            .hwnd()
-            .set_visible(shown && captions.message.is_some());
-        c.retry.hwnd().set_visible(shown && captions.retry);
+        self.show_panel_message(side);
         self.update_key_bar();
+    }
+
+    pub(super) fn show_panel_message(&self, side: Side) {
+        let folder_slow = self
+            .created()
+            .work
+            .borrow()
+            .folders
+            .waiting(side, Instant::now())
+            == Some(Waiting::Slow);
+        let slow_request = self.slow_request(List::Panel(side));
+        let slow = folder_slow || slow_request.is_some();
+        let (message, button, key, caption, shown) = {
+            let model = self.model.borrow();
+            let panel = model.panels().panel(side);
+            let (mut message, retry) = captions::panel_message(&model, side);
+            if slow {
+                let all_drives = panel
+                    .search()
+                    .is_some_and(|search| search.look_in == LookIn::AllDrives);
+                let path = (folder_slow || !all_drives).then(|| panel.path_box());
+                message = Some(crate::core::work::waiting(model.strings(), path));
+            }
+            let key = if slow { "button.cancel" } else { "panel.retry" };
+            let panes = model.panes();
+            let shown = model.mode() == Mode::TwoPanels
+                && !(panes.inspector
+                    && panes.maximized
+                    && panes.content == crate::core::layout::InspectorContent::Transfers);
+            (
+                message,
+                slow || retry && panel.reading_generation().is_none(),
+                key,
+                model.strings().text(key).to_owned(),
+                shown,
+            )
+        };
+        let c = self.panel(side);
+        let text = message.as_deref().unwrap_or_default();
+        show_text(c.message.hwnd(), text);
+        show_text(c.retry.hwnd(), &caption);
+        c.retry.set_icon(ButtonIcon::of(key, false));
+        if shown
+            && message.is_some()
+            && let Some(placed) = self.panel_layout(side)
+        {
+            let header = c.list.header().screen_rect().height;
+            let retry = [c.retry.hwnd()];
+            let buttons = if button { &retry[..] } else { &[] };
+            self.place_message(placed.list, header, c.message.hwnd(), text, buttons, true);
+        }
+        c.message.hwnd().set_visible(shown && message.is_some());
+        c.retry.hwnd().set_visible(shown && button);
+    }
+
+    pub(super) fn panel_message_clicked(&self, hwnd: Hwnd, side: Side) {
+        let (slow, generation) = {
+            let work = self.created().work.borrow();
+            (
+                work.folders.waiting(side, Instant::now()) == Some(Waiting::Slow),
+                work.folders.generation(side),
+            )
+        };
+        if slow {
+            if let Some(generation) = generation {
+                let cancelled = self
+                    .model
+                    .borrow_mut()
+                    .panels_mut()
+                    .cancel_read(side, generation);
+                if cancelled {
+                    self.created().work.borrow_mut().folders.cancel_read(side);
+                    self.panel_typed.borrow_mut()[side.index()].take();
+                    self.retire_model();
+                    self.show_panel(side);
+                    self.update_status();
+                    self.note_saved_state(hwnd);
+                }
+            }
+            return;
+        }
+        if let Some(purpose) = self.slow_request(List::Panel(side)) {
+            self.cancel_list_read(hwnd, purpose);
+            return;
+        }
+        let retry = {
+            let model = self.model.borrow();
+            let panel = model.panels().panel(side);
+            panel.reading_generation().is_none()
+                && matches!(panel.view(), View::Cancelled | View::NotReady { .. })
+        };
+        if retry {
+            let ask = self.model.borrow_mut().panels_mut().read_again(side);
+            self.read(side, ask);
+        }
     }
 
     /// Makes `side`'s controls follow the panel when it became a search
@@ -1044,6 +1121,8 @@ impl MainWindow {
         if let Some(update) = update {
             let hwnd = self.created().controls.search.hwnd().parent();
             self.apply_panel_update(hwnd, side, update);
+        } else {
+            self.show_panel(side);
         }
         self.start_list_passes();
     }

@@ -2,7 +2,7 @@
 
 use super::dialogs::TransferStart;
 use crate::core::clipboard::{ClipboardData, ClipboardFormat, Publication, folder_of};
-use crate::core::fetch::{List, LocalService};
+use crate::core::fetch::{Generation, List, LocalService, Purpose};
 use crate::core::model::ScopeCheck;
 use crate::core::open::{self, Commands, Entries, EntryAction, Selected};
 use crate::core::operations::{Followed, Following, PreparedFailure, Reporting};
@@ -12,7 +12,7 @@ use crate::core::panel::{
 use crate::core::search_list::{Keep, Kept};
 use crate::core::selection::{Filter, Filtered, Telling, Told};
 use crate::core::settings::{Changes, Settings};
-use crate::core::work::{Id, Replacement, Retirement};
+use crate::core::work::{Id, Replacement, Retirement, Waiting};
 use crate::win::clipboard::{self, ClipboardBlock, CopyAttempt};
 use crate::win::wake::OpenWaker;
 use crate::win::work::{OffThread, Task};
@@ -486,8 +486,19 @@ impl Work {
         changed
     }
 
-    pub(super) fn tick(&mut self, now: Instant) -> bool {
+    pub(super) fn tick(&mut self, now: Instant) -> (bool, Vec<(Purpose, Generation)>) {
+        let requests = self.requests.tick(now);
+        let expired = requests
+            .iter()
+            .filter_map(|(purpose, generation, waiting)| {
+                (*waiting == Waiting::Expired).then_some((*purpose, *generation))
+            })
+            .collect();
         let mut active = self.location.tick(now).is_some();
+        active |= requests
+            .iter()
+            .any(|(_, _, waiting)| *waiting != Waiting::Expired);
+        active |= self.programs.tick(now);
         active |= self.pairing.tick(now).is_some();
         active |= self.labels.tick(now).is_some();
         active |= self.copying.tick(now).is_some();
@@ -527,7 +538,7 @@ impl Work {
             active |= list.keeping.tick(now).is_some();
             active |= list.filtering.tick(now).is_some();
         }
-        active
+        (active, expired)
     }
 
     pub(super) fn check_release(&mut self, purpose: ReleasePurpose) {
@@ -681,6 +692,11 @@ impl Work {
         self.registry
             .as_ref()
             .is_some_and(|task| task.is_current(id))
+    }
+
+    pub(super) fn sign_in_waiting(&self, id: Id, now: Instant) -> Option<Waiting> {
+        let task = self.registry.as_ref()?;
+        task.is_current(id).then(|| task.waiting(now)).flatten()
     }
 
     pub(super) fn set_sign_in(&mut self, on: bool, log: PathBuf) -> Id {

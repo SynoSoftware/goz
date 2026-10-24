@@ -142,6 +142,22 @@ owner has run it, and file an issue for each item that fails.
   look the same, and the list's rows, header and selection look like File
   Explorer's.
 
+## Slow window tasks
+
+- Leave a search, selection or folder read waiting on an unavailable source.
+  After three seconds its own area offers Waiting and Cancel. Cancel or Esc
+  stops that read; a running copy or export continues. Retry of a cancelled
+  folder uses its retained path, and a late old reply cannot restore it.
+- Open a file from a slow share, then seek beyond the cached Viewer page.
+  Waiting and Cancel use the existing message and button; a later block wait
+  keeps the document visible. Cancel survives resizing, and navigation can
+  request another block. Check the compact row at narrow widths and high DPI.
+- Delay a Settings request or accepted save. Settings owns its waiting message;
+  accepted saves have no Cancel. A current-page preview or program search can
+  be cancelled without stopping a fix or applying a buffered old answer.
+- Close and reopen Indexed folders while a listing waits. Its hint names the
+  current session's path and Cancel ends only that session.
+
 ## The copy, move and delete engine
 
 - Open a waiting transfer's context menu, including by right-clicking a row

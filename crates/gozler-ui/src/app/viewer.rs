@@ -8,15 +8,16 @@ use super::work::viewers::Reader;
 use crate::core::captions::ButtonIcon;
 use crate::core::ids::{ControlId, IconId};
 use crate::core::layout::{
-    Px, Rect, image_button_width, status_last_part, viewer_message, viewer_message_width,
+    Px, Rect, Size, image_button_width, status_last_part, viewer_message, viewer_message_width,
 };
 use crate::core::settings::{Placement, ViewerState};
 use crate::core::text::{self, Strings};
 use crate::core::viewer::Mode;
 use crate::core::viewer_window::{
     Document, ScrollBar, Shown, ViewerCommand, ViewerKey, file_text, menu_bar, menu_states,
-    place_samples, text_inset, text_room, viewer_key,
+    place_samples, text_inset, text_room, viewer_key, waiting_layout,
 };
+use crate::core::work::{Waiting, waiting};
 use crate::win::controls::{Button, Label, StatusBar};
 use crate::win::folder::Removal;
 use crate::win::gdi::{Font, TextMeter};
@@ -32,9 +33,11 @@ use crate::win::window::{self, DEFERRED, Message, WindowProc};
 use crate::win::{self, Hwnd};
 use std::cell::{Cell, OnceCell, RefCell};
 use std::rc::{Rc, Weak};
+use std::time::Instant;
 use windows::Win32::Foundation::LRESULT;
 
 const WINDOW_CLASS: &str = "gozler.ui.viewer";
+const READ_TIMER: usize = 1;
 
 /// The open Viewers, as the main window holds them, and what they remember
 /// in `ui.json`.
@@ -97,6 +100,8 @@ impl Viewers {
             waker: OnceCell::new(),
             resume: Cell::new(None),
             in_flight: Cell::new(None),
+            slow: Cell::new(false),
+            read_timer: Cell::new(false),
             wrap: Cell::new(state.wrap),
             focused: Cell::new(None),
         });
@@ -216,6 +221,8 @@ struct Viewer {
     /// The block asked for and not yet read, so a fast drag of the scroll
     /// bar asks for one block at a time.
     in_flight: Cell<Option<u64>>,
+    slow: Cell<bool>,
+    read_timer: Cell<bool>,
     wrap: Cell<bool>,
     /// The control that had the focus when the window was deactivated.
     focused: Cell<Option<Hwnd>>,
@@ -259,6 +266,7 @@ impl Viewer {
             return;
         }
         self.in_flight.set(None);
+        self.slow.set(false);
         self.set_shown(hwnd, Shown::Reading);
     }
 
@@ -306,13 +314,12 @@ impl Viewer {
 
     /// The title, the menus and Retry in the window's language.
     fn apply_strings(&self, hwnd: Hwnd) {
-        let Some(c) = self.controls.get() else {
+        if self.controls.get().is_none() {
             return;
-        };
+        }
         {
             let strings = self.strings.borrow();
             hwnd.set_text(&strings.format("viewer.title", &[&self.name]));
-            c.retry.hwnd().set_text(strings.text("panel.retry"));
         }
         self.apply_glyphs(hwnd);
         self.show_message();
@@ -324,21 +331,33 @@ impl Viewer {
     fn apply_glyphs(&self, hwnd: Hwnd) {
         let _ = replace_menu_bar(hwnd, &menu_bar(&self.strings.borrow()));
         if let Some(c) = self.controls.get() {
-            c.retry.set_icon(ButtonIcon::of("panel.retry", false));
+            c.retry
+                .set_icon(ButtonIcon::of(self.message_button(), false));
         }
     }
 
-    /// The message instead of the file, and Retry under it, as what the
-    /// area shows asks.
     fn show_message(&self) {
         let Some(c) = self.controls.get() else {
             return;
         };
-        let message = self
-            .shown
-            .borrow()
-            .message(&self.strings.borrow(), &self.name);
+        let message = if self.slow.get() {
+            Some((
+                waiting(
+                    &self.strings.borrow(),
+                    Some(&String::from_utf16_lossy(&self.path)),
+                ),
+                true,
+            ))
+        } else {
+            self.shown
+                .borrow()
+                .message(&self.strings.borrow(), &self.name)
+        };
         let (text, retry) = message.clone().unwrap_or_default();
+        let key = self.message_button();
+        let caption = self.strings.borrow().text(key).to_owned();
+        c.retry.hwnd().set_text(&caption);
+        c.retry.set_icon(ButtonIcon::of(key, false));
         c.message.hwnd().set_text(&text);
         c.message.hwnd().set_visible(message.is_some());
         if !retry && Hwnd::focused() == Some(c.retry.hwnd()) {
@@ -347,14 +366,26 @@ impl Viewer {
         c.retry.hwnd().set_visible(retry);
     }
 
+    fn message_button(&self) -> &'static str {
+        if self.slow.get() {
+            "button.cancel"
+        } else {
+            "panel.retry"
+        }
+    }
+
     /// Places the controls, and fits the page to the area.
     fn layout(&self, hwnd: Hwnd) {
+        if self.hwnd.get() != Some(hwnd) {
+            return;
+        }
         let Some(c) = self.controls.get() else {
             return;
         };
         let size = hwnd.client_size();
         // Minimized: the page stays as it was.
         if size.width.0 == 0 || size.height.0 == 0 {
+            self.poll_read(hwnd);
             return;
         }
         let dpi = hwnd.dpi();
@@ -365,7 +396,7 @@ impl Viewer {
             width: size.width,
             height: (size.height - status_height).max(Px(0)),
         };
-        let (message, retry, place_width, char_width, line_height) = {
+        let (area, message, retry, place_width, char_width, line_height) = {
             let fonts = self.fonts.borrow();
             let Some(fonts) = fonts.as_ref() else {
                 return;
@@ -378,14 +409,27 @@ impl Viewer {
                 .max()
                 .unwrap_or_default();
             let text = c.message.hwnd().text();
-            let (message, retry) = viewer_message(
+            let button_width =
+                image_button_width(meter.width(strings.text(self.message_button())), dpi);
+            let (mut message, mut retry) = viewer_message(
                 area,
                 meter.wrapped_height(&text, viewer_message_width(area, dpi)),
                 meter.height(),
-                image_button_width(meter.width(strings.text("panel.retry")), dpi),
+                button_width,
                 dpi,
             );
+            let mut page = area;
+            if self.slow.get() && self.shown.borrow().document().is_some() {
+                let button = Size {
+                    width: button_width,
+                    height: retry.height,
+                };
+                let (_, room, _) = waiting_layout(area, Px(0), button, dpi);
+                (page, message, retry) =
+                    waiting_layout(area, meter.wrapped_height(&text, room.width), button, dpi);
+            }
             (
+                page,
                 message,
                 retry,
                 status_last_part(widest, dpi),
@@ -422,6 +466,57 @@ impl Viewer {
             self.in_flight.set(Some(index));
         }
         self.show();
+        if let Some(hwnd) = self.hwnd.get() {
+            self.poll_read(hwnd);
+        }
+    }
+
+    fn poll_read(&self, hwnd: Hwnd) {
+        if self.hwnd.get() != Some(hwnd) {
+            return;
+        }
+        let state = self
+            .reader
+            .borrow()
+            .as_ref()
+            .and_then(|reader| reader.waiting(Instant::now()));
+        let pending = state.is_some();
+        if self.read_timer.replace(pending) != pending {
+            if pending {
+                hwnd.set_timer(READ_TIMER, 250);
+            } else {
+                hwnd.kill_timer(READ_TIMER);
+            }
+        }
+        let slow = state == Some(Waiting::Slow);
+        if self.slow.replace(slow) != slow {
+            self.show_message();
+            self.layout(hwnd);
+        }
+    }
+
+    fn cancel_read(&self, hwnd: Hwnd) -> bool {
+        if !self
+            .reader
+            .borrow_mut()
+            .as_mut()
+            .is_some_and(Reader::cancel)
+        {
+            return false;
+        }
+        self.in_flight.set(None);
+        self.slow.set(false);
+        {
+            let mut shown = self.shown.borrow_mut();
+            if let Some(document) = shown.document_mut() {
+                document.cancel();
+            } else {
+                *shown = Shown::Cancelled;
+            }
+        }
+        self.show_message();
+        self.layout(hwnd);
+        true
     }
 
     /// Shows the page, its scroll bar and the status bar.
@@ -472,14 +567,18 @@ impl Viewer {
     fn read_events(&self, hwnd: Hwnd) {
         let registration = self
             .reader
-            .borrow()
-            .as_ref()
+            .borrow_mut()
+            .as_mut()
             .and_then(Reader::take_registration);
         if let Some(request) = registration {
             super::work::viewers::register(request, hwnd);
         }
+        if self.hwnd.get() != Some(hwnd) {
+            return;
+        }
         let event = self.reader.borrow_mut().as_mut().and_then(Reader::take);
         if let Some(event) = event {
+            let was_slow = self.slow.replace(false);
             match event {
                 ViewerEvent::Opened { len, first } => {
                     let mut document = Document::new(len, first, self.wrap.get());
@@ -493,7 +592,12 @@ impl Viewer {
                     if let Some(document) = self.shown.borrow_mut().document_mut() {
                         document.receive(index, bytes);
                     }
-                    self.pump();
+                    if was_slow {
+                        self.show_message();
+                        self.layout(hwnd);
+                    } else {
+                        self.pump();
+                    }
                 }
                 ViewerEvent::Failed { opened, reason } => {
                     self.remember_place();
@@ -501,6 +605,7 @@ impl Viewer {
                 }
             }
         }
+        self.poll_read(hwnd);
     }
 
     /// Windows asks `removal` of the file's drive (DESIGN.md: The Viewer);
@@ -537,6 +642,15 @@ impl Viewer {
     }
 
     fn on_key(&self, hwnd: Hwnd, key: ViewerKey) {
+        if key == ViewerKey::Cancel {
+            if !self.cancel_read(hwnd) {
+                self.close(hwnd);
+            }
+            return;
+        }
+        if let Some(document) = self.shown.borrow_mut().document_mut() {
+            document.resume();
+        }
         match key {
             ViewerKey::Close => return self.close(hwnd),
             ViewerKey::SwitchMode => {
@@ -559,7 +673,10 @@ impl Viewer {
                         ViewerKey::End => document.end(),
                         ViewerKey::Left => document.scroll_left(),
                         ViewerKey::Right => document.scroll_right(),
-                        ViewerKey::Close | ViewerKey::SwitchMode | ViewerKey::Wrap => {}
+                        ViewerKey::Cancel
+                        | ViewerKey::Close
+                        | ViewerKey::SwitchMode
+                        | ViewerKey::Wrap => {}
                     }
                 }
             }
@@ -595,6 +712,9 @@ impl Viewer {
     }
 
     fn on_command(&self, hwnd: Hwnd, command: ViewerCommand) {
+        if let Some(document) = self.shown.borrow_mut().document_mut() {
+            document.resume();
+        }
         match command {
             ViewerCommand::Close => return self.close(hwnd),
             ViewerCommand::Text => self.set_mode(Mode::Text),
@@ -654,19 +774,24 @@ impl WindowProc for Viewer {
                 self.read_events(hwnd);
                 Some(LRESULT(0))
             }
+            Message::Timer(READ_TIMER) => {
+                self.poll_read(hwnd);
+                Some(LRESULT(0))
+            }
             Message::KeyDown {
                 keystroke, repeat, ..
             } => {
                 let key = viewer_key(keystroke)?;
                 // A held F3 would otherwise close this Viewer and open it
                 // again from the main window, for as long as it is held.
-                if !(repeat && key == ViewerKey::Close) {
+                if !(repeat && matches!(key, ViewerKey::Close | ViewerKey::Cancel)) {
                     self.on_key(hwnd, key);
                 }
                 Some(LRESULT(1))
             }
             Message::MouseWheel { delta, .. } => {
                 if let Some(document) = self.shown.borrow_mut().document_mut() {
+                    document.resume();
                     document.wheel(delta);
                 }
                 self.pump();
@@ -677,6 +802,7 @@ impl WindowProc for Viewer {
                     return None;
                 }
                 if let Some(document) = self.shown.borrow_mut().document_mut() {
+                    document.resume();
                     use crate::core::layout::ScrollRequest as R;
                     match request {
                         R::LineUp => document.line_up(),
@@ -712,8 +838,13 @@ impl WindowProc for Viewer {
                 Some(LRESULT(0))
             }
             Message::Command(Command::Control(event)) => {
-                if self.controls.get()?.retry.clicked(event) {
-                    self.read_file(hwnd);
+                let button = self.controls.get()?.retry;
+                if button.clicked(event) && button.hwnd().is_visible() {
+                    if self.slow.get() {
+                        self.cancel_read(hwnd);
+                    } else {
+                        self.read_file(hwnd);
+                    }
                 }
                 Some(LRESULT(0))
             }
@@ -757,6 +888,8 @@ impl WindowProc for Viewer {
             }
             Message::Destroy => {
                 self.remember_placement(hwnd);
+                self.hwnd.set(None);
+                hwnd.kill_timer(READ_TIMER);
                 if let Some(waker) = self.waker.get() {
                     waker.close();
                 }

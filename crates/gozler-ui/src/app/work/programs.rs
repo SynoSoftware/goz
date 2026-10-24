@@ -4,9 +4,10 @@
 use super::local_service;
 use crate::core::fetch::Programs;
 use crate::core::programs::{Cache, Checked, Files};
-use crate::core::work::{Replacement, Retirement};
+use crate::core::work::{Replacement, Retirement, Waiting};
 use crate::win::wake::OpenWaker;
 use crate::win::work::Task;
+use std::time::Instant;
 
 pub(in crate::app) struct Checks {
     cache: Cache,
@@ -22,11 +23,13 @@ impl Checks {
             cache: Cache::new(),
             inspect: Task::new(waker.clone(), Replacement::Finish, |(), worker, _| {
                 local_service::files(worker)
-            }),
+            })
+            .background(),
             checking: Task::new(waker, Replacement::Cancel, |files, worker, cancel| {
                 let checked = local_service::check_files(&files, worker, cancel);
                 (files, checked)
-            }),
+            })
+            .background(),
             files: None,
             programs: Programs::UNKNOWN,
         }
@@ -60,6 +63,17 @@ impl Checks {
         self.inspect
             .take_retired()
             .combine(self.checking.take_retired())
+    }
+
+    pub(super) fn tick(&mut self, now: Instant) -> bool {
+        let inspecting = self.inspect.tick(now);
+        let checking = self.checking.tick(now);
+        if checking == Some(Waiting::Expired) {
+            self.cache.abandon();
+        }
+        [inspecting, checking]
+            .into_iter()
+            .any(|waiting| waiting.is_some_and(|waiting| waiting != Waiting::Expired))
     }
 
     pub(super) fn close(&mut self) -> Retirement {

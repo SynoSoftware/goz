@@ -88,13 +88,22 @@ impl<I: Send + 'static, O: Send + 'static> Task<I, O> {
     }
 
     pub(crate) fn tick(&mut self, now: Instant) -> Option<Waiting> {
-        let since = self.since?;
-        let waiting = self.interest.after(now.saturating_duration_since(since));
+        let waiting = self.waiting(now)?;
         if waiting == Waiting::Expired {
             self.cancel();
-            None
-        } else {
-            Some(waiting)
+        }
+        Some(waiting)
+    }
+
+    pub(crate) fn waiting(&self, now: Instant) -> Option<Waiting> {
+        self.since
+            .map(|since| self.interest.after(now.saturating_duration_since(since)))
+    }
+
+    /// Call only for progress from the current input, after checking its identity.
+    pub(crate) fn progress(&mut self, now: Instant) {
+        if let Some(since) = &mut self.since {
+            *since = now;
         }
     }
 
@@ -319,6 +328,31 @@ mod tests {
     use std::time::Duration;
     use windows::Win32::Foundation::{HWND, WAIT_OBJECT_0};
     use windows::Win32::System::Threading::WaitForSingleObject;
+
+    #[test]
+    fn progress_delays_expiry_without_releasing_an_unfinished_slot() {
+        let waker = OpenWaker::new(crate::win::Hwnd(HWND::default()));
+        waker.close();
+        let mut task = Task::pass(waker, Replacement::Cancel, |()| 0, |(), _| ()).background();
+        let id = task.replace(());
+        let start = Instant::now();
+        task.since = Some(start);
+        task.progress(start + Duration::from_secs(9));
+        assert_eq!(
+            task.tick(start + Duration::from_secs(10)),
+            Some(Waiting::Working)
+        );
+        assert_eq!(
+            task.tick(start + Duration::from_secs(19)),
+            Some(Waiting::Expired)
+        );
+        assert!(task.is_running());
+        assert!(!task.is_current(id));
+        task.progress(start + Duration::from_secs(20));
+        assert_eq!(task.tick(start + Duration::from_secs(20)), None);
+        assert!(task.take().is_none());
+        assert!(!task.is_running());
+    }
 
     #[test]
     fn closing_delivery_releases_a_queued_answer_off_the_window_thread() {

@@ -65,7 +65,7 @@ use crate::core::selection::{DRAG_LIMIT, RowSelection, SELECTION_LIMIT, Selectio
 use crate::core::settings::{Choices, Mode, ResultEnter, SettingsValues};
 use crate::core::shortcuts::{CommandShortcuts, ShowShortcut};
 use crate::core::text::{LanguageChoice, Numbers, Strings, without_access_key};
-use crate::core::work::{Id, Retirement};
+use crate::core::work::{Id, Retirement, Waiting};
 use crate::win::clipboard;
 use crate::win::controls::{
     Button, CheckBox, Divider, DropDownList, Edit, FileIconLabel, IconList, Label, ListClosing,
@@ -1651,6 +1651,22 @@ impl MainWindow {
                 transfer_only: true,
                 ..JobCaption::default()
             };
+        } else {
+            let now = Instant::now();
+            let model = self.model.borrow();
+            match model.job() {
+                Job::Fix if self.fix_waiting(now) == Some(Waiting::Slow) => {
+                    job.text = crate::core::work::waiting(model.strings(), None);
+                }
+                Job::Export
+                    if self.request_waiting(Purpose::Export, now) == Some(Waiting::Slow) =>
+                {
+                    if let crate::core::model::Export::Running { path, .. } = model.export() {
+                        job.text = crate::core::work::waiting(model.strings(), path.to_str());
+                    }
+                }
+                _ => {}
+            }
         }
         let cancel = self
             .model
@@ -1705,12 +1721,45 @@ impl MainWindow {
 
     pub(super) fn settings_job(&self, strings: &Strings) -> JobCaption {
         let follows = self.settings.get().is_some_and(|open| open.follow_fix);
-        captions::settings_job(
+        let mut job = captions::settings_job(
             &self.model.borrow(),
             strings,
             &*self.numbers.borrow(),
             follows,
-        )
+        );
+        if follows && self.fix_waiting(Instant::now()) == Some(Waiting::Slow) {
+            job.text = crate::core::work::waiting(strings, None);
+        }
+        job
+    }
+
+    pub(super) fn request_waiting(&self, purpose: Purpose, now: Instant) -> Option<Waiting> {
+        self.created().work.borrow().requests.waiting(purpose, now)
+    }
+
+    pub(super) fn sign_in_waiting(&self, id: Id, now: Instant) -> Option<Waiting> {
+        self.created().work.borrow().sign_in_waiting(id, now)
+    }
+
+    pub(super) fn elevated_waiting(&self, now: Instant) -> Option<Waiting> {
+        self.created().work.borrow().elevated.waiting(now)
+    }
+
+    pub(super) fn fix_waiting(&self, now: Instant) -> Option<Waiting> {
+        self.created().work.borrow().fixes.waiting(now)
+    }
+
+    pub(super) fn cancel_settings_request(&self, hwnd: Hwnd, purpose: Purpose) {
+        let accepted = match purpose {
+            Purpose::Program => {
+                self.total_commander.take();
+                self.model.borrow_mut().forget_total_commander()
+            }
+            Purpose::IncludeCount => self.model.borrow_mut().forget_included_count(),
+            _ => return,
+        };
+        self.apply(hwnd, accepted);
+        self.post_settings_reply();
     }
 
     pub(super) fn cancel_settings_fix(&self, hwnd: Hwnd) {
@@ -1847,8 +1896,61 @@ impl MainWindow {
     }
 
     fn update_message(&self) {
-        let message = captions::list_message(&self.model.borrow());
+        let slow = self.slow_request(List::Search);
+        let message = if slow.is_some() && self.model.borrow().mode() == Mode::Search {
+            let model = self.model.borrow();
+            let text =
+                crate::core::work::waiting(model.strings(), model.filters().location.as_deref());
+            Some(ListCaption {
+                text,
+                buttons: vec![captions::MessageButton {
+                    label: model.strings().text("button.cancel").to_owned(),
+                    icon: ButtonIcon::of("button.cancel", false),
+                    enabled: true,
+                    tooltip: None,
+                }],
+            })
+        } else {
+            captions::list_message(&self.model.borrow())
+        };
         self.show_message(message.as_ref());
+    }
+
+    pub(super) fn slow_request(&self, list: List) -> Option<Purpose> {
+        let now = Instant::now();
+        let work = self.created().work.borrow();
+        [Purpose::Selection(list), Purpose::Results(list)]
+            .into_iter()
+            .find(|purpose| work.requests.waiting(*purpose, now) == Some(Waiting::Slow))
+    }
+
+    pub(super) fn cancel_list_read(&self, hwnd: Hwnd, purpose: Purpose) {
+        let list = match purpose {
+            Purpose::Selection(list) | Purpose::Results(list) => list,
+            _ => return,
+        };
+        if self.slow_request(list) != Some(purpose) {
+            return;
+        }
+        let accepted = match purpose {
+            Purpose::Selection(_) => {
+                let empty: RowSelection = Vec::new().into();
+                self.forget_selection_action(list);
+                self.model.borrow_mut().set_selection(list, empty)
+            }
+            Purpose::Results(_) => self.model.borrow_mut().cancel_results(list),
+            _ => return,
+        };
+        self.apply(hwnd, accepted);
+        if matches!(purpose, Purpose::Selection(_)) {
+            self.list_control(list).select_only(None);
+            self.seed_native_selection(list, Vec::new().into());
+        }
+        self.update_message();
+        if let List::Panel(side) = list {
+            self.show_panel_message(side);
+        }
+        self.poll_work(hwnd);
     }
 
     /// Shows the list's message and its buttons, or hides them.
@@ -3665,7 +3767,19 @@ impl MainWindow {
         if self.shutdown.borrow().is_some() {
             return;
         }
-        if self.created().work.borrow_mut().tick(Instant::now()) {
+        let (active, expired) = self.created().work.borrow_mut().tick(Instant::now());
+        for (purpose, generation) in expired {
+            let accepted = self.model.borrow_mut().expire_request(purpose, generation);
+            self.apply(hwnd, accepted);
+        }
+        self.update_message();
+        self.update_status();
+        if self.model.borrow().mode() == Mode::TwoPanels {
+            for side in Side::BOTH {
+                self.show_panel_message(side);
+            }
+        }
+        if active {
             hwnd.set_timer(timer::WORK, 250);
         } else {
             hwnd.kill_timer(timer::WORK);
@@ -3758,6 +3872,12 @@ impl MainWindow {
             .iter()
             .position(|button| button.clicked(event))
         {
+            if index == 0
+                && let Some(purpose) = self.slow_request(List::Search)
+            {
+                self.cancel_list_read(hwnd, purpose);
+                return;
+            }
             let button = self.model.borrow().list_buttons().get(index).cloned();
             match button {
                 Some(ListButton::Fix(fix)) => self.run_fix(hwnd, fix),
@@ -3809,8 +3929,7 @@ impl MainWindow {
             .find(|side| self.panel(*side).retry.clicked(event))
         {
             self.activate_panel(side, true);
-            let ask = self.model.borrow_mut().panels_mut().read_again(side);
-            return self.read(side, ask);
+            return self.panel_message_clicked(hwnd, side);
         } else if let Some(side) = Side::BOTH
             .into_iter()
             .find(|side| self.panel(*side).drive.clicked(event))
@@ -4243,6 +4362,31 @@ impl MainWindow {
     /// A key that the control `target` gives a meaning (DESIGN.md:
     /// window rule 8). Returns whether the window took it.
     fn on_key(&self, hwnd: Hwnd, target: Hwnd, mut keystroke: Keystroke) -> bool {
+        if keystroke == Keystroke::plain(commands::Key::Escape) {
+            let list = if target == self.created().controls.list.hwnd() {
+                Some(List::Search)
+            } else {
+                self.panel_list(target).map(List::Panel)
+            };
+            if let Some(list) = list {
+                if let List::Panel(side) = list
+                    && self
+                        .created()
+                        .work
+                        .borrow()
+                        .folders
+                        .waiting(side, Instant::now())
+                        == Some(Waiting::Slow)
+                {
+                    self.panel_message_clicked(hwnd, side);
+                    return true;
+                }
+                if let Some(purpose) = self.slow_request(list) {
+                    self.cancel_list_read(hwnd, purpose);
+                    return true;
+                }
+            }
+        }
         if self
             .file_operations
             .get()
@@ -6354,8 +6498,13 @@ impl WindowProc for MainWindow {
             }
             Message::ContextMenu { .. } => None,
             Message::KeyDown {
-                target, keystroke, ..
-            } => Some(LRESULT(isize::from(self.on_key(hwnd, target, keystroke)))),
+                target,
+                keystroke,
+                repeat,
+            } => Some(LRESULT(isize::from(
+                (repeat && keystroke == Keystroke::plain(commands::Key::Escape))
+                    || self.on_key(hwnd, target, keystroke),
+            ))),
             Message::Char {
                 target,
                 character,

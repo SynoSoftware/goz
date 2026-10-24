@@ -2620,28 +2620,18 @@ pub(crate) struct PanelCaptions {
     /// A search panel's focused result's full folder, at the status line's
     /// right end in place of the free space while it searches all drives.
     pub(crate) folder: String,
-    /// What the list area says instead of rows, and whether Retry shows
-    /// under it.
-    pub(crate) message: Option<String>,
-    pub(crate) retry: bool,
 }
 
 impl PanelCaptions {
     pub(crate) fn new(model: &Model, side: Side, numbers: &dyn Numbers) -> PanelCaptions {
         let strings = model.strings();
         let panel = model.panels().panel(side);
-        let (message, retry) = match panel.view() {
-            View::Reading => (Some(strings.text("panel.reading").to_owned()), false),
-            View::Folder => (None, false),
-            View::NotReady { drive } => (Some(strings.format("panel.not_ready", &[drive])), true),
-            View::Search(_) => (panel_list_message(model, side), false),
-        };
         let quick = panel.quick_text();
         let counts = match (quick, panel.view()) {
             (Some(typed), _) => strings.format("panel.find", &[typed]),
             (None, View::Folder) => panel_counts(strings, numbers, panel.counts()),
             (None, View::Search(search)) => search_counts(strings, numbers, panel, search),
-            (None, View::Reading | View::NotReady { .. }) => String::new(),
+            (None, View::Reading | View::Cancelled | View::NotReady { .. }) => String::new(),
         };
         let all_drives = panel
             .search()
@@ -2670,9 +2660,18 @@ impl PanelCaptions {
             quick: quick.is_some(),
             free,
             folder,
-            message,
-            retry,
         }
+    }
+}
+
+pub(crate) fn panel_message(model: &Model, side: Side) -> (Option<String>, bool) {
+    let strings = model.strings();
+    match model.panels().panel(side).view() {
+        View::Reading => (Some(strings.text("panel.reading").to_owned()), false),
+        View::Cancelled => (Some(strings.text("work.cancelled").to_owned()), true),
+        View::Folder => (None, false),
+        View::NotReady { drive } => (Some(strings.format("panel.not_ready", &[drive])), true),
+        View::Search(_) => (panel_list_message(model, side), false),
     }
 }
 

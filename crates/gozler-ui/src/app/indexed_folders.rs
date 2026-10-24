@@ -9,10 +9,10 @@ use crate::core::captions::DialogItem;
 use crate::core::ids::ControlId;
 use crate::core::include::{IncludeDrive, SummaryRow};
 use crate::core::text::Strings;
-use crate::core::work::{INLINE_ITEMS, Retirement};
+use crate::core::work::{self, INLINE_ITEMS, Retirement, Waiting};
 use crate::win::Hwnd;
 use crate::win::controls::{FolderTree, ReportList, TreeItem};
-use crate::win::dialog::{DialogMessage, DialogProc, Opened, TreeChange};
+use crate::win::dialog::{self, DialogMessage, DialogProc, Opened, TreeChange};
 use gozler_core::include::IndexSettings;
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, VecDeque};
@@ -280,6 +280,23 @@ impl<'a> IndexedFolders<'a> {
         } else {
             dialog.set_timer(WORK_TIMER, WORK_POLL_MS);
         }
+        self.show_waiting(dialog);
+    }
+
+    fn show_waiting(&self, dialog: Hwnd) {
+        let waiting = self
+            .session
+            .get()
+            .and_then(|session| self.main.indexed().waiting(session, Instant::now()));
+        let text = match waiting {
+            Some((Waiting::Slow, path)) => work::waiting(self.strings, Some(&path)),
+            _ => self.strings.text("indexed_folders.hint").to_owned(),
+        };
+        if let Some(hint) = dialog::item(dialog, ControlId::FoldersHint.id())
+            && hint.text() != text
+        {
+            hint.set_text(&text);
+        }
     }
 
     /// Does the newest job until `end`, then the one before it, and opens
@@ -464,6 +481,13 @@ impl Drop for IndexedFolders<'_> {
 }
 
 impl DialogProc for IndexedFolders<'_> {
+    fn closed(&self, dialog: Hwnd) {
+        dialog.kill_timer(WORK_TIMER);
+        if let Some(session) = self.session.take() {
+            self.main.indexed().end(session);
+        }
+    }
+
     fn init(&self, dialog: Hwnd) -> Opened {
         self.session.set(Some(self.main.indexed().begin()));
         if let Some(tree) = Self::tree(dialog) {

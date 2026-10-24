@@ -1,4 +1,9 @@
 {
+  "work": {
+    "cancelled": "İptal edildi",
+    "waiting": "Bekleniyor…",
+    "waiting_for": "{0} bekleniyor…"
+  },
   "window": {
     "title": "Gozler",
     "title_search": "{0} – Gozler"

@@ -14,6 +14,7 @@ use std::sync::{Arc, Condvar, Mutex, PoisonError};
 pub(crate) enum Command {
     Open(Vec<u16>),
     Read(u64),
+    Cancel,
     Release { keep_registration: bool },
 }
 
@@ -144,6 +145,7 @@ pub(crate) struct Session {
 
 struct Reading {
     file: Option<Entry>,
+    failed: Option<(bool, String)>,
     len: u64,
     mailbox: Arc<Mailbox>,
 }
@@ -151,6 +153,7 @@ struct Reading {
 impl Reading {
     fn clear(&mut self) {
         drop(self.file.take());
+        self.failed = None;
         let notification = self.mailbox.notification.swap(0, Ordering::AcqRel);
         unregister((notification != 0).then_some(notification));
     }
@@ -216,6 +219,7 @@ impl Drop for Reading {
 pub(crate) fn run(session: Session, _worker: &OffThread, cancel: &CancelToken) {
     let mut reading = Reading {
         file: None,
+        failed: None,
         len: 0,
         mailbox: Arc::clone(&session.mailbox),
     };
@@ -234,7 +238,16 @@ pub(crate) fn run(session: Session, _worker: &OffThread, cancel: &CancelToken) {
                     .register(generation, file.handle_value(), &session.waker);
             }),
             Command::Read(index) if reading.file.is_some() => reading.read(index).map(Some),
-            Command::Read(_) => continue,
+            Command::Read(_) => {
+                Ok(reading
+                    .failed
+                    .as_ref()
+                    .map(|(opened, reason)| ViewerEvent::Failed {
+                        opened: *opened,
+                        reason: reason.clone(),
+                    }))
+            }
+            Command::Cancel => continue,
             Command::Release { keep_registration } => {
                 // Retain the registration until Windows reports removal failure.
                 drop(reading.file.take());
@@ -249,13 +262,13 @@ pub(crate) fn run(session: Session, _worker: &OffThread, cancel: &CancelToken) {
         }
         let event = result.unwrap_or_else(|error| {
             let opened = reading.file.is_some();
+            let reason = reason(&error);
             // A removal query can race the preceding generation check.
             // Keep its notification until replacement, completion or close.
             drop(reading.file.take());
-            Some(ViewerEvent::Failed {
-                opened,
-                reason: reason(&error),
-            })
+            // Cancel can discard this answer while the document stays visible.
+            reading.failed = Some((opened, reason.clone()));
+            Some(ViewerEvent::Failed { opened, reason })
         });
         if let Some(event) = event {
             session.mailbox.deliver(generation, event, &session.waker);
@@ -280,6 +293,7 @@ mod tests {
         crate::win::work::spawn(move |_| {
             let mut reading = Reading {
                 file: None,
+                failed: None,
                 len: 0,
                 mailbox: Arc::default(),
             };

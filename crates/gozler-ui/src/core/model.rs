@@ -1380,6 +1380,33 @@ impl Model {
         })
     }
 
+    pub(crate) fn expire_request(&mut self, purpose: Purpose, generation: Generation) -> Accepted {
+        let change = match purpose {
+            Purpose::Status if self.status_asked == Some(generation) => {
+                self.status_asked = None;
+                Change::Nothing
+            }
+            Purpose::FolderSizes(side) if self.panels.expire_sizes(side, generation) => {
+                Change::FolderSizes(side)
+            }
+            _ => Change::Nothing,
+        };
+        Accepted::only(change)
+    }
+
+    pub(crate) fn cancel_results(&mut self, list: List) -> Accepted {
+        if list == List::Search {
+            self.enter_on_answer = false;
+        }
+        if let Some(shown) = self.list_mut(list) {
+            shown.results.cancel();
+        }
+        Accepted {
+            change: Change::Searching(list),
+            then: Some(Then::Cancel(Purpose::Results(list))),
+        }
+    }
+
     /// The positions `list` says are selected, sorted and apart, read once
     /// per user action. When the cache holds every one, the selection is
     /// those rows, the files the person sees; otherwise it is read
@@ -2715,6 +2742,38 @@ pub(crate) mod tests {
 
     pub(crate) fn model() -> Model {
         Model::new(english(), Settings::default())
+    }
+
+    #[test]
+    fn an_expired_status_can_retry_without_abandoning_a_newer_request() {
+        let mut model = model();
+        let first = model.status_needed().unwrap();
+        assert!(model.status_needed().is_none());
+        model.expire_request(Purpose::Status, first.generation);
+        let second = model
+            .status_needed()
+            .expect("expiry permits the next natural poll");
+        model.expire_request(Purpose::Status, first.generation);
+        assert!(model.status_needed().is_none());
+        model.accept(status(&first, VolumePhase::Live));
+        assert!(model.status_needed().is_none());
+        model.accept(status(&second, VolumePhase::Live));
+        assert!(model.status_needed().is_some());
+    }
+
+    #[test]
+    fn cancelling_a_search_rejects_its_late_answer_and_keeps_the_export() {
+        let mut model = showing(10);
+        let _export = export(&mut model);
+        let read = search(&mut model, "pending");
+        let accepted = model.cancel_results(List::Search);
+        assert_eq!(
+            accepted.then,
+            Some(Then::Cancel(Purpose::Results(List::Search)))
+        );
+        assert_eq!(model.accept(rows(&read, 3)).change, Change::Nothing);
+        assert_eq!(model.search_list().results().total(), 10);
+        assert!(model.exporting());
     }
 
     #[test]

@@ -1,4 +1,9 @@
 {
+  "work": {
+    "cancelled": "Cancelled",
+    "waiting": "Waiting…",
+    "waiting_for": "Waiting for {0}…"
+  },
   "window": {
     "title": "Gozler",
     "title_search": "{0} – Gozler"

@@ -2,7 +2,7 @@
 
 use crate::core::fixer::{CommandEvent, CommandResult, FixEvent, FixWork, SetupEvent, SetupResult};
 use crate::core::update::{self, Setup};
-use crate::core::work::{INLINE_ITEMS, Replacement, Retirement};
+use crate::core::work::{INLINE_ITEMS, Replacement, Retirement, Waiting};
 use crate::win;
 use crate::win::wake::OpenWaker;
 use crate::win::work::{OffThread, Task};
@@ -103,6 +103,11 @@ impl Fixes {
                     .collect::<Vec<_>>()
             })
             .unwrap_or_default();
+        if !events.is_empty()
+            && let Some(task) = &mut self.task
+        {
+            task.progress(Instant::now());
+        }
         if let Some(task) = &mut self.task
             && task.take().is_some()
             && let Some(remaining) = self.events.take()
@@ -115,6 +120,11 @@ impl Fixes {
             );
         }
         events
+    }
+
+    pub(in crate::app) fn waiting(&self, now: Instant) -> Option<Waiting> {
+        self.events.as_ref()?;
+        self.task.as_ref()?.waiting(now)
     }
 
     pub(super) fn tick(&mut self, now: Instant) -> bool {

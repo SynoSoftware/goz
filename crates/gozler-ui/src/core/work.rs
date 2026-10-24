@@ -12,6 +12,13 @@ pub(crate) const INLINE_ITEMS: usize = 1_000;
 pub(crate) const SLOW: Duration = Duration::from_secs(3);
 const BACKGROUND_LIMIT: Duration = Duration::from_secs(10);
 
+pub(crate) fn waiting(strings: &super::text::Strings, path: Option<&str>) -> String {
+    match path.filter(|path| !path.is_empty()) {
+        Some(path) => strings.format("work.waiting_for", &[path]),
+        None => strings.text("work.waiting").to_owned(),
+    }
+}
+
 #[derive(Clone, Copy)]
 pub(crate) enum Interest {
     Awaited,

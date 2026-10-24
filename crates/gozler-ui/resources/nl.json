@@ -1,4 +1,9 @@
 {
+  "work": {
+    "cancelled": "Geannuleerd",
+    "waiting": "Wachten…",
+    "waiting_for": "Wachten op {0}…"
+  },
   "window": {
     "title": "Gozler",
     "title_search": "{0} – Gozler"

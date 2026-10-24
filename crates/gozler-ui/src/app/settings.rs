@@ -16,6 +16,7 @@ use crate::core::captions::{
 };
 use crate::core::commands::{CommandId, Key, Keystroke};
 use crate::core::dates::DateFormat;
+use crate::core::fetch::Purpose;
 use crate::core::glyph::Glyph;
 use crate::core::ids::{ControlId, DialogId};
 use crate::core::include::SummaryRow;
@@ -31,7 +32,7 @@ use crate::core::shortcuts::{
 };
 use crate::core::speed::{self, ENGINES, Speed, SpeedNumber, SpeedPreset, ring_blocks};
 use crate::core::text::{LANGUAGES, LanguageChoice, SizeFormat, Strings, without_access_key};
-use crate::core::work::Id;
+use crate::core::work::{self, Id, Interest, Waiting};
 use crate::win::controls::{
     Balloon, Button, CheckBox, DropDownList, Edit, GlyphLabel, HotkeyControl, HotkeyValue,
     IconList, ListBox, ReportList, Tooltip, show_heading_icon,
@@ -43,6 +44,7 @@ use crate::win::{self, Hwnd};
 use gozler_core::include::IndexSettings;
 use gozler_fileops::{DeleteWorkers, Engine, RingBlock, SpeedSettings};
 use std::cell::{Cell, OnceCell, RefCell};
+use std::time::Instant;
 
 /// The Index page's timer, which shows the service's latest state.
 const INDEX_TIMER: usize = 1;
@@ -51,6 +53,8 @@ const INDEX_REFRESH_MS: u32 = 2_000;
 /// person stops changing the settings for a moment.
 const PREVIEW_TIMER: usize = 2;
 const PREVIEW_DELAY_MS: u32 = 300;
+const WAIT_TIMER: usize = 3;
+const WAIT_POLL_MS: u32 = 250;
 
 /// What the dialog does once its accepted changes are saved.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -81,6 +85,7 @@ struct Applying {
     edited: SettingsValues,
     last: SettingsValues,
     after: AfterSave,
+    accepted: Instant,
 }
 
 /// The page's heading, which shows its name in semibold.
@@ -888,6 +893,7 @@ impl<'a> SettingsDialog<'a> {
             edited,
             last,
             after,
+            ..
         } = *applying;
         match answer {
             Ok(()) => {
@@ -1152,25 +1158,61 @@ impl<'a> SettingsDialog<'a> {
         let Some(status) = self.status.get() else {
             return;
         };
-        let job = {
+        let now = Instant::now();
+        let request = self.request_waiting(now);
+        let fixing = self.main.fix_waiting(now);
+        let (job, observed) = {
             let saving = self.saving.borrow();
             match saving.as_ref() {
                 Some(awaited) => {
+                    let waiting = match awaited {
+                        Awaited::Shortcut(applying) => Some(
+                            Interest::Awaited
+                                .after(now.saturating_duration_since(applying.accepted)),
+                        ),
+                        Awaited::SignIn { id, .. } => self.main.sign_in_waiting(*id, now),
+                        Awaited::Include(..) | Awaited::Rebuild => self.main.elevated_waiting(now),
+                    };
                     let key = match awaited {
                         Awaited::Shortcut(..) | Awaited::SignIn { .. } | Awaited::Include(..) => {
                             "settings.saving"
                         }
                         Awaited::Rebuild => "settings.rebuilding",
                     };
-                    JobCaption {
-                        text: self.strings.text(key).to_owned(),
-                        progress: JobProgress::Unmeasured,
-                        ..JobCaption::default()
-                    }
+                    (
+                        JobCaption {
+                            text: if waiting == Some(Waiting::Slow) {
+                                work::waiting(&self.strings, None)
+                            } else {
+                                self.strings.text(key).to_owned()
+                            },
+                            progress: JobProgress::Unmeasured,
+                            ..JobCaption::default()
+                        },
+                        true,
+                    )
                 }
-                None => self.main.settings_job(&self.strings),
+                None => {
+                    let mut job = self.main.settings_job(&self.strings);
+                    if fixing.is_none()
+                        && request.is_some_and(|(_, waiting)| waiting == Waiting::Slow)
+                    {
+                        job = JobCaption {
+                            text: work::waiting(&self.strings, None),
+                            progress: JobProgress::Unmeasured,
+                            cancel: true,
+                            ..JobCaption::default()
+                        };
+                    }
+                    (job, fixing.is_some() || request.is_some())
+                }
             }
         };
+        if observed {
+            dialog.set_timer(WAIT_TIMER, WAIT_POLL_MS);
+        } else {
+            dialog.kill_timer(WAIT_TIMER);
+        }
         let changed = self.draft.borrow().can_apply() && self.saving.borrow().is_none();
         if status.render(
             &[
@@ -1185,6 +1227,32 @@ impl<'a> SettingsDialog<'a> {
         {
             pages.focus();
         }
+    }
+
+    fn request_waiting(&self, now: Instant) -> Option<(Purpose, Waiting)> {
+        let purpose = match self.shown.get()? {
+            SettingsPage::ContextMenu => Purpose::Program,
+            SettingsPage::Include => Purpose::IncludeCount,
+            _ => return None,
+        };
+        self.main
+            .request_waiting(purpose, now)
+            .map(|waiting| (purpose, waiting))
+    }
+
+    fn cancel_status(&self, dialog: Hwnd) {
+        if self.saving.borrow().is_some() {
+            return;
+        }
+        let now = Instant::now();
+        if self.main.fix_waiting(now).is_some() {
+            if self.main.settings_job(&self.strings).cancel {
+                self.main.cancel_settings_fix(self.window);
+            }
+        } else if let Some((purpose, Waiting::Slow)) = self.request_waiting(now) {
+            self.main.cancel_settings_request(self.window, purpose);
+        }
+        self.show_status(dialog);
     }
 
     /// Makes `page`, unless it was made: its controls, their lists and
@@ -1759,6 +1827,7 @@ impl<'a> SettingsDialog<'a> {
                             edited,
                             last,
                             after,
+                            accepted: Instant::now(),
                         }))));
                     self.update_apply(dialog);
                     return false;
@@ -2167,6 +2236,7 @@ impl<'a> SettingsDialog<'a> {
 
 impl DialogProc for SettingsDialog<'_> {
     fn closed(&self, dialog: Hwnd) {
+        dialog.kill_timer(WAIT_TIMER);
         self.capture.take();
         self.saving.take();
         self.main.settings_closed(dialog);
@@ -2262,7 +2332,7 @@ impl DialogProc for SettingsDialog<'_> {
                 return true;
             }
             DialogMessage::Command { id } if is(id, ControlId::StatusCancel) => {
-                self.main.cancel_settings_fix(self.window);
+                self.cancel_status(dialog);
                 return true;
             }
             DialogMessage::Command { id } if is(id, ControlId::IndexUseLocal) => {
@@ -2331,6 +2401,11 @@ impl DialogProc for SettingsDialog<'_> {
             }
             DialogMessage::Timer { id: PREVIEW_TIMER } => {
                 self.count_preview(dialog);
+                self.show_status(dialog);
+                return true;
+            }
+            DialogMessage::Timer { id: WAIT_TIMER } => {
+                self.show_status(dialog);
                 return true;
             }
             DialogMessage::Reply => {

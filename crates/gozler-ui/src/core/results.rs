@@ -527,6 +527,10 @@ impl Results {
         matches!(&self.in_flight, Some(InFlight::Search(g, ..) | InFlight::Chunk(g, _)) if *g == generation)
     }
 
+    pub(crate) fn cancel(&mut self) {
+        self.in_flight = None;
+    }
+
     /// The ask for the first chunk that the rows `visible` need and the
     /// cache lacks, which `generation` then asks for, and marks the cached
     /// chunks they show as used. One chunk is in flight at a time, so fast
