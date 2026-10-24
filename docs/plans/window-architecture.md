@@ -73,15 +73,16 @@ that is not an impossibility proof or permission to relax the criterion.
 If the owner changes the proof, record the actual ruling before changing
 this plan. Installation remains a separate decision.
 
-One concrete next evaluation is prepared, unapplied, at
-`V:/temp/gozler-window-native-buffering-proposal.md`: enable native descendant
-buffering on the disposable HWND only, then run the existing finite proof
-once. This needs owner authorization because the plan explicitly prohibits
-`WS_EX_COMPOSITED`. It is not an established correction, an assertion that
-other native solutions are impossible, or permission to ship that style.
-The proposal's native review requires FRAMECHANGED and successful placement
-after the test style change; it has not been applied, compiled or run. Further
-work on this option awaits the owner's explicit exception, not elapsed time.
+**The owner-authorized native buffering comparison is complete and rejected.**
+The owner permitted the test and retaining the option if effective, and asked
+for CPU cycles. The matched current-source release cases passed their real
+8 MiB copy checks, but whole-window `WS_EX_COMPOSITED` increased measured UI
+cycles about 5× overall; Two panels resize rose from 18.95 ms to 211.25 ms and
+buffered frame 7 still contains the toolbar defect. Both temporary hooks are
+removed; all 310 source/build hashes match Full53 again. No production change,
+permanent test or new full build was added. The old permission request is
+settled; do not ask it again or repeat this experiment. Detail, counter limits
+and saved evidence: `docs/research/native-window-buffering.md`.
 
 #### Verified retained baseline
 
@@ -157,6 +158,7 @@ media/constraint reports remain under `V:/temp/gozler-window-paint-cause/`:
 | native-integrated1 | NOREDRAW restoration, pending flush, main NOCOPYBITS hook and toolbar-buffer candidate rejected; `native-integrated1-media-audit.md` |
 | valid-region1 | Main NCCALCSIZE preserved-region candidate rejected; `valid-region1-media-audit.md` |
 | transitions1 | Fixture-only DWM transition diagnostic negative; no production DWM policy retained; `transitions1-media-audit.md` |
+| composited | Owner-authorized matched release comparison rejected on CPU/latency and an interior toolbar counterexample; `docs/research/native-window-buffering.md` |
 
 Functional real-copy checks passed in these bounded investigations, but the
 visual criterion did not. Native API guarantees do not promise an atomic
