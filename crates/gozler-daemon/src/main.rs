@@ -77,32 +77,16 @@ enum Command {
     Protocol,
 }
 
-/// Configure mimalloc for a long-lived cache-like process: purge freed
-/// memory back to the OS immediately instead of after a delayed tick.
-///
-/// mimalloc's default purge runs `purge_delay` ms after a free, but only on
-/// later allocator activity; an idle daemon never ticks, so the freed
-/// bootstrap transients (sparse FRN maps, enumeration buffers) would stay
-/// committed for the daemon's lifetime.
-///
-/// The option indexes are the bundled mimalloc v2 enum, which the sys crate
-/// does not export. Each is verified by reading back its documented default
-/// before writing: if the layout ever shifts, the mismatch skips the write
-/// instead of flipping an arbitrary option.
+/// Purge freed memory immediately, because delayed purging needs later
+/// allocator activity that an idle daemon may never supply. Explicit
+/// allocator settings keep their values.
 #[cfg(windows)]
 fn tune_allocator() {
-    /// v2 `mi_option_abandoned_page_purge` (default 0).
-    const ABANDONED_PAGE_PURGE: i32 = 12;
-    /// v2 `mi_option_purge_delay` in ms (default 10).
+    // Bundled mimalloc's mi_option_purge_delay; the sys crate omits its constant.
     const PURGE_DELAY: i32 = 15;
-    // SAFETY: mi_option_get/set take no pointers and are safe at any time.
+    // SAFETY: the option is valid and startup precedes the daemon's worker threads.
     unsafe {
-        if libmimalloc_sys::mi_option_get(PURGE_DELAY) == 10 {
-            libmimalloc_sys::mi_option_set(PURGE_DELAY, 0);
-        }
-        if libmimalloc_sys::mi_option_get(ABANDONED_PAGE_PURGE) == 0 {
-            libmimalloc_sys::mi_option_set(ABANDONED_PAGE_PURGE, 1);
-        }
+        libmimalloc_sys::mi_option_set_default(PURGE_DELAY, 0);
     }
 }
 
@@ -238,4 +222,42 @@ fn run_demo_query(scans: &[bootstrap::BootstrappedVolume], query: &str) -> anyho
         }
     }
     Ok(())
+}
+
+#[cfg(all(test, windows))]
+mod tests {
+    #[test]
+    fn allocator_purges_by_default_and_preserves_an_explicit_delay() {
+        const EXPECTED: &str = "GOZLER_TEST_PURGE_DELAY";
+        if let Ok(expected) = std::env::var(EXPECTED) {
+            super::tune_allocator();
+            // SAFETY: mi_option_purge_delay is a valid option and reading it takes no pointers.
+            let actual = unsafe { libmimalloc_sys::mi_option_get(15) };
+            assert_eq!(actual, expected.parse::<i32>().unwrap());
+            return;
+        }
+
+        // Allocator options are process-global and read the environment at startup.
+        for (delay, expected) in [(None, "0"), (Some("1000"), "1000")] {
+            let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+            command.args([
+                "--exact",
+                "tests::allocator_purges_by_default_and_preserves_an_explicit_delay",
+                "--nocapture",
+            ]);
+            command.env(EXPECTED, expected);
+            command.env_remove("MIMALLOC_PURGE_DELAY");
+            command.env_remove("MIMALLOC_RESET_DELAY");
+            if let Some(delay) = delay {
+                command.env("MIMALLOC_PURGE_DELAY", delay);
+            }
+            let output = command.output().unwrap();
+            assert!(
+                output.status.success(),
+                "delay {delay:?}: {}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr),
+            );
+        }
+    }
 }
