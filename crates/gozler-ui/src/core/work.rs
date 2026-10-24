@@ -4,6 +4,9 @@
 use std::collections::LinkedList;
 use std::time::Duration;
 
+#[cfg(test)]
+mod scan;
+
 pub(crate) const SESSION_FINALIZATION: Duration = Duration::from_secs(2);
 pub(crate) const INLINE_ITEMS: usize = 1_000;
 pub(crate) const SLOW: Duration = Duration::from_secs(3);

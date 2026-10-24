@@ -5,13 +5,10 @@
 
 mod dialogs;
 mod file_operations;
-mod fix_thread;
 mod icons;
 mod include;
 mod indexed_folders;
-mod local_service;
 mod main_window;
-mod requests;
 mod settings;
 mod status_bar;
 mod viewer;

@@ -44,10 +44,13 @@ runtime verification.
 
 ### Execution status
 
-**Stage 1 is complete; stages 2–9 are incomplete.**
-Lead owns shared contracts, integration and the only build. The request
-implementer has finished only the unwired
-`app/work/requests.rs` for Stage 2; exclude it from the Stage 1 commit.
+**Stages 1–2 are complete; stages 3–9 are incomplete.**
+Lead owns shared contracts, integration and the only build. Stage 2 passed
+integrated review and Build 38: formatting, clippy, all workspace tests and docs;
+262 UI tests passed, 14 ignored. Its three full runs were 36–38: first integration
+compile corrections together, then one newly reachable fold lint corrected with
+a plain loop that polls every volume. Log:
+`V:/temp/gozler-window-stage2-build38.log`. No new focused or benchmark run.
 
 Current milestone:
 - Integrated adversarial review:
@@ -68,8 +71,46 @@ Current milestone:
   under restricted execution, as in Build 2; rerun the same script outside that
   sandbox rather than changing those tests. Build 35 outside that restriction is
   green: formatting, clippy, every workspace test and documentation passed.
-  Log: `V:/temp/gozler-window-stage1-build35.log`. Stage 1 is ready to commit;
-  integrate the request draft only after that checkpoint.
+  Log: `V:/temp/gozler-window-stage1-build35.log`. Stage 1 committed as `a86ff43`.
+- Stage 2 integrated: Requests, service program inspection/checking, panel folder
+  readers, Viewer, Include elevation, service fixes, Indexed folders, Paste and
+  tray calls use typed groups under Work. Native network/file workers are split
+  from UI endpoints. The source scan found remaining Explorer calls and hook
+  cleanup joins; both are corrected, the latter with an owned stop event.
+  All Stage 2 files are frozen for its commit; only the lead builds.
+- Stage 2 review 1 found a Viewer removal-recovery race and a private HWND test
+  construction. Both are corrected; review 2 covers those fixes and newly wired
+  Paste/Indexed folders/tray/shared shutdown contracts. Evidence:
+  `V:/temp/gozler-window-stage2-worker-review1.md`. The native environment checks
+  are recorded in `ui-after-install.md`, not claimed passed.
+- The expanded review found a third UI wait: keyboard hook installation's ready
+  receiver. The hook exception permits its dedicated message loop, not a UI wait.
+  Its implementer owns the coupled shortcut/MainWindow/Settings acknowledgment
+  correction, retaining the old shortcut until successful installation. The
+  scan now exempts only that native launcher, not waits in its startup method.
+  That correction is complete: asynchronous inactive preparation/adoption,
+  captured Apply/OK continuation, token-scoped key capture and WM_DESTROY
+  endpoint closure. Focused review is clean at
+  `V:/temp/gozler-window-stage2-worker-review3.md`; the known fetch_update/MSRV
+  allowance is added. Earlier clean group evidence is reused from review 2.
+- Stage 3 preparation is read-only: `V:/temp/gozler-window-stage3-slow-inventory.md`
+  records actual idle/progress/expiry consumers; watchdog seams and its required
+  native-loop evidence are in `V:/temp/gozler-window-stage3-watchdog-design.md`.
+  The independent watchdog owner is drafting only new, unwired modules; exclude
+  those files from the Stage 2 commit. Integration needs the existing `windows`
+  dependency's `Win32_System_WindowsProgramming` feature for QueryThreadCycleTime,
+  with no new crate or parallel FFI declaration. RAII handler scopes preserve
+  outer context on the UI stack while the worker copies one ID-only record.
+- Stage 2 settled interfaces: persistent Viewer session and fixed panel slots
+  retain blocked work until actual resource cleanup. `Task::interrupt_io` only
+  interrupts a native call, preserving session lifetime; Cancel also ends it.
+  Device-notification registration hands off to the owning UI through bounded
+  request/ack channels, outside borrows, avoiding a worker's stale HWND race;
+  the worker retains its live file/watch until ack or abandonment, and closes it
+  off UI. Program metadata and execution checks are separate bounded tasks over
+  one canonical cache, so status never waits. Nullable elevation owners replace
+  main-HWND UAC ownership. Accepted mutation/export cleanup retains process
+  lifetime off UI, independently of essential settings/recovery writes.
 
 Implemented contracts:
 - `core::work` owns admission, timing and the measured inline CPU threshold;
@@ -118,9 +159,9 @@ Implemented contracts:
   it. Its launcher remains Stage 2.
 
 Evidence and settled constraints:
-- Last green full run: Build 35,
-  `V:/temp/gozler-window-stage1-build35.log` (260 UI tests passed, 14 ignored).
-  Accounting: 35 full attempts, six focused attempts,
+- Last green full run: Build 38,
+  `V:/temp/gozler-window-stage2-build38.log` (262 UI tests passed, 14 ignored).
+  Accounting: 38 full attempts, six focused attempts,
   one optimized timing run, no Criterion runs. Last focused check:
   `-Test a_change_batch_keeps_the_taken_names_folded_once`, green at
   `V:/temp/gozler-window-stage1-cache-focused6.log`. Detailed prior evidence
@@ -136,6 +177,11 @@ Evidence and settled constraints:
   evidence, capture replacement, quick stale focus, receipt-time awaited names,
   id reservation and terminal Queue delivery. These cases passed Build 35.
   No display/getter tests added.
+- Stage 2 adds only `a_cancelled_ready_setup_is_removed_only_by_retirement`
+  (discarded installers are deleted off UI) and
+  `window_code_has_no_unowned_launcher_or_recognized_wait` (known wait/launcher
+  forms cannot escape their owner). Both passed Builds 37–38. Existing moved
+  tests retain their behavior; no hook wrapper/display tests added.
 - Normal Exit destroys UI without waiting for writers; essential writes may keep
   an invisible process alive. Session end dispatches at most two seconds, checks
   explicit finalizer completion and preserves earlier WM_QUIT for the outer loop.
@@ -152,12 +198,13 @@ Evidence and settled constraints:
   not claimed passed; installation remains separate.
 - Ubuntu/platform compilation, core purity, MSRV and affected cargo-deny checks
   remain for CI. No new dependency package or wire layout in the latest batch.
-- Stage 2 request draft uses one Task per Purpose and a capacity-one interim
-  channel separate from terminal delivery. Export cleanup stays off UI and logs
-  partial-file removal failures independently of essential writes. Integration
-  must retain process lifetime without delaying UI destruction, delete old
-  `app/requests.rs`, and migrate the service-check launcher separately.
-  The draft is source-read, unwired and unbuilt.
+- Stage 2 Requests uses one Task per Purpose and a capacity-one interim channel
+  separate from terminal delivery. Export cleanup stays off UI and logs
+  partial-file removal failures independently of essential writes. Accepted
+  elevated mutations and export cleanup retain process lifetime after UI closes;
+  best-effort provider/tray cleanup cannot delay essential writes. Old launchers
+  are removed. All Stage 2 group evidence is retained in worker reviews 1–3;
+  the final integration corrections are compiler visibility/lifetime wiring.
 
 Historical analysis below was reviewed against `ab0e9b0` on 2026-10-23.
 Recheck present callers before relying on old measurements. Preserve the engine,

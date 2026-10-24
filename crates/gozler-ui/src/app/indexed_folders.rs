@@ -4,17 +4,18 @@
 //! its own copy of the Include settings, which OK gives back to the page.
 
 use super::main_window::MainWindow;
+use super::work::indexed::{Session, Subfolders};
 use crate::core::captions::DialogItem;
 use crate::core::ids::ControlId;
 use crate::core::include::{IncludeDrive, SummaryRow};
 use crate::core::text::Strings;
+use crate::core::work::{INLINE_ITEMS, Retirement};
 use crate::win::Hwnd;
 use crate::win::controls::{FolderTree, ReportList, TreeItem};
 use crate::win::dialog::{DialogMessage, DialogProc, Opened, TreeChange};
 use gozler_core::include::IndexSettings;
 use std::cell::{Cell, RefCell};
-use std::collections::VecDeque;
-use std::sync::mpsc::{Receiver, TryRecvError, channel};
+use std::collections::{HashMap, VecDeque};
 use std::time::{Duration, Instant};
 
 /// The dialog's timer, which adds the folders listed on other threads and
@@ -37,7 +38,7 @@ struct Node {
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Listing {
     NotListed,
-    /// A thread lists them.
+    /// The volume's listing slot accepted them.
     Pending,
     /// They are in the tree, or wait in [`IndexedFolders::jobs`].
     Listed,
@@ -70,8 +71,9 @@ pub(super) struct IndexedFolders<'a> {
     settings: RefCell<IndexSettings>,
     /// The tree's folders; each item carries its index.
     nodes: RefCell<Vec<Node>>,
-    /// The folders a thread lists, and where its subfolders arrive.
-    pending: RefCell<Vec<(TreeItem, Receiver<Subfolders>)>>,
+    session: Cell<Option<Session>>,
+    /// Native items remain here; worker replies name only their node indices.
+    pending: RefCell<HashMap<usize, TreeItem>>,
     /// The work that waits, the newest last. The timer does the newest
     /// first, so a folder the person opens, or a click, does not wait
     /// behind a large folder that is still being added.
@@ -100,7 +102,8 @@ impl<'a> IndexedFolders<'a> {
             drives,
             settings: RefCell::new(settings),
             nodes: RefCell::new(Vec::new()),
-            pending: RefCell::new(Vec::new()),
+            session: Cell::new(None),
+            pending: RefCell::new(HashMap::new()),
             jobs: RefCell::new(Vec::new()),
             revealing: RefCell::new(None),
             rows: RefCell::new(Vec::new()),
@@ -110,7 +113,7 @@ impl<'a> IndexedFolders<'a> {
 
     /// The settings as the person left them; OK applies them to the page.
     pub(super) fn into_settings(self) -> IndexSettings {
-        self.settings.into_inner()
+        self.settings.take()
     }
 
     fn tree(dialog: Hwnd) -> Option<FolderTree> {
@@ -183,31 +186,31 @@ impl<'a> IndexedFolders<'a> {
 
     /// Marks `item` as being listed, and gives its folder; `None` once it
     /// was, or for a drive that is not connected.
-    fn start_listing(&self, tree: FolderTree, item: TreeItem) -> Option<String> {
+    fn start_listing(&self, tree: FolderTree, item: TreeItem) -> Option<(usize, usize, String)> {
+        let index = tree.data(item);
         let mut nodes = self.nodes.borrow_mut();
-        let node = nodes.get_mut(tree.data(item))?;
+        let node = nodes.get_mut(index)?;
         let root = self.drives[node.drive].root.as_ref()?;
         if node.listing != Listing::NotListed {
             return None;
         }
         node.listing = Listing::Pending;
-        Some(format!("{root}{}", node.path))
+        Some((index, node.drive, format!("{root}{}", node.path)))
     }
 
-    /// Lists the subfolders of `item`, unless it was, on a thread of its
-    /// own, because a folder such as `C:\Windows\WinSxS` takes long to list;
-    /// the dialog's timer adds them. They come from the drive, not
-    /// from the index, so a folder that is left out can be checked again.
+    /// Reads the disk rather than the index, so a folder left out can be
+    /// checked again. The volume's work slot preserves every expansion.
     fn list_later(&self, dialog: Hwnd, tree: FolderTree, item: TreeItem) {
-        let Some(folder) = self.start_listing(tree, item) else {
+        let Some(session) = self.session.get() else {
             return;
         };
-        let (sender, listed) = channel();
-        // Not joined: once the dialog has closed, its send fails.
-        std::thread::spawn(move || {
-            let _ = sender.send(subfolders(&folder));
-        });
-        self.pending.borrow_mut().push((item, listed));
+        let Some((node, drive, folder)) = self.start_listing(tree, item) else {
+            return;
+        };
+        self.pending.borrow_mut().insert(node, item);
+        self.main
+            .indexed()
+            .list(session, node, &self.drives[drive].volume, folder);
         dialog.set_timer(WORK_TIMER, WORK_POLL_MS);
     }
 
@@ -239,21 +242,29 @@ impl<'a> IndexedFolders<'a> {
         let Some(tree) = Self::tree(dialog) else {
             return;
         };
-        let mut listed = Vec::new();
-        self.pending
-            .borrow_mut()
-            .retain(|(item, folders)| match folders.try_recv() {
-                Err(TryRecvError::Empty) => true,
-                answer => {
-                    listed.push((*item, answer.unwrap_or_default()));
-                    false
-                }
+        let Some(session) = self.session.get() else {
+            return;
+        };
+        let listed = self.main.indexed().take(session);
+        let mut retired = Retirement::default();
+        for listed in listed {
+            let item = self.pending.borrow_mut().remove(&listed.node);
+            let current = self.nodes.borrow().get(listed.node).is_some_and(|node| {
+                node.listing == Listing::Pending
+                    && self.drives[node.drive]
+                        .root
+                        .as_ref()
+                        .is_some_and(|root| listed.folder == format!("{root}{}", node.path))
             });
-        for (item, folders) in listed {
-            if let Some(adding) = self.listed(tree, item, folders) {
-                self.jobs.borrow_mut().push(Job::Add(adding));
+            if let Some(item) = item.filter(|_| current) {
+                if let Some(adding) = self.listed(tree, item, listed.folders) {
+                    self.jobs.borrow_mut().push(Job::Add(adding));
+                }
+            } else {
+                retired.push(listed, INLINE_ITEMS + 1);
             }
         }
+        self.main.indexed().retire(retired);
         if !self.jobs.borrow().is_empty() {
             let end = Instant::now() + SLICE;
             // A tree that draws itself updates its scroll bar for each item.
@@ -263,7 +274,8 @@ impl<'a> IndexedFolders<'a> {
             });
         }
         self.reveal_more(dialog, tree);
-        if self.pending.borrow().is_empty() && self.jobs.borrow().is_empty() {
+        let pending = self.main.indexed().pending(session);
+        if !pending && self.jobs.borrow().is_empty() {
             dialog.kill_timer(WORK_TIMER);
         } else {
             dialog.set_timer(WORK_TIMER, WORK_POLL_MS);
@@ -429,31 +441,31 @@ impl<'a> IndexedFolders<'a> {
     }
 }
 
-/// Folder names, each with whether it may hold folders.
-type Subfolders = Vec<(String, bool)>;
-
-/// The subfolders of `folder`, sorted by name, each with whether it may
-/// hold folders: a junction or a symbolic link leads elsewhere, so the tree
-/// does not open it.
-fn subfolders(folder: &str) -> Subfolders {
-    let Ok(entries) = std::fs::read_dir(folder) else {
-        return Vec::new();
-    };
-    let mut folders: Subfolders = entries
-        .filter_map(Result::ok)
-        .filter_map(|entry| {
-            let kind = entry.file_type().ok()?;
-            let link = kind.is_symlink();
-            (kind.is_dir() || link && entry.path().is_dir())
-                .then(|| (entry.file_name().to_string_lossy().into_owned(), !link))
-        })
-        .collect();
-    folders.sort_by_key(|(name, _)| name.to_lowercase());
-    folders
+impl Drop for IndexedFolders<'_> {
+    fn drop(&mut self) {
+        let mut retired = Retirement::default();
+        retired.push(self.nodes.take(), INLINE_ITEMS + 1);
+        retired.push(self.rows.take(), INLINE_ITEMS + 1);
+        if let Some((_, names)) = self.revealing.take() {
+            retired.push(names, INLINE_ITEMS + 1);
+        }
+        retired.push(self.settings.take(), INLINE_ITEMS + 1);
+        for job in self.jobs.take() {
+            if let Job::Add(adding) = job {
+                retired.push(adding.folders, INLINE_ITEMS + 1);
+            }
+        }
+        let mut work = self.main.indexed();
+        if let Some(session) = self.session.take() {
+            work.end(session);
+        }
+        work.retire(retired);
+    }
 }
 
 impl DialogProc for IndexedFolders<'_> {
     fn init(&self, dialog: Hwnd) -> Opened {
+        self.session.set(Some(self.main.indexed().begin()));
         if let Some(tree) = Self::tree(dialog) {
             // Turning check boxes on sends a check box notice of its own.
             self.filling(|| tree.show_check_boxes());
@@ -467,8 +479,8 @@ impl DialogProc for IndexedFolders<'_> {
                     drive.root.is_some(),
                 );
                 // Each drive opens one level deep once listed, so the
-                // folders to uncheck are in view. A thread lists it, because
-                // a sleeping disk takes seconds to wake.
+                // folders to uncheck are in view; each volume has its own
+                // listing slot, so a sleeping disk holds back no other drive.
                 if let Some(item) = item {
                     self.list_later(dialog, tree, item);
                 }

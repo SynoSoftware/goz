@@ -1,125 +1,148 @@
-//! The requests to the gozler service: one thread per [`Fetch`], each with
-//! its own connection and cancel token, and one channel for the replies
-//! (DESIGN.md: window rules 3 to 5).
+//! Purpose-local service requests, with bounded interim replies separate from
+//! completion so a full progress slot cannot lose an export's final result.
 
 use crate::core::fetch::{
-    Ask, Chunk, ChunkAsk, DaemonFailure, ExportAsk, Fetch, Fetched, Outcome, Purpose, SelectionAsk,
-    SelectionRows, WriteFailure,
+    Ask, Chunk, ChunkAsk, DaemonFailure, ExportAsk, Fetch, Fetched, Generation, Outcome, Programs,
+    Purpose, SelectionAsk, SelectionRows, WriteFailure,
 };
-use crate::win::wake::Waker;
+use crate::core::work::{INLINE_ITEMS, Replacement, Retirement};
+use crate::win::wake::OpenWaker;
+use crate::win::work::{OffThread, Task};
 use gozler_client::{CancelToken, Client, ClientError};
 use gozler_core::output::ResultWriter;
 use gozler_core::proto::{PIPE_NAME, ProtoError, QueryResults, Returns};
 use std::cell::Cell;
-use std::cell::RefCell;
 use std::fs::File;
 use std::io::{self, BufWriter};
-use std::sync::mpsc::{Receiver, Sender, channel};
-use std::thread::JoinHandle;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::mpsc::{Receiver, SyncSender, sync_channel};
 use std::time::{Duration, Instant};
 
-/// How often an export reports the rows it has written, which the status
-/// bar's middle group shows (DESIGN.md: Export).
 const EXPORT_PROGRESS: Duration = Duration::from_millis(500);
 
-struct Running {
-    cancel: CancelToken,
-    thread: JoinHandle<()>,
+struct Request {
+    fetch: Fetch,
+    sender: SyncSender<Fetched>,
+    waker: OpenWaker,
+    error_log: Arc<Path>,
+    programs: Programs,
 }
 
-/// The live request of each purpose, and the cancelled ones that have not
-/// been joined yet. A cancelled thread still holds a [`Waker`] until its next
-/// poll, so it is joined before the window's handle goes (rule 5).
-pub(super) struct Requests {
-    live: RefCell<[Option<Running>; Purpose::ALL.len()]>,
-    cancelled: RefCell<Vec<Running>>,
-    sender: Sender<Fetched>,
-    replies: Receiver<Fetched>,
-    waker: Waker,
+struct Group {
+    task: Task<Request, Option<Fetched>>,
+    sender: SyncSender<Fetched>,
+    interim: Receiver<Fetched>,
+    current: Option<Generation>,
+}
+
+pub(in crate::app) struct Requests {
+    groups: Vec<Group>,
+    waker: OpenWaker,
+    error_log: Arc<Path>,
+    retired: Retirement,
+    programs: Programs,
 }
 
 impl Requests {
-    pub(super) fn new(waker: Waker) -> Requests {
-        let (sender, replies) = channel();
-        Requests {
-            live: RefCell::new([const { None }; Purpose::ALL.len()]),
-            cancelled: RefCell::new(Vec::new()),
-            sender,
-            replies,
-            waker,
-        }
-    }
-
-    /// Cancels the live request of `fetch`'s purpose and no other, then runs
-    /// `fetch` on a new thread.
-    pub(super) fn start(&self, fetch: Fetch) {
-        let purpose = fetch.purpose();
-        let cancel = CancelToken::default();
-        let thread = {
-            let (cancel, sender, waker) = (cancel.clone(), self.sender.clone(), self.waker.clone());
-            std::thread::spawn(move || {
-                let generation = fetch.generation;
-                let reply = |outcome: Outcome| {
-                    // The window drops the receiver only after joining this
-                    // thread, so the send cannot fail while it matters.
-                    let _ = sender.send(Fetched {
-                        purpose,
-                        generation,
-                        outcome,
-                    });
-                    waker.wake();
-                };
-                if let Some(outcome) = run(fetch.ask, &cancel, &reply) {
-                    reply(outcome);
+    pub(super) fn new(waker: OpenWaker, error_log: PathBuf) -> Self {
+        let groups = Purpose::ALL
+            .map(|_| {
+                let (sender, interim) = sync_channel(1);
+                Group {
+                    // Reply size is unknown until the service answers; disposal
+                    // of a cancelled reply must not run on the window thread.
+                    task: Task::new(waker.clone(), Replacement::Cancel, execute)
+                        .with_size(|_| INLINE_ITEMS + 1),
+                    sender,
+                    interim,
+                    current: None,
                 }
             })
-        };
-        let old = self.live.borrow_mut()[slot(purpose)].replace(Running { cancel, thread });
-        if let Some(old) = old {
-            old.cancel.cancel();
-            self.cancelled.borrow_mut().push(old);
-        }
-        self.join_finished();
-    }
-
-    /// Cancels the live request of `purpose`, whose reply nobody reads.
-    pub(super) fn cancel(&self, purpose: Purpose) {
-        let old = self.live.borrow_mut()[slot(purpose)].take();
-        if let Some(old) = old {
-            old.cancel.cancel();
-            self.cancelled.borrow_mut().push(old);
+            .into();
+        Self {
+            groups,
+            waker,
+            error_log: error_log.into(),
+            retired: Retirement::default(),
+            programs: Programs::UNKNOWN,
         }
     }
 
-    /// Every reply that has arrived, without waiting.
-    pub(super) fn drain(&self) -> Vec<Fetched> {
-        self.join_finished();
-        self.replies.try_iter().collect()
+    pub(in crate::app) fn start(&mut self, fetch: Fetch) {
+        let group = &mut self.groups[slot(fetch.purpose())];
+        if let Ok(fetched) = group.interim.try_recv() {
+            self.retired.push(fetched, INLINE_ITEMS + 1);
+        }
+        group.current = Some(fetch.generation);
+        group.task.replace(Request {
+            fetch,
+            sender: group.sender.clone(),
+            waker: self.waker.clone(),
+            error_log: Arc::clone(&self.error_log),
+            programs: self.programs.clone(),
+        });
+        self.retired.append(group.task.take_retired());
     }
 
-    /// Cancels every request and joins every thread. Each thread checks its
-    /// token every 5 ms while it waits for the service, so this returns
-    /// within one poll (DESIGN.md: Requests).
-    pub(super) fn shut_down(&self) {
-        let mut all: Vec<Running> = self.cancelled.borrow_mut().drain(..).collect();
-        all.extend(self.live.borrow_mut().iter_mut().filter_map(Option::take));
-        for running in &all {
-            running.cancel.cancel();
-        }
-        for running in all {
-            let _ = running.thread.join();
-        }
+    pub(in crate::app) fn set_programs(&mut self, programs: Programs) {
+        self.programs = programs;
     }
 
-    fn join_finished(&self) {
-        let finished: Vec<Running> = {
-            let mut cancelled = self.cancelled.borrow_mut();
-            let (finished, running) = cancelled.drain(..).partition(|r| r.thread.is_finished());
-            *cancelled = running;
-            finished
-        };
-        for running in finished {
-            let _ = running.thread.join();
+    pub(in crate::app) fn cancel(&mut self, purpose: Purpose) {
+        let group = &mut self.groups[slot(purpose)];
+        group.current = None;
+        group.task.cancel();
+        self.retired.append(group.task.take_retired());
+    }
+
+    pub(in crate::app) fn drain(&mut self) -> Vec<Fetched> {
+        let mut replies = Vec::new();
+        for group in &mut self.groups {
+            if let Ok(fetched) = group.interim.try_recv() {
+                if group.current == Some(fetched.generation) {
+                    replies.push(fetched);
+                } else {
+                    self.retired.push(fetched, INLINE_ITEMS + 1);
+                }
+            }
+            if let Some((_, fetched)) = group.task.take() {
+                group.current = None;
+                if let Some(fetched) = fetched {
+                    replies.push(fetched);
+                }
+            }
+            self.retired.append(group.task.take_retired());
+        }
+        replies
+    }
+
+    pub(in crate::app) fn take_retired(&mut self) -> Retirement {
+        std::mem::take(&mut self.retired)
+    }
+
+    /// Close the shared wake lifetime before HWND destruction. Run the returned
+    /// cleanup independently of essential writes: an export's file may be slow.
+    pub(super) fn close(&mut self) -> impl FnOnce(&OffThread) + Send + 'static + use<> {
+        let mut export = None;
+        let mut retired = self.take_retired();
+        for (purpose, mut group) in Purpose::ALL
+            .into_iter()
+            .zip(std::mem::take(&mut self.groups))
+        {
+            group.task.cancel();
+            if purpose == Purpose::Export {
+                export = Some(group.task);
+            } else {
+                retired.append(group.task.close_delivery());
+            }
+            retired.push(group.interim, INLINE_ITEMS + 1);
+        }
+        move |worker| {
+            drop(retired);
+            if let Some(export) = export {
+                export.finish(worker);
+            }
         }
     }
 }
@@ -127,25 +150,50 @@ impl Requests {
 fn slot(purpose: Purpose) -> usize {
     Purpose::ALL
         .iter()
-        .position(|p| *p == purpose)
+        .position(|candidate| *candidate == purpose)
         .expect("ALL holds every purpose")
+}
+
+fn execute(input: Request, _worker: &OffThread, cancel: &CancelToken) -> Option<Fetched> {
+    let purpose = input.fetch.purpose();
+    let generation = input.fetch.generation;
+    let fetched = |outcome| Fetched {
+        purpose,
+        generation,
+        outcome,
+    };
+    let reply = |outcome| {
+        input
+            .waker
+            .deliver(|| input.sender.try_send(fetched(outcome)).is_ok());
+    };
+    run(
+        input.fetch.ask,
+        cancel,
+        &reply,
+        &input.error_log,
+        &input.programs,
+    )
+    .map(fetched)
 }
 
 /// Connects, asks and gathers the reply, which `reply` takes before the end
 /// when a request answers more than once; `None` once cancelled, because a
 /// cancelled request's reply is never read.
-fn run(ask: Ask, cancel: &CancelToken, reply: &dyn Fn(Outcome)) -> Option<Outcome> {
+fn run(
+    ask: Ask,
+    cancel: &CancelToken,
+    reply: &dyn Fn(Outcome),
+    error_log: &Path,
+    programs: &Programs,
+) -> Option<Outcome> {
     let result =
         Client::connect(PIPE_NAME, true, cancel.clone()).and_then(|mut client| match ask {
             Ask::Status => client.status().map(|status| {
                 // The hello names the service as `gozlerd <version>`.
                 let server = client.server();
                 let version = server.strip_prefix("gozlerd ").unwrap_or(server);
-                Outcome::Status(
-                    status,
-                    version.to_owned(),
-                    super::local_service::local_service(),
-                )
+                Outcome::Status(status, version.to_owned(), programs.clone())
             }),
             Ask::Rows(_, ask) => rows(&mut client, &ask, Some(reply)).map(Outcome::Rows),
             Ask::Program(ask) | Ask::FolderSizes(_, ask) => {
@@ -155,7 +203,14 @@ fn run(ask: Ask, cancel: &CancelToken, reply: &dyn Fn(Outcome)) -> Option<Outcom
             Ask::FolderSize(search) => client
                 .totals(search.request(Returns::Totals))
                 .map(Outcome::Totals),
-            Ask::Export(ask) => Ok(export(&mut client, &ask, cancel, reply)),
+            Ask::Export(ask) => Ok(export(
+                &mut client,
+                &ask,
+                cancel,
+                reply,
+                error_log,
+                programs,
+            )),
             Ask::CountIncluded(settings) => {
                 client.count_included(settings).map(Outcome::IncludedCount)
             }
@@ -168,7 +223,7 @@ fn run(ask: Ask, cancel: &CancelToken, reply: &dyn Fn(Outcome)) -> Option<Outcom
             code: ProtoError::ResultSnapshotGone,
             ..
         }) => Some(Outcome::ResultSnapshotGone),
-        Err(error) => Some(Outcome::Failed(failure(error))),
+        Err(error) => Some(Outcome::Failed(failure(error, programs))),
     }
     .filter(|_| !cancel.is_cancelled())
 }
@@ -275,6 +330,8 @@ fn export(
     ask: &ExportAsk,
     cancel: &CancelToken,
     reply: &dyn Fn(Outcome),
+    error_log: &Path,
+    programs: &Programs,
 ) -> Outcome {
     let stopped = match File::create(&ask.path) {
         Err(error) => return Outcome::ExportFailed(WriteFailure::from(&error)),
@@ -304,22 +361,32 @@ fn export(
             }
         }
     };
-    let _ = std::fs::remove_file(&ask.path);
+    if let Err(error) = std::fs::remove_file(&ask.path)
+        && error.kind() != io::ErrorKind::NotFound
+    {
+        crate::app::write_log(
+            error_log,
+            &format!(
+                "Partial export {} was not deleted: {error}",
+                ask.path.display()
+            ),
+        );
+    }
     match stopped {
         ExportStop::Write(error) => Outcome::ExportFailed(WriteFailure::from(&error)),
-        ExportStop::Client(error) => Outcome::Failed(failure(error)),
+        ExportStop::Client(error) => Outcome::Failed(failure(error, programs)),
     }
 }
 
 /// The failure the window shows for the client's error (DESIGN.md: Shared
 /// code); a pipe that cannot be opened or read shows as a lost connection.
-fn failure(error: ClientError) -> DaemonFailure {
+fn failure(error: ClientError, programs: &Programs) -> DaemonFailure {
     match error {
         ClientError::NotRunning(why) => DaemonFailure::NotRunning(why),
         ClientError::NotReady => DaemonFailure::NotReady,
         ClientError::Untrusted => DaemonFailure::NotGozler,
         ClientError::TooOld => DaemonFailure::TooOld {
-            programs: super::local_service::local_service(),
+            programs: programs.clone(),
         },
         ClientError::Refused { message, .. } => DaemonFailure::Refused { detail: message },
         ClientError::Communication(_) | ClientError::Lost | ClientError::Cancelled => {

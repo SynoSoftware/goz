@@ -38,7 +38,7 @@ use crate::win::controls::{
 };
 use crate::win::dialog::{self, DialogEnd, DialogMessage, DialogProc, Opened};
 use crate::win::gdi::{Font, TextMeter};
-use crate::win::shortcut::{self, Capture};
+use crate::win::shortcut::{self, Capture, Registration};
 use crate::win::{self, Hwnd};
 use gozler_core::include::IndexSettings;
 use gozler_fileops::{DeleteWorkers, Engine, RingBlock, SpeedSettings};
@@ -63,6 +63,7 @@ enum AfterSave {
 }
 
 enum Awaited {
+    Shortcut(Box<Applying>),
     SignIn {
         id: Id,
         on: bool,
@@ -73,6 +74,13 @@ enum Awaited {
     Include(IndexSettings, AfterSave),
     /// Asks the service to rebuild the index, after Rebuild.
     Rebuild,
+}
+
+struct Applying {
+    registration: Registration,
+    edited: SettingsValues,
+    last: SettingsValues,
+    after: AfterSave,
 }
 
 /// The page's heading, which shows its name in semibold.
@@ -308,9 +316,8 @@ pub(super) struct SettingsDialog<'a> {
     /// Whether the person confirmed Reset all, which the main window carries
     /// out once the dialog has closed.
     resets: Cell<bool>,
-    /// The Include settings being saved, or the rebuild asked for, while
-    /// Windows asks for permission and the copy that runs as administrator
-    /// runs; OK, Cancel, Apply, Reset all and Rebuild wait for the answer.
+    /// Accepted settings work keeps its captured edits and continuation while
+    /// the dialog remains usable; its command buttons wait for acknowledgment.
     saving: RefCell<Option<Awaited>>,
     /// The Drives and service page's tooltip, whose fix buttons' tips
     /// follow their fix.
@@ -822,6 +829,10 @@ impl<'a> SettingsDialog<'a> {
     /// closes; refused ones stay edited, and a failure says why. The
     /// service shows a rebuild in its drives' state.
     fn save_answered(&self, dialog: Hwnd) {
+        if matches!(self.saving.borrow().as_ref(), Some(Awaited::Shortcut(..))) {
+            self.shortcut_answered(dialog);
+            return;
+        }
         if matches!(self.saving.borrow().as_ref(), Some(Awaited::SignIn { .. })) {
             self.sign_in_answered(dialog);
             return;
@@ -841,15 +852,15 @@ impl<'a> SettingsDialog<'a> {
                 }
             }
             (Awaited::Rebuild, Ok(())) | (_, Err(NotSaved::Declined)) => {}
-            (Awaited::SignIn { .. }, Ok(())) => {
-                unreachable!("registry replies are handled separately")
+            (Awaited::SignIn { .. } | Awaited::Shortcut(..), Ok(())) => {
+                unreachable!("shortcut and registry replies are handled separately")
             }
             (awaited, Err(NotSaved::Failed(reason))) => {
                 let key = match awaited {
                     Awaited::Include(..) => "settings_include.not_saved",
                     Awaited::Rebuild => "settings_index.not_rebuilt",
-                    Awaited::SignIn { .. } => {
-                        unreachable!("registry replies are handled separately")
+                    Awaited::SignIn { .. } | Awaited::Shortcut(..) => {
+                        unreachable!("shortcut and registry replies are handled separately")
                     }
                 };
                 let text = self.strings.format(key, &[&reason]);
@@ -858,6 +869,48 @@ impl<'a> SettingsDialog<'a> {
         }
         self.show_preview();
         self.update_apply(dialog);
+    }
+
+    fn shortcut_answered(&self, dialog: Hwnd) {
+        let answer = {
+            let mut saving = self.saving.borrow_mut();
+            let Some(Awaited::Shortcut(applying)) = saving.as_mut() else {
+                return;
+            };
+            applying.registration.poll()
+        };
+        let Some(answer) = answer else { return };
+        let Some(Awaited::Shortcut(applying)) = self.saving.take() else {
+            return;
+        };
+        let Applying {
+            registration,
+            edited,
+            last,
+            after,
+        } = *applying;
+        match answer {
+            Ok(()) => {
+                if self.apply_ready(dialog, edited, last, after, Some(registration))
+                    && after == AfterSave::Close
+                    && self.apply(dialog, AfterSave::Close)
+                {
+                    dialog::end(dialog, DialogEnd::Ok);
+                }
+            }
+            Err(error) => {
+                let message = self
+                    .main
+                    .shortcut_message(registration.shortcut(), &error, false);
+                self.refuse(
+                    dialog,
+                    SettingsPage::Keyboard,
+                    ControlId::KeyboardShortcut,
+                    &message,
+                );
+                self.update_apply(dialog);
+            }
+        }
     }
 
     fn sign_in_answered(&self, dialog: Hwnd) {
@@ -1104,7 +1157,9 @@ impl<'a> SettingsDialog<'a> {
             match saving.as_ref() {
                 Some(awaited) => {
                     let key = match awaited {
-                        Awaited::SignIn { .. } | Awaited::Include(..) => "settings.saving",
+                        Awaited::Shortcut(..) | Awaited::SignIn { .. } | Awaited::Include(..) => {
+                            "settings.saving"
+                        }
                         Awaited::Rebuild => "settings.rebuilding",
                     };
                     JobCaption {
@@ -1679,64 +1734,108 @@ impl<'a> SettingsDialog<'a> {
         if edited == last {
             return true;
         }
-        match self
-            .main
-            .apply_choices(self.window, &edited.choices, &last.choices)
-        {
-            Err(message) => {
-                self.refuse(
-                    dialog,
-                    SettingsPage::Keyboard,
-                    ControlId::KeyboardShortcut,
-                    &message,
-                );
-                false
+        let registration =
+            match self
+                .main
+                .prepare_shortcut(self.window, &edited.choices, &last.choices)
+            {
+                Err(message) => {
+                    self.refuse(
+                        dialog,
+                        SettingsPage::Keyboard,
+                        ControlId::KeyboardShortcut,
+                        &message,
+                    );
+                    return false;
+                }
+                Ok(registration) => registration,
+            };
+        let registration = if let Some(mut prepared) = registration {
+            match prepared.poll() {
+                None => {
+                    self.saving
+                        .replace(Some(Awaited::Shortcut(Box::new(Applying {
+                            registration: prepared,
+                            edited,
+                            last,
+                            after,
+                        }))));
+                    self.update_apply(dialog);
+                    return false;
+                }
+                Some(Err(error)) => {
+                    let message = self
+                        .main
+                        .shortcut_message(prepared.shortcut(), &error, false);
+                    self.refuse(
+                        dialog,
+                        SettingsPage::Keyboard,
+                        ControlId::KeyboardShortcut,
+                        &message,
+                    );
+                    return false;
+                }
+                Some(Ok(())) => {}
             }
-            Ok(()) => {
-                self.draft
-                    .borrow_mut()
-                    .choices_applied(edited.choices.clone());
-                let include = edited
-                    .include
-                    .clone()
-                    .filter(|_| edited.include != last.include);
-                let saving = if edited.start_at_sign_in != last.start_at_sign_in {
-                    let id = self.main.set_sign_in(edited.start_at_sign_in);
-                    self.saving.replace(Some(Awaited::SignIn {
-                        id,
-                        on: edited.start_at_sign_in,
-                        include,
-                        after,
-                    }));
-                    true
-                } else {
-                    self.save_include(include, after)
-                };
-                if edited.choices.show_shortcut != last.choices.show_shortcut {
-                    // Show window's row shows what Windows registered.
-                    self.fill_commands(self.selected_command());
-                }
-                let icons_changed = edited.choices.show_icons != last.choices.show_icons;
-                if icons_changed {
-                    // The page list's rows, the group titles and the
-                    // buttons follow.
-                    self.show_page_icons(dialog);
-                    for page in self.pages.iter().filter_map(Cell::get) {
-                        self.show_group_icons(page);
-                    }
-                    self.show_button_glyphs(dialog);
-                    self.refresh_index(dialog);
-                    dialog.draw_once_after(|| {});
-                }
-                self.show_preview();
-                self.update_apply(dialog);
-                if icons_changed {
-                    let width = dialog::size_buttons(dialog, self);
-                    self.buttons_sized(dialog, width);
-                }
-                !saving
-            }
+            Some(prepared)
+        } else {
+            None
+        };
+        self.apply_ready(dialog, edited, last, after, registration)
+    }
+
+    fn apply_ready(
+        &self,
+        dialog: Hwnd,
+        edited: SettingsValues,
+        last: SettingsValues,
+        after: AfterSave,
+        registration: Option<Registration>,
+    ) -> bool {
+        self.main
+            .apply_choices(self.window, &edited.choices, &last.choices, registration);
+        self.draft
+            .borrow_mut()
+            .choices_applied(edited.choices.clone());
+        let include = edited
+            .include
+            .clone()
+            .filter(|_| edited.include != last.include);
+        let saving = if edited.start_at_sign_in != last.start_at_sign_in {
+            let id = self.main.set_sign_in(edited.start_at_sign_in);
+            self.saving.replace(Some(Awaited::SignIn {
+                id,
+                on: edited.start_at_sign_in,
+                include,
+                after,
+            }));
+            true
+        } else {
+            self.save_include(include, after)
+        };
+        if edited.choices.show_shortcut != last.choices.show_shortcut {
+            // Show window's row shows what Windows registered.
+            self.fill_commands(self.selected_command());
         }
+        let icons_changed = edited.choices.show_icons != last.choices.show_icons;
+        if icons_changed {
+            // The page list's rows, the group titles and the
+            // buttons follow.
+            self.show_page_icons(dialog);
+            for page in self.pages.iter().filter_map(Cell::get) {
+                self.show_group_icons(page);
+            }
+            self.show_button_glyphs(dialog);
+            self.refresh_index(dialog);
+            dialog.draw_once_after(|| {});
+        }
+        self.show_preview();
+        self.update_apply(dialog);
+        if icons_changed {
+            let width = dialog::size_buttons(dialog, self);
+            self.buttons_sized(dialog, width);
+        }
+        !saving
     }
 
     /// Gives the push buttons of the dialog and its pages their icons, as
@@ -2067,6 +2166,12 @@ impl<'a> SettingsDialog<'a> {
 }
 
 impl DialogProc for SettingsDialog<'_> {
+    fn closed(&self, dialog: Hwnd) {
+        self.capture.take();
+        self.saving.take();
+        self.main.settings_closed(dialog);
+    }
+
     fn init(&self, dialog: Hwnd) -> Opened {
         let mut fonts = Vec::new();
         if let Some(list) = self.page_list(dialog) {
@@ -2186,17 +2291,25 @@ impl DialogProc for SettingsDialog<'_> {
             }
             DialogMessage::Command { id } => self.clicked(dialog, id),
             DialogMessage::Focus { id, focused } if is(id, ControlId::KeyboardShortcut) => {
-                // Dropping a capture removes its hook. Without one, which
-                // only a hook that Windows refuses leaves, the box takes no
-                // keys.
                 self.capture.take();
                 if focused {
                     self.capture.set(shortcut::capture(dialog).ok());
                 }
                 return true;
             }
-            DialogMessage::KeysCaptured { windows, keystroke } => {
-                self.keys_captured(windows, keystroke);
+            DialogMessage::KeysCaptured {
+                capture: token,
+                windows,
+                keystroke,
+            } => {
+                let capture = self.capture.take();
+                let accepts = capture
+                    .as_ref()
+                    .is_some_and(|capture| capture.accepts(token));
+                self.capture.set(capture);
+                if accepts {
+                    self.keys_captured(windows, keystroke);
+                }
                 true
             }
             // A row's folders are the ones Indexed folders lists in full.

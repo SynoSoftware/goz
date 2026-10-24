@@ -1,182 +1,209 @@
-//! Runs a service fix on its own thread (DESIGN.md: Service fixes): it runs
-//! a repair's or Use local's commands as administrator and waits for them
-//! and then for the service, finds the latest setup, or downloads the setup
-//! the person accepted and checks it. It reports each step as a
-//! [`FixEvent`] on a channel, as the requests do (DESIGN.md: window rule
-//! 5); `core::fixer` decides what each event means.
+//! Service fixes share one bounded work slot; the core fixer owns their steps.
 
 use crate::core::fixer::{CommandEvent, CommandResult, FixEvent, FixWork, SetupEvent, SetupResult};
 use crate::core::update::{self, Setup};
+use crate::core::work::{INLINE_ITEMS, Replacement, Retirement};
 use crate::win;
-use crate::win::shell::PromptOwner;
 use crate::win::wake::OpenWaker;
-use std::cell::{Cell, RefCell};
+use crate::win::work::{OffThread, Task};
+use gozler_client::CancelToken;
 use std::fs::File;
 use std::io::{self, BufWriter, Write};
-use std::path::Path;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{Receiver, channel};
-use std::thread::JoinHandle;
+use std::path::{Path, PathBuf};
+use std::sync::mpsc::{Receiver, SyncSender, sync_channel};
 use std::time::{Duration, Instant};
 
-/// How long the fix waits for the service to answer after its commands
-/// ended well. `net start` returns once the service runs, so this covers
-/// an install, whose service starts after the command.
 const SERVICE_WAIT: Duration = Duration::from_secs(30);
-
-/// How often the thread checks its stop flag while it waits.
 const POLL: Duration = Duration::from_millis(100);
-
-/// How often a download reports its bytes, which the status bar shows.
 const DOWNLOAD_PROGRESS: Duration = Duration::from_millis(250);
+const EVENTS: usize = 8;
 
-/// The start of the name of the file in `%TEMP%` that a fix's commands
-/// write to.
-const SAID_PREFIX: &str = "gozler-fix-";
-
-/// One fix's thread, with its own channel, so the events of a run that
-/// was stopped never reach the next run.
 struct Run {
-    stop: Arc<AtomicBool>,
-    /// A command run's thread, which [`FixThread::shut_down`] joins. A
-    /// download's thread is not joined, because WinHTTP can hold it for
-    /// about a minute, while the closing process keeps `Local\gozler.ui`
-    /// and a new start would find no window to show.
-    commands: Option<JoinHandle<()>>,
-    events: Receiver<FixEvent>,
-}
-
-/// The fix's thread, which outlives the Settings dialog.
-pub(super) struct FixThread {
-    run: RefCell<Option<Run>>,
-    /// The threads of stopped command runs, which end within [`POLL`].
-    /// Only [`FixThread::shut_down`] joins them, so a new fix never waits.
-    stopped: RefCell<Vec<JoinHandle<()>>>,
-    /// The number of runs started, which names each download's folder,
-    /// so a stopped download never deletes the next one's file.
-    started: Cell<u32>,
-    /// Wakes the window while it is open, because a download's thread is
-    /// not joined.
+    work: FixWork,
+    folder: PathBuf,
+    events: SyncSender<Event>,
     waker: OpenWaker,
 }
 
-impl FixThread {
-    pub(super) fn new(waker: OpenWaker) -> FixThread {
-        FixThread {
-            run: RefCell::new(None),
-            stopped: RefCell::new(Vec::new()),
-            started: Cell::new(0),
-            waker,
-        }
-    }
+struct Event(Option<FixEvent>);
 
-    /// Runs `work`: a repair's commands in one `cmd /c`, so Windows asks
-    /// for permission once; the search for the latest setup; or the
-    /// download of the setup the person accepted. The model starts work
-    /// only when no thread does any, so an earlier run has ended, waits for
-    /// the service or was cancelled, and its thread stops at its next
-    /// check.
-    pub(super) fn start(&self, owner: PromptOwner, work: FixWork) {
-        let mut stopped = self.stopped.borrow_mut();
-        if let Some(earlier) = self.run.take() {
-            earlier.stop.store(true, Ordering::Relaxed);
-            stopped.extend(earlier.commands);
-        }
-        stopped.retain(|thread| !thread.is_finished());
-        self.started.set(self.started.get() + 1);
-        let folder = std::env::temp_dir().join("Gozler").join(format!(
-            "{}-{}",
-            std::process::id(),
-            self.started.get()
-        ));
-        let stop = Arc::new(AtomicBool::new(false));
-        let (sender, events) = channel();
-        let runs_commands = matches!(work, FixWork::Commands(_));
-        let thread = {
-            let (stop, waker) = (Arc::clone(&stop), self.waker.clone());
-            std::thread::spawn(move || {
-                // The send fails once a new run has replaced this one, which
-                // is how its late events are dropped.
-                let report = |event: FixEvent| waker.deliver(|| sender.send(event).is_ok());
-                let commands = |event| report(FixEvent::Commands(event));
-                let setup = |event| report(FixEvent::Setup(event));
-                match work {
-                    FixWork::Commands(lines) => run_commands(owner, &lines, &stop, &commands),
-                    FixWork::FindSetup => find(&stop, &setup),
-                    FixWork::Download(found) => download(&found, &folder, &stop, &setup),
-                }
-            })
-        };
-        self.run.replace(Some(Run {
-            stop,
-            commands: runs_commands.then_some(thread),
-            events,
-        }));
-    }
-
-    /// Stops the fix's thread at its next check.
-    pub(super) fn stop(&self) {
-        if let Some(run) = &*self.run.borrow() {
-            run.stop.store(true, Ordering::Relaxed);
-        }
-    }
-
-    /// Every event of the latest run that has arrived, without waiting.
-    pub(super) fn drain(&self) -> Vec<FixEvent> {
-        self.run
-            .borrow()
-            .as_ref()
-            .map(|run| run.events.try_iter().collect())
-            .unwrap_or_default()
-    }
-
-    /// Stops every thread and joins the command runs, after the window
-    /// closed its [`OpenWaker`], so none wakes the window after it is gone
-    /// (DESIGN.md: window rule 5). A command run that waits for the
-    /// permission prompt ends once the person answers it. A download is
-    /// not joined; the process ends with it.
-    pub(super) fn shut_down(&self) {
-        let stopped = self.stopped.take();
-        let latest = self.run.take().and_then(|run| {
-            run.stop.store(true, Ordering::Relaxed);
-            run.commands
-        });
-        for thread in stopped.into_iter().chain(latest) {
-            let _ = thread.join();
+impl Drop for Event {
+    fn drop(&mut self) {
+        if let Some(FixEvent::Setup(SetupEvent::Ready(path))) = &self.0 {
+            let _ = std::fs::remove_file(path);
+            if let Some(folder) = path.parent() {
+                let _ = std::fs::remove_dir(folder);
+            }
         }
     }
 }
 
-/// Runs `commands` as administrator, each writing what it says to a file
-/// in the person's `%TEMP%`, which the window reads when they fail: their
-/// output is hidden, and `net start` ends with 2 for any failure, so only
-/// their words give Windows' reason. The file is deleted afterwards, and
-/// so are the files of earlier fixes, which commands that still ran when
-/// their window closed may have written after it deleted them.
-fn run_commands(
-    owner: PromptOwner,
-    commands: &[String],
-    stop: &AtomicBool,
-    report: &dyn Fn(CommandEvent),
-) {
-    win::shell::initialize_com();
-    let temp = std::env::temp_dir();
-    for entry in std::fs::read_dir(&temp).into_iter().flatten().flatten() {
-        let name = entry.file_name();
-        let name = name.to_string_lossy();
-        if name.starts_with(SAID_PREFIX) && name.ends_with(".txt") {
-            let _ = std::fs::remove_file(entry.path());
+pub(in crate::app) struct Fixes {
+    task: Option<Task<Run, ()>>,
+    events: Option<Receiver<Event>>,
+    started: u64,
+    waker: OpenWaker,
+    commands: bool,
+    retired: Retirement,
+}
+
+impl Fixes {
+    pub(super) fn new(waker: OpenWaker) -> Self {
+        Self {
+            task: Some(Task::shell(waker.clone(), Replacement::Cancel, run)),
+            events: None,
+            started: 0,
+            waker,
+            commands: false,
+            retired: Retirement::default(),
         }
     }
-    let said = temp.join(format!("{SAID_PREFIX}{}.txt", std::process::id()));
+
+    pub(in crate::app) fn start(&mut self, work: FixWork) {
+        let Some(task) = &mut self.task else { return };
+        self.started = self
+            .started
+            .checked_add(1)
+            .expect("fix run ids cannot wrap");
+        let (sender, events) = sync_channel(EVENTS);
+        if let Some(earlier) = self.events.replace(events) {
+            self.retired.push(earlier, INLINE_ITEMS + 1);
+        }
+        self.commands = matches!(work, FixWork::Commands(_));
+        task.replace(Run {
+            work,
+            folder: std::env::temp_dir().join("Gozler").join(format!(
+                "fix-{}-{}",
+                std::process::id(),
+                self.started
+            )),
+            events: sender,
+            waker: self.waker.clone(),
+        });
+    }
+
+    pub(in crate::app) fn stop(&mut self) {
+        if let Some(events) = self.events.take() {
+            self.retired.push(events, INLINE_ITEMS + 1);
+        }
+        if let Some(task) = &mut self.task {
+            task.cancel();
+        }
+    }
+
+    pub(in crate::app) fn drain(&mut self) -> Vec<FixEvent> {
+        let mut events = self
+            .events
+            .as_ref()
+            .map(|events| {
+                events
+                    .try_iter()
+                    .take(EVENTS)
+                    .filter_map(|mut event| event.0.take())
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        if let Some(task) = &mut self.task
+            && task.take().is_some()
+            && let Some(remaining) = self.events.take()
+        {
+            events.extend(
+                remaining
+                    .try_iter()
+                    .take(EVENTS)
+                    .filter_map(|mut event| event.0.take()),
+            );
+        }
+        events
+    }
+
+    pub(super) fn tick(&mut self, now: Instant) -> bool {
+        self.task
+            .as_mut()
+            .is_some_and(|task| task.tick(now).is_some())
+    }
+
+    pub(in crate::app) fn take_retired(&mut self) -> Retirement {
+        let mut retired = std::mem::take(&mut self.retired);
+        if let Some(task) = &mut self.task {
+            retired.append(task.take_retired());
+        }
+        retired
+    }
+
+    pub(super) fn close(&mut self) -> impl FnOnce(&OffThread) + Send + 'static {
+        let events = self.events.take();
+        let task = self.task.take();
+        let commands = self.commands;
+        let retired = self.take_retired();
+        move |worker| {
+            // Disconnect before waiting, including a sender blocked on a step.
+            drop(events);
+            drop(retired);
+            if let Some(mut task) = task {
+                if commands {
+                    // A command can be pending behind a cancelled download.
+                    task.finish(worker);
+                } else {
+                    task.cancel();
+                    task.finish_current(worker);
+                }
+            }
+        }
+    }
+}
+
+fn run(input: Run, session: &win::shell::Session, _worker: &OffThread, cancel: &CancelToken) {
+    let report = |event| {
+        let progress = matches!(&event, FixEvent::Setup(SetupEvent::Downloaded(_)));
+        let event = Event(Some(event));
+        let sent = if progress {
+            input.events.try_send(event).is_ok()
+        } else {
+            input.events.send(event).is_ok()
+        };
+        if sent {
+            input.waker.deliver(|| true);
+        }
+        sent
+    };
+    match input.work {
+        FixWork::Commands(lines) => {
+            run_commands(session, &lines, &input.folder, cancel, &|event| {
+                report(FixEvent::Commands(event))
+            })
+        }
+        FixWork::FindSetup => find(cancel, &|event| {
+            report(FixEvent::Setup(event));
+        }),
+        FixWork::Download(found) => download(&found, &input.folder, cancel, &|event| {
+            report(FixEvent::Setup(event));
+        }),
+    }
+}
+
+/// Hidden commands write Windows' reason to their private output file;
+/// `net start` gives the same exit code for unrelated failures.
+fn run_commands(
+    session: &win::shell::Session,
+    commands: &[String],
+    folder: &Path,
+    stop: &CancelToken,
+    report: &dyn Fn(CommandEvent) -> bool,
+) {
+    if let Err(error) = std::fs::create_dir_all(folder) {
+        report(failed(&error));
+        return;
+    }
+    let said = folder.join("commands.txt");
     let parameters = commands
         .iter()
         .map(|command| format!("{command} >>\"{}\" 2>&1", said.display()))
         .collect::<Vec<_>>()
         .join(" && ");
-    run_watched(owner, &format!("/c {parameters}"), &said, stop, report);
+    run_watched(session, &format!("/c {parameters}"), &said, stop, report);
     let _ = std::fs::remove_file(&said);
+    let _ = std::fs::remove_dir(folder);
 }
 
 /// The end of a commands fix that Windows could not run or watch.
@@ -185,13 +212,13 @@ fn failed(error: &io::Error) -> CommandEvent {
 }
 
 fn run_watched(
-    owner: PromptOwner,
+    session: &win::shell::Session,
     parameters: &str,
     said: &Path,
-    stop: &AtomicBool,
-    report: &dyn Fn(CommandEvent),
-) {
-    let process = match win::shell::start_as_administrator(owner, "cmd.exe", parameters) {
+    stop: &CancelToken,
+    report: &dyn Fn(CommandEvent) -> bool,
+) -> bool {
+    let process = match session.start_as_administrator("cmd.exe", parameters) {
         Ok(process) => process,
         Err(error) if win::shell::refused(&error) => {
             return report(CommandEvent::End(CommandResult::Refused));
@@ -201,9 +228,7 @@ fn run_watched(
     report(CommandEvent::Allowed);
     let wait_ms = POLL.as_millis() as u32;
     let code = loop {
-        if stop.load(Ordering::Relaxed) {
-            return;
-        }
+        // Once admitted, the commands finish before their output is deleted.
         match process.wait(wait_ms) {
             Ok(Some(code)) => break code,
             Ok(None) => {}
@@ -219,15 +244,17 @@ fn run_watched(
             said,
         }));
     }
-    report(CommandEvent::Succeeded);
+    if !report(CommandEvent::Succeeded) {
+        return false;
+    }
     let started = Instant::now();
     while started.elapsed() < SERVICE_WAIT {
-        if stop.load(Ordering::Relaxed) {
-            return;
+        if stop.is_cancelled() {
+            return false;
         }
         std::thread::sleep(POLL);
     }
-    report(CommandEvent::End(CommandResult::NoAnswer));
+    report(CommandEvent::End(CommandResult::NoAnswer))
 }
 
 /// The last line of the commands' output that says something: Windows'
@@ -252,9 +279,9 @@ fn last_words(output: &[u8]) -> Option<String> {
 
 /// Asks GitHub for the latest release's setup. A stopped search reports
 /// nothing, because the model has ended the fix.
-fn find(stop: &AtomicBool, report: &dyn Fn(SetupEvent)) {
+fn find(stop: &CancelToken, report: &dyn Fn(SetupEvent)) {
     let reply = win::update::latest_release();
-    if stop.load(Ordering::Relaxed) {
+    if stop.is_cancelled() {
         return;
     }
     let Some(reply) = reply else {
@@ -271,7 +298,7 @@ fn find(stop: &AtomicBool, report: &dyn Fn(SetupEvent)) {
 /// Downloads `setup` to `folder`, which is this run's own, and checks it.
 /// A stopped download deletes its file and reports nothing, because the
 /// model has ended the fix.
-fn download(setup: &Setup, folder: &Path, stop: &AtomicBool, report: &dyn Fn(SetupEvent)) {
+fn download(setup: &Setup, folder: &Path, stop: &CancelToken, report: &dyn Fn(SetupEvent)) {
     let path = folder.join(&setup.name);
     let discard = || {
         let _ = std::fs::remove_file(&path);
@@ -283,7 +310,7 @@ fn download(setup: &Setup, folder: &Path, stop: &AtomicBool, report: &dyn Fn(Set
         why: win::error_text(&error),
     };
     let saved = save(setup, folder, &path, stop, report);
-    if stop.load(Ordering::Relaxed) {
+    if stop.is_cancelled() {
         return discard();
     }
     match saved {
@@ -310,6 +337,9 @@ fn download(setup: &Setup, folder: &Path, stop: &AtomicBool, report: &dyn Fn(Set
             return end(not_saved(error));
         }
     }
+    if stop.is_cancelled() {
+        return discard();
+    }
     report(SetupEvent::Ready(path));
 }
 
@@ -320,7 +350,7 @@ fn save(
     setup: &Setup,
     folder: &Path,
     path: &Path,
-    stop: &AtomicBool,
+    stop: &CancelToken,
     report: &dyn Fn(SetupEvent),
 ) -> io::Result<bool> {
     std::fs::create_dir_all(folder)?;
@@ -334,7 +364,7 @@ fn save(
             reported = Instant::now();
             report(SetupEvent::Downloaded(written));
         }
-        if written > setup.size || stop.load(Ordering::Relaxed) {
+        if written > setup.size || stop.is_cancelled() {
             return false;
         }
         match file.write_all(piece) {
@@ -366,6 +396,34 @@ fn check(path: &Path, expected: &[u8; 32]) -> io::Result<bool> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_cancelled_ready_setup_is_removed_only_by_retirement() {
+        let folder =
+            std::env::temp_dir().join(format!("gozler-retired-setup-{}", std::process::id()));
+        std::fs::create_dir_all(&folder).expect("a temporary folder");
+        let path = folder.join("setup.exe");
+        std::fs::write(&path, "checked setup").expect("a setup file");
+        let mut fixes = Fixes::new(OpenWaker::closed());
+        let (sender, events) = sync_channel(EVENTS);
+        sender
+            .send(Event(Some(FixEvent::Setup(SetupEvent::Ready(
+                path.clone(),
+            )))))
+            .unwrap_or_else(|_| panic!("the event receiver remains open"));
+        fixes.events = Some(events);
+        fixes.stop();
+        assert!(
+            path.exists(),
+            "Cancel does no filesystem work on its caller"
+        );
+        let retired = fixes.take_retired();
+        win::work::spawn(move |_| drop(retired))
+            .join()
+            .expect("retirement ends");
+        assert!(!path.exists(), "a discarded setup must not remain runnable");
+        assert!(!folder.exists());
+    }
 
     /// `net` ends a failure with a pointer to its help, which would replace
     /// Windows' reason in the status bar.

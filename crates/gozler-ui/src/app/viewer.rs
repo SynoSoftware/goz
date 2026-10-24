@@ -1,9 +1,10 @@
 //! The Viewer windows (DESIGN.md: The Viewer): each `F3` on a file in a panel
 //! opens one, a top-level window that no window owns. `core::viewer_window`
 //! decides what a Viewer shows; this module gives it the blocks that the
-//! reading thread of `win::viewer` reads, and asks for the next block that the
+//! reader of [`super::work::viewers`] admits, and asks for the next block that the
 //! page or a move waits for, one at a time.
 
+use super::work::viewers::Reader;
 use crate::core::captions::ButtonIcon;
 use crate::core::ids::{ControlId, IconId};
 use crate::core::layout::{
@@ -23,8 +24,8 @@ use crate::win::locale::{WindowsNumbers, ansi_text};
 use crate::win::menu::{Menu, replace_menu_bar};
 use crate::win::notify::Command;
 use crate::win::viewer::{
-    AREA_PAINT, AreaText, FileReader, ViewerEvent, caption_height, create_area, paint_area,
-    register_area, set_area_scroll,
+    AREA_PAINT, AreaText, ViewerEvent, caption_height, create_area, paint_area, register_area,
+    set_area_scroll,
 };
 use crate::win::wake::OpenWaker;
 use crate::win::window::{self, DEFERRED, Message, WindowProc};
@@ -205,8 +206,7 @@ struct Viewer {
     controls: OnceCell<Controls>,
     fonts: RefCell<Option<Fonts>>,
     shown: RefCell<Shown>,
-    /// The reading of the file; `None` after the drive was removed.
-    reader: RefCell<Option<FileReader>>,
+    reader: RefCell<Option<Reader>>,
     /// Wakes the window from the reading thread, which outlives it, until
     /// `WM_DESTROY` closes it.
     waker: OnceCell<OpenWaker>,
@@ -241,19 +241,24 @@ impl Viewer {
         self.apply_fonts(hwnd);
         self.apply_strings(hwnd);
         let _ = self.waker.set(OpenWaker::new(hwnd));
+        self.reader.replace(Some(Reader::new(
+            self.waker
+                .get()
+                .expect("start sets the wake endpoint")
+                .clone(),
+        )));
         self.read_file(hwnd);
         Ok(())
     }
 
     /// Opens the file again from its start, or from `resume`.
     fn read_file(&self, hwnd: Hwnd) {
-        let Some(waker) = self.waker.get() else {
+        if let Some(reader) = self.reader.borrow_mut().as_mut() {
+            reader.open(self.path.clone());
+        } else {
             return;
-        };
+        }
         self.in_flight.set(None);
-        // The reading it replaces ends, and closes its file on its own.
-        self.reader
-            .replace(Some(FileReader::open(&self.path, hwnd, waker.clone())));
         self.set_shown(hwnd, Shown::Reading);
     }
 
@@ -411,7 +416,7 @@ impl Viewer {
             .and_then(|document| document.advance(&ansi_text));
         if let Some(index) = waits
             && self.in_flight.get().is_none()
-            && let Some(reader) = self.reader.borrow().as_ref()
+            && let Some(reader) = self.reader.borrow_mut().as_mut()
         {
             reader.read(index);
             self.in_flight.set(Some(index));
@@ -465,13 +470,16 @@ impl Viewer {
 
     /// Applies what the reading thread found.
     fn read_events(&self, hwnd: Hwnd) {
-        let events = self
+        let registration = self
             .reader
             .borrow()
             .as_ref()
-            .map(FileReader::drain)
-            .unwrap_or_default();
-        for event in events {
+            .and_then(Reader::take_registration);
+        if let Some(request) = registration {
+            super::work::viewers::register(request, hwnd);
+        }
+        let event = self.reader.borrow_mut().as_mut().and_then(Reader::take);
+        if let Some(event) = event {
             match event {
                 ViewerEvent::Opened { len, first } => {
                     let mut document = Document::new(len, first, self.wrap.get());
@@ -489,7 +497,6 @@ impl Viewer {
                 }
                 ViewerEvent::Failed { opened, reason } => {
                     self.remember_place();
-                    self.reader.replace(None);
                     self.set_shown(hwnd, Shown::Failed { opened, reason });
                 }
             }
@@ -511,7 +518,7 @@ impl Viewer {
             Removal::Query => {
                 self.remember_place();
                 if let Some(reader) = self.reader.borrow_mut().as_mut() {
-                    reader.release();
+                    reader.release(true);
                 }
                 self.set_shown(hwnd, Shown::Removed);
             }
@@ -520,7 +527,9 @@ impl Viewer {
             // A drive pulled out without asking sends only this.
             Removal::Complete => {
                 self.remember_place();
-                self.reader.replace(None);
+                if let Some(reader) = self.reader.borrow_mut().as_mut() {
+                    reader.release(false);
+                }
                 self.set_shown(hwnd, Shown::Removed);
             }
         }

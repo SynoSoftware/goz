@@ -1,7 +1,7 @@
 //! The requests the model asks for and the replies it accepts, in the core's
 //! terms, so the model's handling of replies and failures is tested without
-//! a daemon (DESIGN.md: Requests). `app::requests` runs each
-//! [`Fetch`] on its own thread and answers with a [`Fetched`].
+//! a daemon (DESIGN.md: Requests). `app::work::requests` runs bounded
+//! purposes and answers each [`Fetch`] with a [`Fetched`].
 
 use super::panel::Side;
 use gozler_client::NotRunning;
@@ -407,7 +407,7 @@ pub(crate) struct Chunk {
 }
 
 /// The failures the window shows differently (DESIGN.md: Daemon failures);
-/// `app::requests` maps the client's error to them. A pipe that cannot be
+/// `app::work::requests` maps the client's error to them. A pipe that cannot be
 /// opened or read shows as [`DaemonFailure::Lost`], because both mean the
 /// pipe failed after the service was found.
 #[derive(Clone, Debug, PartialEq, Eq)]

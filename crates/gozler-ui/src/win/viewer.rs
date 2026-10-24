@@ -1,25 +1,11 @@
-//! The Viewer's Win32 parts (DESIGN.md: The Viewer): the area that shows the
-//! file's rows, and the thread that reads the file. The thread reads the blocks
-//! the window asks for, one at a time, and the window never joins or waits for
-//! it, because a network share that stopped answering can hold a read for a
-//! minute: closing the Viewer ends the thread with its stop signal and
-//! `CancelSynchronousIo`, as a panel's reading is ended ([`super::folder`]),
-//! and the thread wakes the window only while the window is open.
-//!
-//! The file's handle is registered for the removal of its drive, so Windows
-//! asks before Safely Remove takes the drive, and the window then closes
-//! the handle at once ([`FileReader::release`]).
+//! The Viewer's native area. Its reader in [`work`] owns the file and its
+//! notification lifetime, handing registration to the receiving window thread.
 
 use super::Hwnd;
-use super::folder::{Stop, reason, register, unregister, verbatim_wide};
 use super::gdi::{Font, muted_text, system_color};
-use super::wake::OpenWaker;
 use super::window::offer_key;
 use crate::core::layout::{Dpi, Px};
-use crate::core::viewer_window::{BLOCK_BYTES, ScrollBar};
-use gozler_winfs::{Access, Entry, Reparse, WinError, open_entry};
-use std::sync::mpsc::{Receiver, Sender, channel};
-use std::sync::{Arc, Mutex, PoisonError};
+use crate::core::viewer_window::ScrollBar;
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::{
     BeginPaint, COLOR_WINDOW, COLOR_WINDOWTEXT, ETO_CLIPPED, ETO_OPAQUE, EndPaint, ExtTextOutW,
@@ -38,6 +24,8 @@ use windows::Win32::UI::WindowsAndMessaging::{
     WS_TABSTOP, WS_VISIBLE, WS_VSCROLL,
 };
 use windows::core::{PCWSTR, w};
+
+pub(crate) mod work;
 
 const AREA_CLASS: PCWSTR = w!("gozler.ui.viewer_area");
 
@@ -248,233 +236,6 @@ pub(crate) enum ViewerEvent {
     Opened { len: u64, first: Vec<u8> },
     /// The block `index`, fewer bytes than asked when the file shrank.
     Block { index: u64, bytes: Vec<u8> },
-    /// Windows could not open the file, or, when `opened`, read it; the
-    /// thread has ended.
+    /// Windows could not open the file, or, when `opened`, read it.
     Failed { opened: bool, reason: String },
-}
-
-/// What the window and the reading thread share: the open file, and its
-/// registration for the drive's removal.
-#[derive(Default)]
-struct Held {
-    file: Option<Arc<Entry>>,
-    notification: Option<isize>,
-}
-
-/// One opening of a file, and the thread that reads it.
-pub(crate) struct FileReader {
-    stop: Arc<Stop>,
-    held: Arc<Mutex<Held>>,
-    /// The blocks the window asks for; `None` once released, which ends
-    /// the thread's wait for the next.
-    requests: Option<Sender<u64>>,
-    events: Receiver<ViewerEvent>,
-}
-
-impl FileReader {
-    /// Opens the file at `path` on a thread of its own, which then reads
-    /// the blocks that [`FileReader::read`] asks for, and wakes `window`
-    /// with what it found.
-    pub(crate) fn open(path: &[u16], window: Hwnd, waker: OpenWaker) -> FileReader {
-        let stop = Arc::new(Stop::new());
-        let held = Arc::new(Mutex::new(Held::default()));
-        let (requests, asked) = channel::<u64>();
-        let (sender, events) = channel();
-        let path = verbatim_wide(path);
-        let window = window.0.0 as isize;
-        let reader = FileReader {
-            stop: Arc::clone(&stop),
-            held: Arc::clone(&held),
-            requests: Some(requests),
-            events,
-        };
-        std::thread::spawn(move || {
-            if stop.enter() {
-                return;
-            }
-            let deliver = |event: ViewerEvent| {
-                waker.deliver(|| !stop.stopped() && sender.send(event).is_ok());
-            };
-            let failed = |opened: bool, error: &WinError| {
-                deliver(ViewerEvent::Failed {
-                    opened,
-                    reason: reason(error),
-                });
-            };
-            let opened = open_entry(&path, Access::Read, Reparse::Follow)
-                .and_then(|file| file.stat().map(|stat| (stat.size, file)));
-            let (len, file) = match opened {
-                Ok((len, file)) => (len, Arc::new(file)),
-                Err(error) => return failed(false, &error),
-            };
-            {
-                let mut held = held.lock().unwrap_or_else(PoisonError::into_inner);
-                if stop.stopped() {
-                    return;
-                }
-                held.file = Some(Arc::clone(&file));
-            }
-            // Outside the lock, because Windows may hold the registration
-            // while it asks the window about a removal, and the window takes
-            // the lock to answer.
-            let notification = register(window, file.handle_value());
-            {
-                let mut held = held.lock().unwrap_or_else(PoisonError::into_inner);
-                if stop.stopped() {
-                    // The window ended the reading meanwhile and found no
-                    // registration to end.
-                    unregister(notification);
-                    return;
-                }
-                held.notification = notification;
-            }
-            // Only the window's copy stays open between reads, so a release
-            // closes the file at once.
-            drop(file);
-            // The block the window asked for; `None` for the opening's read
-            // of block 0, the only read that is `Opened`. A later read of
-            // block 0, after the window dropped it, is a `Block`, because
-            // `Opened` starts the page anew.
-            let mut asked_for = None;
-            loop {
-                let file = held
-                    .lock()
-                    .unwrap_or_else(PoisonError::into_inner)
-                    .file
-                    .clone();
-                let Some(file) = file else {
-                    return;
-                };
-                let bytes = match read_block(&file, asked_for.unwrap_or(0), len) {
-                    Ok(bytes) => bytes,
-                    Err(error) => return failed(true, &error),
-                };
-                drop(file);
-                deliver(match asked_for {
-                    None => ViewerEvent::Opened { len, first: bytes },
-                    Some(index) => ViewerEvent::Block { index, bytes },
-                });
-                let Some(index) = asked.recv().ok().filter(|_| !stop.stopped()) else {
-                    return;
-                };
-                asked_for = Some(index);
-            }
-        });
-        reader
-    }
-
-    /// Asks the thread for the block `index`.
-    pub(crate) fn read(&self, index: u64) {
-        if let Some(requests) = &self.requests {
-            let _ = requests.send(index);
-        }
-    }
-
-    /// Everything the thread found, without waiting; nothing after a
-    /// [`release`](Self::release), whose page a page found before it would
-    /// replace.
-    pub(crate) fn drain(&self) -> Vec<ViewerEvent> {
-        if self.stop.stopped() {
-            return Vec::new();
-        }
-        self.events.try_iter().collect()
-    }
-
-    /// Whether Windows names this reading's file with the registration
-    /// `notification`.
-    pub(crate) fn is_registration(&self, notification: isize) -> bool {
-        self.held
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .notification
-            == Some(notification)
-    }
-
-    /// Closes the file at once, for a removal of its drive that Windows
-    /// asks about, and ends the thread; a read that runs is cancelled, and
-    /// its copy of the file closes as the read ends. The registration stays,
-    /// so the window hears whether the drive went.
-    pub(crate) fn release(&mut self) {
-        self.stop.stop();
-        self.requests = None;
-        let file = self
-            .held
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .file
-            .take();
-        drop(file);
-    }
-}
-
-impl Drop for FileReader {
-    /// Ends the thread and the registration. The file closes on a thread
-    /// of its own, because closing a file on a network share that stopped
-    /// answering waits for the share.
-    fn drop(&mut self) {
-        self.stop.stop();
-        let (file, notification) = {
-            let mut held = self.held.lock().unwrap_or_else(PoisonError::into_inner);
-            (held.file.take(), held.notification.take())
-        };
-        unregister(notification);
-        if let Some(file) = file {
-            std::thread::spawn(move || drop(file));
-        }
-    }
-}
-
-/// The block `index` of a file of `len` bytes: [`BLOCK_BYTES`] bytes, the
-/// last block fewer, and fewer still when the file shrank since it opened.
-fn read_block(file: &Entry, index: u64, len: u64) -> Result<Vec<u8>, WinError> {
-    let start = index.saturating_mul(BLOCK_BYTES as u64);
-    let want = len.saturating_sub(start).min(BLOCK_BYTES as u64) as usize;
-    let mut bytes = vec![0; want];
-    let mut filled = 0;
-    while filled < want {
-        match file.read_at(start + filled as u64, &mut bytes[filled..])? {
-            0 => break,
-            read => filled += read,
-        }
-    }
-    bytes.truncate(filled);
-    Ok(bytes)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::time::Duration;
-    use windows::Win32::Foundation::HWND;
-
-    /// `Opened` starts the page anew, so a second read of block 0, after
-    /// the page dropped it, must come back as a `Block`: as `Opened` it
-    /// lost the page's place and left the block awaited for ever.
-    #[test]
-    fn only_the_opening_reads_block_0_as_opened() {
-        let path = std::env::temp_dir().join(format!("gozler-viewer-{}.bin", std::process::id()));
-        std::fs::write(&path, vec![b'a'; BLOCK_BYTES + 1]).expect("the temp folder is writable");
-        let wide: Vec<u16> = path
-            .to_str()
-            .expect("the temp path is Unicode")
-            .encode_utf16()
-            .collect();
-        // No window: the registration for the drive's removal fails, and
-        // the wake goes to the reading thread's own queue.
-        let window = Hwnd(HWND::default());
-        let reader = FileReader::open(&wide, window, OpenWaker::new(window));
-        let next = || {
-            reader
-                .events
-                .recv_timeout(Duration::from_secs(10))
-                .expect("the thread answers each read")
-        };
-        assert!(matches!(next(), ViewerEvent::Opened { len, .. } if len == BLOCK_BYTES as u64 + 1));
-        for index in [1, 0] {
-            reader.read(index);
-            assert!(matches!(next(), ViewerEvent::Block { index: got, .. } if got == index));
-        }
-        drop(reader);
-        let _ = std::fs::remove_file(&path);
-    }
 }

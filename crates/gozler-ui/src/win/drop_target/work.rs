@@ -105,7 +105,12 @@ impl Setup {
             }
         }
         if operation.is_none() && self.effect == DropEffect::Move {
-            clipboard::set_effect(&data, clipboard::performed_drop_effect(), DROPEFFECT_NONE.0);
+            clipboard::set_effect(
+                &data,
+                clipboard::performed_drop_effect(),
+                DROPEFFECT_NONE.0,
+                _worker,
+            );
         }
         let asynchronous = operation.is_some();
         drop(data);
@@ -125,7 +130,7 @@ pub(super) fn read(data: DropData, _worker: &OffThread) -> Vec<PathBuf> {
                 return Vec::new();
             };
             data.resolve()
-                .map(|data| clipboard::files_of(&data))
+                .map(|data| clipboard::files_of(&data, _worker))
                 .unwrap_or_default()
         }
     }
@@ -180,7 +185,12 @@ impl Completion {
             return;
         };
         if let Some(Ok(data)) = self.data.as_ref().map(AgileReference::resolve) {
-            clipboard::set_effect(&data, clipboard::performed_drop_effect(), self.performed.0);
+            clipboard::set_effect(
+                &data,
+                clipboard::performed_drop_effect(),
+                self.performed.0,
+                _worker,
+            );
         }
         if let Ok(operation) = self.operation.resolve() {
             // SAFETY: the resolved capability belongs to this apartment.

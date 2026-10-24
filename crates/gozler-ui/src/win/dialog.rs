@@ -33,8 +33,8 @@ use windows::Win32::UI::WindowsAndMessaging::{
     DialogBoxParamW, EN_CHANGE, EN_KILLFOCUS, EN_SETFOCUS, EndDialog, EnumChildWindows, GWL_STYLE,
     GetClassNameW, GetDlgCtrlID, GetDlgItem, GetParent, GetWindowLongPtrW, IDCANCEL, IDOK,
     MB_ICONERROR, MB_OK, MINMAXINFO, MapDialogRect, MessageBoxW, SendMessageW, SetWindowLongPtrW,
-    WINDOW_LONG_PTR_INDEX, WM_COMMAND, WM_GETMINMAXINFO, WM_INITDIALOG, WM_NOTIFY, WM_SIZE,
-    WM_TIMER,
+    WINDOW_LONG_PTR_INDEX, WM_COMMAND, WM_DESTROY, WM_GETMINMAXINFO, WM_INITDIALOG, WM_NOTIFY,
+    WM_SIZE, WM_TIMER,
 };
 use windows::core::{BOOL, HSTRING, PCWSTR};
 
@@ -70,6 +70,7 @@ pub(crate) enum DialogMessage {
     /// A [`super::shortcut::Capture`] caught keys that a shortcut can be:
     /// the others besides the Windows key, if it was held.
     KeysCaptured {
+        capture: usize,
         windows: bool,
         keystroke: Keystroke,
     },
@@ -126,6 +127,9 @@ pub(crate) trait DialogProc {
         None
     }
     fn resized(&self, _dialog: Hwnd) {}
+    /// Releases delivery endpoints during WM_DESTROY, before HWND reuse is
+    /// possible; a modal state can outlive its native dialog.
+    fn closed(&self, _dialog: Hwnd) {}
     fn minimum_size(&self) -> Option<Size> {
         None
     }
@@ -338,6 +342,10 @@ unsafe extern "system" fn procedure<D: DialogProc>(
             }
         }
         WM_TIMER => DialogMessage::Timer { id: wparam.0 },
+        WM_DESTROY => {
+            running.state.closed(dialog);
+            return 0;
+        }
         WM_SIZE => {
             running.state.resized(dialog);
             return 0;
@@ -354,7 +362,11 @@ unsafe extern "system" fn procedure<D: DialogProc>(
         }
         REPLY => DialogMessage::Reply,
         super::shortcut::CAPTURED => match super::shortcut::captured(wparam, lparam) {
-            Some((windows, keystroke)) => DialogMessage::KeysCaptured { windows, keystroke },
+            Some((capture, windows, keystroke)) => DialogMessage::KeysCaptured {
+                capture,
+                windows,
+                keystroke,
+            },
             None => DialogMessage::Other,
         },
         _ => DialogMessage::Other,

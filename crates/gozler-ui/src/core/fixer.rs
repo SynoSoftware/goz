@@ -2,7 +2,7 @@
 //! how it ended. A fix either runs commands as administrator and waits for
 //! the service, or downloads the latest release's setup and runs it; each
 //! kind has its own steps, events and results, so a step of one never pairs
-//! with the other. `app::fix_thread` runs the fix on its own thread and
+//! with the other. `app::work::fixes` runs the fix through the work owner and
 //! reports each [`FixEvent`]; the model holds the one [`Fixer`], so the
 //! list's fix button, the Index page's and the status bar that owns its
 //! feedback follow that fix.
@@ -67,7 +67,7 @@ pub(crate) enum CommandStep {
     AskingWindows,
     RunningCommands,
     /// The commands ended well, and the status poll asks the service until
-    /// it answers or `app::fix_thread`'s wait ends.
+    /// it answers or `app::work::fixes`' wait ends.
     WaitingForService,
 }
 

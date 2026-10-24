@@ -1,6 +1,6 @@
 //! Two panels' controls and handlers (DESIGN.md: Two panels). `core::panel`
 //! decides what each panel shows; these handlers read each list's [`Place`],
-//! start the disk threads of `win::folder`, and show what the model then says.
+//! submit folder work through the work owner, and show what the model says.
 //! The list owns the focus and the selection, as Search's list does (DESIGN.md:
 //! The selection).
 
@@ -661,7 +661,7 @@ impl MainWindow {
                 None => self.search(hwnd, List::Panel(side)),
             }
         }
-        self.created().panel_threads.read_labels();
+        self.created().work.borrow_mut().folders.read_labels();
     }
 
     /// Stops the panels' threads and requests, when Search shows, because
@@ -670,7 +670,7 @@ impl MainWindow {
     /// its kept operations, but keeps its text and Look in, because it
     /// searches again when Two panels shows.
     pub(super) fn stop_panels(&self, hwnd: Hwnd) {
-        self.created().panel_threads.stop_all();
+        self.created().work.borrow_mut().folders.stop_all();
         self.model.borrow_mut().panels_mut().stop_reading();
         for side in Side::BOTH {
             let dropped = {
@@ -693,7 +693,7 @@ impl MainWindow {
     /// watch: its folder sizes and their timers. The caller then releases
     /// the ended operations that its folder kept.
     fn end_folder_work(&self, hwnd: Hwnd, side: Side) {
-        self.created().requests.cancel(Purpose::FolderSizes(side));
+        self.cancel_request(Purpose::FolderSizes(side));
         hwnd.kill_timer(timer::PANEL_SETTLE[side.index()]);
         hwnd.kill_timer(timer::PANEL_AGAIN[side.index()]);
     }
@@ -702,9 +702,8 @@ impl MainWindow {
     /// selection's requests and their timers. The caller then releases the
     /// ended operations that its list kept.
     fn end_search_work(&self, hwnd: Hwnd, side: Side) {
-        let requests = &self.created().requests;
-        requests.cancel(Purpose::Results(List::Panel(side)));
-        requests.cancel(Purpose::Selection(List::Panel(side)));
+        self.cancel_request(Purpose::Results(List::Panel(side)));
+        self.cancel_request(Purpose::Selection(List::Panel(side)));
         hwnd.kill_timer(timer::PANEL_SEARCH[side.index()]);
         hwnd.kill_timer(timer::PANEL_SELECTION[side.index()]);
     }
@@ -718,7 +717,7 @@ impl MainWindow {
 
     pub(super) fn read(&self, side: Side, ask: Option<ReadAsk>) {
         if let Some(ask) = ask {
-            self.created().panel_threads.read(side, ask);
+            self.created().work.borrow_mut().folders.read(side, ask);
             self.retire_model();
             self.show_panel(side);
             // A new sort is saved state; the folder changes when the
@@ -731,10 +730,26 @@ impl MainWindow {
     /// apply as one batch for each panel, before any later event of that
     /// panel, so a burst of changes costs the window one pass.
     pub(super) fn on_panel_events(&self, hwnd: Hwnd) {
-        let threads = &self.created().panel_threads;
+        let events = self.created().work.borrow_mut().folders.drain();
         let mut pending: [Vec<FolderChange>; 2] = Default::default();
-        for event in threads.drain() {
+        for event in events {
             match event {
+                PanelEvent::Register {
+                    side,
+                    generation,
+                    request,
+                } => {
+                    let current = self
+                        .created()
+                        .work
+                        .borrow()
+                        .folders
+                        .is_reading(side, generation);
+                    if current {
+                        let retired = request.complete(hwnd);
+                        self.created().work.borrow_mut().retire(retired);
+                    }
+                }
                 PanelEvent::Read { side, event } => {
                     self.apply_panel_changes(
                         hwnd,
@@ -748,7 +763,13 @@ impl MainWindow {
                     reading,
                     changes,
                 } => {
-                    if threads.is_reading(side, reading) {
+                    if self
+                        .created()
+                        .work
+                        .borrow()
+                        .folders
+                        .is_reading(side, reading)
+                    {
                         pending[side.index()].extend(changes);
                     }
                 }
@@ -758,7 +779,13 @@ impl MainWindow {
                         side,
                         std::mem::take(&mut pending[side.index()]),
                     );
-                    if threads.is_reading(side, reading) {
+                    if self
+                        .created()
+                        .work
+                        .borrow()
+                        .folders
+                        .is_reading(side, reading)
+                    {
                         let ask = self.model.borrow_mut().panels_mut().read_again(side);
                         self.read(side, ask);
                     }
@@ -859,7 +886,11 @@ impl MainWindow {
         }
         if listed {
             let folder = self.model.borrow().panels().panel(side).folder().to_owned();
-            self.created().panel_threads.read_free(side, &folder);
+            self.created()
+                .work
+                .borrow_mut()
+                .folders
+                .read_free(side, &folder);
         }
         self.show_panel(side);
         self.update_status();
@@ -886,7 +917,7 @@ impl MainWindow {
             }
             ReadChange::Stale => return,
             ReadChange::Cleared => {
-                self.created().requests.cancel(Purpose::FolderSizes(side));
+                self.cancel_request(Purpose::FolderSizes(side));
                 self.show_place(side, &shown, &Place::default(), Scroll::ToFocus, false);
             }
             ReadChange::Listed {
@@ -987,7 +1018,7 @@ impl MainWindow {
         let fetch = self.model.borrow_mut().ask_sizes(side);
         match fetch {
             Some(fetch) => self.start(fetch),
-            None => self.created().requests.cancel(Purpose::FolderSizes(side)),
+            None => self.cancel_request(Purpose::FolderSizes(side)),
         }
     }
 
@@ -998,7 +1029,11 @@ impl MainWindow {
         self.ask_panel_sizes(side);
         let folder = self.model.borrow().panels().panel(side).folder().to_owned();
         if !folder.is_empty() {
-            self.created().panel_threads.read_free(side, &folder);
+            self.created()
+                .work
+                .borrow_mut()
+                .folders
+                .read_free(side, &folder);
         }
     }
 
@@ -1064,7 +1099,7 @@ impl MainWindow {
         let shown = self.place(side);
         let entered = self.model.borrow_mut().panels_mut().enter_search(side);
         if entered {
-            self.created().panel_threads.cancel_read(side);
+            self.created().work.borrow_mut().folders.cancel_read(side);
             self.end_folder_work(hwnd, side);
             self.release_operations();
             self.show_place(side, &shown, &Place::default(), Scroll::ToFocus, false);
@@ -1960,12 +1995,17 @@ impl MainWindow {
     /// Windows asks to remove, or removed, the drive whose watch it names
     /// with `notification` (DESIGN.md: A panel).
     pub(super) fn on_device_removal(&self, hwnd: Hwnd, removal: Removal, notification: isize) {
-        let threads = &self.created().panel_threads;
-        let Some(side) = threads.removal(notification, removal) else {
+        let side = self
+            .created()
+            .work
+            .borrow_mut()
+            .folders
+            .removal(notification, removal);
+        let Some(side) = side else {
             return;
         };
         match removal {
-            // The watch let its handle go.
+            // The worker was signalled; resource cleanup never holds this callback.
             Removal::Query => {}
             // Another program kept the drive, so the reading that the query
             // stopped starts again, or the panel follows its folder again.

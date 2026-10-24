@@ -111,6 +111,25 @@ owner has run it, and file an issue for each item that fails.
 - The tray icon: a click and `Enter` show the window; its menu holds Show
   window and Exit; it comes back after Explorer restarts; the first hide shows
   the notification once, and later hides show none.
+- With Explorer unresponsive, show or hide the window, change the tray setting
+  and Exit. The UI stays usable; tray cleanup does not delay settings writes.
+
+## Background work and Exit
+
+- Close during a search, an export, a folder read on an unresponsive share and
+  a copy. The UI closes immediately; at next start its place and the interrupted
+  operation are restored. Export cleanup may finish in the invisible process.
+- Close while an administrator prompt is open for Include, Rebuild or a service
+  fix. The UI closes immediately. Accepted changes finish if permission is given;
+  settings persistence proceeds independently of that prompt.
+- While Paste waits for another program, cancel it and navigate elsewhere.
+  Late clipboard data cannot start the cancelled transfer or change its target.
+- Open Indexed folders on a sleeping volume, close and reopen it, then expand
+  folders on another volume. The dialog stays usable, the independent volume
+  lists, and the earlier dialog's results never enter the new tree.
+- With Viewer open on a removable drive, attempt removal and then cancel it.
+  Viewer can reopen after failed removal; close during a pending read remains
+  immediate.
 
 ## DPI and contrast
 

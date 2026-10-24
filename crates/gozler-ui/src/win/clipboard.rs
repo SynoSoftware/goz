@@ -5,27 +5,14 @@
 use super::Hwnd;
 use crate::core::clipboard::{ClipboardData, ClipboardFormat, Publication};
 use gozler_client::CancelToken;
-use std::ffi::OsString;
-use std::mem::ManuallyDrop;
-use std::os::windows::ffi::OsStringExt;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU32, Ordering};
-use std::sync::mpsc::{Sender, channel};
 use windows::Win32::Foundation::{E_OUTOFMEMORY, GlobalFree, HANDLE, HGLOBAL};
-use windows::Win32::System::Com::{
-    DVASPECT_CONTENT, FORMATETC, IDataObject, STGMEDIUM, STGMEDIUM_0, TYMED_HGLOBAL,
-};
 use windows::Win32::System::DataExchange::{
     AddClipboardFormatListener, CloseClipboard, EmptyClipboard, GetClipboardSequenceNumber,
     IsClipboardFormatAvailable, OpenClipboard, RegisterClipboardFormatW, SetClipboardData,
 };
-use windows::Win32::System::Memory::{
-    GMEM_MOVEABLE, GlobalAlloc, GlobalLock, GlobalSize, GlobalUnlock,
-};
-use windows::Win32::System::Ole::{
-    OleGetClipboard, OleInitialize, OleUninitialize, ReleaseStgMedium,
-};
-use windows::Win32::UI::Shell::{DragQueryFileW, HDROP};
+use windows::Win32::System::Memory::{GMEM_MOVEABLE, GlobalAlloc, GlobalLock, GlobalUnlock};
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, HWND_MESSAGE, WINDOW_EX_STYLE, WINDOW_STYLE, WM_CLIPBOARDUPDATE,
 };
@@ -254,99 +241,29 @@ pub(crate) fn holds_files() -> bool {
     unsafe { IsClipboardFormatAvailable(CF_HDROP) }.is_ok()
 }
 
-/// Files that Paste read from the clipboard. The thread that read them
-/// keeps the clipboard's data object, which belongs to its thread, until
-/// this value drops, so a move can tell the files' source that it moved
-/// them.
+mod work;
+pub(crate) use work::{Completion, CompletionSender, Read};
+pub(super) use work::{files_of, set_effect};
+
+/// Files read for one Paste; its source stays alive until feedback or release.
 pub(crate) struct ClipboardFiles {
     pub(crate) paths: Vec<PathBuf>,
-    /// The files were cut, so Paste moves them.
     pub(crate) cut: bool,
-    /// Tells the reading thread that all cut files moved successfully.
-    moved: Sender<()>,
-}
-
-/// Reads the files on the clipboard on a thread of its own, because the
-/// program that holds the clipboard answers each call as slowly as it
-/// does, and gives `answer` the files and whether they were cut, or `None`
-/// when it holds none or cannot be read.
-pub(crate) fn read_files(answer: impl FnOnce(Option<ClipboardFiles>) + Send + 'static) {
-    // SAFETY: this captures the command's clipboard version without calling
-    // its owner, whose data object is acquired on the reader thread.
-    let sequence = unsafe { GetClipboardSequenceNumber() };
-    std::thread::spawn(move || {
-        // SAFETY: OLE starts for this thread alone, and ends after the
-        // data object is released.
-        if unsafe { OleInitialize(None) }.is_err() {
-            answer(None);
-            return;
-        }
-        // SAFETY: OLE is initialized on this thread; the data object is
-        // released before OLE ends, and each medium after it is read.
-        unsafe {
-            let data = if sequence != 0 && GetClipboardSequenceNumber() == sequence {
-                OleGetClipboard()
-                    .ok()
-                    .filter(|_| GetClipboardSequenceNumber() == sequence)
-            } else {
-                None
-            };
-            let paths = data.as_ref().map(files_of).unwrap_or_default();
-            let cut = match data
-                .as_ref()
-                .and_then(|data| read_format(data, preferred_drop_effect()))
-            {
-                Some(mut effect) => {
-                    let value = read_effect(&effect);
-                    ReleaseStgMedium(&mut effect);
-                    value.is_some_and(|value| value & DROPEFFECT_MOVE != 0)
-                }
-                None => false,
-            };
-            match data.filter(|_| !paths.is_empty()) {
-                Some(data) => {
-                    let (moved, submitted) = channel();
-                    answer(Some(ClipboardFiles { paths, cut, moved }));
-                    // Fails once the files are dropped without a move.
-                    if submitted.recv().is_ok() {
-                        tell_moved(&data, sequence);
-                    }
-                }
-                None => answer(None),
-            }
-            OleUninitialize();
-        }
-    });
+    source: work::Source,
 }
 
 impl ClipboardFiles {
-    /// After every cut file moved successfully: their reading thread
-    /// tells their source that they moved, as [`tell_moved`] says.
-    pub(crate) fn moved(self) {
-        let _ = self.moved.send(());
+    pub(crate) fn take_paths(&mut self) -> Vec<PathBuf> {
+        std::mem::take(&mut self.paths)
     }
-}
 
-/// When the clipboard still holds the files of `data`, which it held at
-/// `sequence`, tells their source that they were moved, and empties the
-/// clipboard, as File Explorer does after its own paste. It never sets the
-/// performed effect to move, which would tell the source to delete the
-/// files itself.
-fn tell_moved(data: &IDataObject, sequence: u32) {
-    // SAFETY: plain values.
-    if unsafe { GetClipboardSequenceNumber() } != sequence {
-        return;
+    pub(crate) fn release_source(&mut self) {
+        self.source.release();
     }
-    set_effect(data, paste_succeeded(), DROPEFFECT_MOVE);
-    // SAFETY: plain values; a clipboard another program holds stays as it
-    // is. Without a window, emptying it leaves it without an owner.
-    unsafe {
-        if OpenClipboard(None).is_ok() {
-            if GetClipboardSequenceNumber() == sequence {
-                let _ = EmptyClipboard();
-            }
-            let _ = CloseClipboard();
-        }
+
+    /// Reports a completed cut without telling the source to delete its files.
+    pub(crate) fn moved(self) {
+        self.source.moved();
     }
 }
 
@@ -355,106 +272,4 @@ fn tell_moved(data: &IDataObject, sequence: u32) {
 pub(super) fn performed_drop_effect() -> u32 {
     // SAFETY: a constant name; the call returns the format's number.
     unsafe { RegisterClipboardFormatW(w!("Performed DropEffect")) }
-}
-
-/// Sets the effect format `format` of `data`, the files' source, to
-/// `value`.
-pub(super) fn set_effect(data: &IDataObject, format: u32, value: u32) {
-    let Some(block) = effect_block(value) else {
-        return;
-    };
-    let medium = STGMEDIUM {
-        tymed: TYMED_HGLOBAL.0 as u32,
-        u: STGMEDIUM_0 { hGlobal: block },
-        pUnkForRelease: ManuallyDrop::new(None),
-    };
-    // SAFETY: with fRelease set, the data object owns the medium once the
-    // call succeeds; otherwise it stays this block's.
-    if unsafe { data.SetData(&format_of(format), &medium, true) }.is_err() {
-        // SAFETY: the block is this function's own.
-        let _ = unsafe { GlobalFree(Some(block)) };
-    }
-}
-
-/// The paths of the files that `data` holds as `CF_HDROP`, none when it
-/// holds no files.
-pub(super) fn files_of(data: &IDataObject) -> Vec<PathBuf> {
-    // SAFETY: the medium is released once its paths are read.
-    unsafe {
-        let Some(mut files) = read_format(data, CF_HDROP) else {
-            return Vec::new();
-        };
-        let paths = drop_paths(&files);
-        ReleaseStgMedium(&mut files);
-        paths
-    }
-}
-
-/// A block of memory in the clipboard format `format`.
-fn format_of(format: u32) -> FORMATETC {
-    FORMATETC {
-        cfFormat: format as u16,
-        ptd: std::ptr::null_mut(),
-        dwAspect: DVASPECT_CONTENT.0,
-        lindex: -1,
-        tymed: TYMED_HGLOBAL.0 as u32,
-    }
-}
-
-/// The medium of `format` from `data`, a block of memory, if it has one.
-///
-/// # Safety
-/// The caller releases the medium with `ReleaseStgMedium`.
-unsafe fn read_format(data: &IDataObject, format: u32) -> Option<STGMEDIUM> {
-    // SAFETY: the format asks for a block of memory.
-    let mut medium = unsafe { data.GetData(&format_of(format)) }.ok()?;
-    if medium.tymed == TYMED_HGLOBAL.0 as u32 {
-        return Some(medium);
-    }
-    // SAFETY: the medium is this function's own.
-    unsafe { ReleaseStgMedium(&mut medium) };
-    None
-}
-
-/// The paths of a `CF_HDROP` medium.
-///
-/// # Safety
-/// `medium` holds a `CF_HDROP` block that `read_format` returned.
-unsafe fn drop_paths(medium: &STGMEDIUM) -> Vec<PathBuf> {
-    // SAFETY: the block is a DROPFILES, which DragQueryFileW reads.
-    unsafe {
-        let drop = HDROP(medium.u.hGlobal.0);
-        let count = DragQueryFileW(drop, u32::MAX, None);
-        (0..count)
-            .filter_map(|index| {
-                let length = DragQueryFileW(drop, index, None) as usize;
-                let mut buffer = vec![0u16; length + 1];
-                let copied = DragQueryFileW(drop, index, Some(&mut buffer)) as usize;
-                (copied > 0)
-                    .then(|| PathBuf::from(OsString::from_wide(&buffer[..copied.min(length)])))
-            })
-            .collect()
-    }
-}
-
-/// The effect that a 4-byte effect block holds.
-///
-/// # Safety
-/// `medium` holds a block that `read_format` returned.
-unsafe fn read_effect(medium: &STGMEDIUM) -> Option<u32> {
-    // SAFETY: the block is locked only to read it, and its size is checked
-    // first.
-    unsafe {
-        let block = medium.u.hGlobal;
-        if GlobalSize(block) < 4 {
-            return None;
-        }
-        let value = GlobalLock(block).cast::<u32>();
-        if value.is_null() {
-            return None;
-        }
-        let effect = value.read_unaligned();
-        let _ = GlobalUnlock(block);
-        Some(effect)
-    }
 }

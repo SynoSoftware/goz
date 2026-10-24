@@ -1,7 +1,8 @@
 //! The check of the two gozlerd.exe files that Use local and Settings >
 //! Index show (DESIGN.md: Daemon failures): which file runs, in which order,
-//! and when a check runs again. `app::local_service` reads and runs the
-//! files through the closures of [`check`], and holds the [`Cache`].
+//! and when a check runs again. `app::work::local_service` reads and runs the
+//! files through the closures of [`check`]; `app::work::programs` owns the
+//! [`Cache`] and admits the checks.
 
 use super::fetch::{Beside, Local, LocalService, ProgramFile, Programs};
 use std::cell::Cell;
@@ -48,7 +49,8 @@ pub(crate) struct Checked {
 /// with the service program's bytes is that build, and nothing more runs. Any
 /// other runs only when `is_paired` accepts it, so a file that the setup's
 /// build did not pair with the window never runs. A paired one prints its
-/// version and its `protocol`.
+/// version and its `protocol`. These commands do not start a service; an
+/// older local program without `protocol` is not offered.
 ///
 /// `same_bytes` reads both files, so it is called only for files of one
 /// length. `print` runs a program with one argument.

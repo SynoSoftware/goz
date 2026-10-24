@@ -7,16 +7,14 @@
 
 use super::dialogs::{About, CustomDate, CustomSize, SearchSyntax, Transfer, TransferStart};
 use super::file_operations::{FileOperations, FilesSource};
-use super::fix_thread::FixThread;
 use super::icons::Icons;
-use super::include::{Elevated, NotSaved, Saving};
-use super::requests::Requests;
+use super::include::{Elevated, NotSaved};
 use super::settings::SettingsDialog;
 use super::status_bar::{Entry as StatusEntry, Slot as StatusSlot, StatusBar};
 use super::viewer::Viewers;
 use super::work::{
     CopyFailure, CopyNotice, OpenTarget, Opened, PathAction, PathPurpose, PreparedPaths,
-    QueueReady, RegistryAnswer, ShellPurpose, ShellTarget,
+    QueueReady, RegistryAnswer, ReleaseAnswer, ReleasePurpose, ShellPurpose, ShellTarget,
 };
 use crate::core::captions::{
     self, ButtonIcon, DialogCaptions, DialogItem, FilterCaptions, IndexCaptions, Inspected,
@@ -37,7 +35,7 @@ use crate::core::fetch::{
 use crate::core::file_operations::{QueueAction, delete_question, exit_question};
 use crate::core::fixer::{FixEvent, SetupEvent, SetupResult};
 use crate::core::glyph::Glyph;
-use crate::core::ids::{ControlId, DialogId, IconId};
+use crate::core::ids::{ControlId, DialogId};
 use crate::core::include::{
     IncludeDrive, SummaryRow, connected_drives, connected_volumes, include_drives, preview,
     summary_rows,
@@ -67,9 +65,8 @@ use crate::core::selection::{DRAG_LIMIT, RowSelection, SELECTION_LIMIT, Selectio
 use crate::core::settings::{Choices, Mode, ResultEnter, SettingsValues};
 use crate::core::shortcuts::{CommandShortcuts, ShowShortcut};
 use crate::core::text::{LanguageChoice, Numbers, Strings, without_access_key};
-use crate::core::update;
 use crate::core::work::{Id, Retirement};
-use crate::win::clipboard::{self as clipboard, ClipboardFiles};
+use crate::win::clipboard;
 use crate::win::controls::{
     Button, CheckBox, Divider, DropDownList, Edit, FileIconLabel, IconList, Label, ListClosing,
     ListColumn, ListView, ScrollEdge, Tooltip,
@@ -77,18 +74,17 @@ use crate::win::controls::{
 use crate::win::dialog::{DialogEnd, DialogProc};
 use crate::win::drop_target::{self, DropData, DropHandler, DropRegistration, DropSource};
 use crate::win::file_operations::QUEUE_CHANGED;
-use crate::win::folder::PanelThreads;
 use crate::win::gdi::{Font, ImageList, TextMeter};
 use crate::win::locale::WindowsNumbers;
 use crate::win::menu::Accelerators;
 use crate::win::notify::{
     Command, ControlEvent, CustomDraw, DispInfo, DrawAnswer, DrawStage, InfoTip, ListNotify,
 };
-use crate::win::shell::{self, FileType, PromptOwner};
+use crate::win::shell::{self, FileType};
 use crate::win::shortcut::{self, RegisterError, Registration};
 use crate::win::toolbar::{Tool, Toolbar};
-use crate::win::tray::{TrayEvent, TrayIcon};
-use crate::win::wake::{OpenWaker, Waker};
+use crate::win::tray::TrayEvent;
+use crate::win::wake::OpenWaker;
 use crate::win::window::{DEFERRED, Message, WindowProc};
 use crate::win::{self, Hwnd};
 use gozler_core::include::IndexSettings;
@@ -104,8 +100,7 @@ use std::ops::Range;
 use std::os::windows::ffi::OsStringExt;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
-use std::sync::mpsc::{Receiver, TryRecvError, channel};
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::Arc;
 use std::time::{Instant, SystemTime};
 use windows::Win32::Foundation::LRESULT;
 
@@ -195,20 +190,6 @@ const DROP_SCROLL_MS: u32 = 100;
 const SAVE_DELAY_MS: u32 = 1_000;
 /// Twice a second, as the engine's counters expect to be read.
 const OPERATIONS_POLL_MS: u32 = 500;
-
-/// What the threads that ask GitHub for its latest release found: the
-/// update check, and the question whether the release is older than the
-/// window. [`MainWindow::ask_github`] runs them.
-#[derive(Default)]
-struct UpdateCheck {
-    newer: Option<String>,
-    older: Option<bool>,
-}
-
-enum UpdateAnswer {
-    Newer(Option<String>),
-    Older(bool),
-}
 
 /// The controls, created in `WM_CREATE` in Tab order; Windows destroys them
 /// with the window.
@@ -800,25 +781,12 @@ struct Created {
     status_fit: Cell<Option<(Size, Px)>>,
     /// `None` while the window moves to a monitor with another DPI.
     layout: RefCell<Option<Layout>>,
-    requests: Requests,
     work: RefCell<super::work::Work>,
-    fixer: FixThread,
-    /// Wakes the window from the threads it does not join: GitHub's and a
-    /// fix's.
+    /// Shared delivery lifetime, closed before this window releases its HWND.
     waker: OpenWaker,
     images: Option<ImageList>,
     /// The inspector's icons; their indexes are those of `images`.
     large_images: Option<ImageList>,
-    /// The panels' disk threads (DESIGN.md: A panel).
-    panel_threads: PanelThreads,
-}
-
-/// A Paste, from its command until its thread has read the clipboard.
-struct Pasting {
-    id: OperationId,
-    /// The folder selected when Paste was chosen.
-    destination: PathBuf,
-    files: Receiver<Option<ClipboardFiles>>,
 }
 
 /// The open Settings dialog, which replies and the window's job go to.
@@ -896,8 +864,6 @@ pub(crate) struct MainWindow {
     /// The person's command shortcuts, which Settings replaces; the message
     /// loop translates with the table of the moment.
     accelerators: RefCell<Rc<Accelerators>>,
-    /// The tray icon, while Gozler keeps running in the notification area.
-    tray: RefCell<Option<TrayIcon>>,
     /// `TaskbarCreated`, after which the tray icon is added again.
     taskbar_created: u32,
     /// `TaskbarButtonCreated`, after which the operations' progress is
@@ -908,6 +874,7 @@ pub(crate) struct MainWindow {
     exit_message: u32,
     /// The shortcut to show Gozler, while Windows lets Gozler use it.
     shortcut: RefCell<Option<Registration>>,
+    starting_shortcut: RefCell<Option<Registration>>,
     /// Why the saved shortcut could not be used at start, which the window
     /// says the first time it shows.
     shortcut_failure: RefCell<Option<RegisterError>>,
@@ -917,18 +884,14 @@ pub(crate) struct MainWindow {
     /// The open Settings dialog, from its WM_INITDIALOG until it closes.
     settings: Cell<Option<OpenSettings>>,
     total_commander: RefCell<Option<Result<Option<String>, DaemonFailure>>>,
-    /// The save of the Include settings, or the ask for a rebuild, while
-    /// it runs.
-    include_saving: RefCell<Option<Saving>>,
-    /// Its answer, once it arrived, for the Settings dialog.
+    /// The acknowledged Include save or index rebuild for Settings.
     include_saved: RefCell<Option<Result<(), NotSaved>>>,
     sign_in_saved: RefCell<Option<(Id, io::Result<()>)>>,
     /// A Paste whose thread reads the clipboard.
-    pasting: RefCell<Vec<Pasting>>,
+    pasting: RefCell<HashMap<OperationId, PathBuf>>,
     /// Whether a click gave the search box the focus, so its text is
     /// selected once the click is handled (Settings > Search).
     select_search: Cell<bool>,
-    update: Arc<Mutex<UpdateCheck>>,
     /// The file operations' queue and the transfer pane, which
     /// only the first window has (DESIGN.md: Interrupted operations).
     file_operations: OnceCell<FileOperations>,
@@ -1087,22 +1050,20 @@ impl MainWindow {
             inspector_focus: Cell::new(None),
             column_sizing: RefCell::default(),
             accelerators: RefCell::new(Rc::new(accelerators)),
-            tray: RefCell::new(None),
             taskbar_created: win::instance::register_message("TaskbarCreated"),
             taskbar_button_created: win::instance::register_message("TaskbarButtonCreated"),
             exit_message: win::instance::register_message(super::EXIT_MESSAGE),
             shortcut: RefCell::new(None),
+            starting_shortcut: RefCell::new(None),
             shortcut_failure: RefCell::new(None),
             unshown: Cell::new(false),
             settings: Cell::new(None),
             total_commander: RefCell::new(None),
-            include_saving: RefCell::new(None),
             include_saved: RefCell::new(None),
             sign_in_saved: RefCell::new(None),
-            pasting: RefCell::new(Vec::new()),
+            pasting: RefCell::new(HashMap::new()),
             shutdown: RefCell::new(None),
             select_search: Cell::new(false),
-            update: Arc::new(Mutex::new(UpdateCheck::default())),
             file_operations: OnceCell::new(),
             viewers,
             panel_changed: Default::default(),
@@ -1201,10 +1162,10 @@ impl MainWindow {
             metrics: Cell::new(metrics),
             status_fit: Cell::new(None),
             layout: RefCell::new(None),
-            requests: Requests::new(Waker::new(hwnd)),
-            work: RefCell::new(super::work::Work::new(waker.clone())),
-            fixer: FixThread::new(waker.clone()),
-            panel_threads: PanelThreads::new(hwnd, waker.clone()),
+            work: RefCell::new(super::work::Work::new(
+                waker.clone(),
+                self.settings_file.with_file_name("ui-error.log"),
+            )),
             waker,
             images,
             large_images: ImageList::system_large(),
@@ -2919,7 +2880,20 @@ impl MainWindow {
     }
 
     fn start(&self, fetch: Fetch) {
-        self.created().requests.start(fetch);
+        let mut work = self.created().work.borrow_mut();
+        if fetch.purpose() == Purpose::Status {
+            work.programs.refresh();
+        }
+        work.requests.start(fetch);
+        let retired = work.requests.take_retired();
+        work.retire(retired);
+    }
+
+    fn cancel_request(&self, purpose: Purpose) {
+        let mut work = self.created().work.borrow_mut();
+        work.requests.cancel(purpose);
+        let retired = work.requests.take_retired();
+        work.retire(retired);
     }
 
     /// Asks for the chunk that `list`'s rows on screen still lack, so every
@@ -2967,15 +2941,25 @@ impl MainWindow {
             }
             Some(Then::SearchSoon(list)) => hwnd.set_timer(timer::search(list), SEARCH_DELAY_MS),
             Some(Then::ReadSelectionSoon(list)) => {
-                created.requests.cancel(Purpose::Selection(list));
+                self.cancel_request(Purpose::Selection(list));
                 hwnd.set_timer(timer::selection(list), SELECTION_DELAY_MS);
             }
-            Some(Then::Cancel(purpose)) => created.requests.cancel(purpose),
+            Some(Then::Cancel(purpose)) => self.cancel_request(purpose),
             Some(Then::AskLatestRelease) => self.ask_latest_release(),
-            Some(Then::RunFix(work)) => created.fixer.start(PromptOwner::new(hwnd), work),
+            Some(Then::RunFix(input)) => {
+                let mut work = created.work.borrow_mut();
+                work.fixes.start(input);
+                let retired = work.fixes.take_retired();
+                work.retire(retired);
+            }
             Some(Then::ConfirmSetup) => self.defer(hwnd, ModalStep::ConfirmSetup),
             Some(Then::ExplainNoSetup) => self.defer(hwnd, ModalStep::ExplainNoSetup),
-            Some(Then::StopFix) => created.fixer.stop(),
+            Some(Then::StopFix) => {
+                let mut work = created.work.borrow_mut();
+                work.fixes.stop();
+                let retired = work.fixes.take_retired();
+                work.retire(retired);
+            }
             Some(Then::CancelOperation(id)) => self.act_operation(id, QueueAction::Cancel),
             Some(Then::RunSetup(setup)) => self.run_setup(setup),
             None => {}
@@ -3101,7 +3085,7 @@ impl MainWindow {
                 if count > 0 {
                     controls.list.ensure_visible(0);
                 }
-                created.requests.cancel(Purpose::Selection(List::Search));
+                self.cancel_request(Purpose::Selection(List::Search));
                 // The new rows no longer hold what the ended deletes and
                 // moves took, and show again what they failed on.
                 self.release_operations();
@@ -3136,7 +3120,7 @@ impl MainWindow {
                 if count > 0 {
                     control.set_focused(Some(0));
                 }
-                created.requests.cancel(Purpose::Selection(list));
+                self.cancel_request(Purpose::Selection(list));
                 self.release_operations();
                 self.show_panel(side);
                 self.update_status();
@@ -3164,7 +3148,7 @@ impl MainWindow {
                 control.select_only(None);
                 control.set_count(0);
                 self.seed_native_selection(list, Vec::new().into());
-                created.requests.cancel(Purpose::Selection(list));
+                self.cancel_request(Purpose::Selection(list));
                 match list {
                     List::Search => self.update_message(),
                     List::Panel(side) => self.show_panel(side),
@@ -3210,8 +3194,14 @@ impl MainWindow {
 
     fn retire_model(&self) {
         let mut retired = self.model.borrow_mut().take_retired();
-        retired.append(self.created().panel_threads.take_retired());
-        self.created().work.borrow_mut().retire(retired);
+        let mut work = self.created().work.borrow_mut();
+        retired.append(work.folders.take_retired());
+        retired.append(work.indexed.take_retired());
+        work.retire(retired);
+    }
+
+    pub(super) fn indexed(&self) -> std::cell::RefMut<'_, super::work::indexed::Work> {
+        std::cell::RefMut::map(self.created().work.borrow_mut(), |work| &mut work.indexed)
     }
 
     /// Starts the save timer when the state that `ui.json` saves changed
@@ -3472,6 +3462,14 @@ impl MainWindow {
     /// Accepts every reply that has arrived, and the newer release that the
     /// update check found.
     fn on_wake(&self, hwnd: Hwnd) {
+        self.finish_shortcut_start(hwnd);
+        self.post_settings_reply();
+        {
+            let mut work = self.created().work.borrow_mut();
+            work.indexed.poll();
+            let retired = work.indexed.take_retired();
+            work.retire(retired);
+        }
         self.accept_told_selections(hwnd);
         self.apply_taken_deselections(hwnd);
         self.read_list_selection(hwnd);
@@ -3598,11 +3596,29 @@ impl MainWindow {
                 self.defer(hwnd, ModalStep::SettingsNotSaved(error));
             }
         }
-        for fetched in self.created().requests.drain() {
+        let fetched = {
+            let mut work = self.created().work.borrow_mut();
+            let programs = work.programs.drain();
+            work.requests.set_programs(programs);
+            let retired = work.programs.take_retired();
+            work.retire(retired);
+            let fetched = work.requests.drain();
+            let retired = work.requests.take_retired();
+            work.retire(retired);
+            fetched
+        };
+        for fetched in fetched {
             let accepted = self.model.borrow_mut().accept(fetched);
             self.apply(hwnd, accepted);
         }
-        for event in self.created().fixer.drain() {
+        let fixes = {
+            let mut work = self.created().work.borrow_mut();
+            let fixes = work.fixes.drain();
+            let retired = work.fixes.take_retired();
+            work.retire(retired);
+            fixes
+        };
+        for event in fixes {
             let accepted = self.model.borrow_mut().accept_fix(event);
             self.apply(hwnd, accepted);
         }
@@ -3610,24 +3626,35 @@ impl MainWindow {
         self.finish_paste();
         self.finish_drops();
         self.on_panel_events(hwnd);
-        let newer = self
-            .update
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .newer
-            .take();
-        if let Some(version) = newer {
-            let accepted = self.model.borrow_mut().set_newer_release(version);
-            self.apply(hwnd, accepted);
+        let mut tray_events = Vec::new();
+        {
+            let mut work = self.created().work.borrow_mut();
+            if let Some(tray) = &mut work.tray {
+                tray.drain();
+                while let Some(event) = tray.take_event() {
+                    tray_events.push(event);
+                }
+                let retired = tray.take_retired();
+                work.retire(retired);
+            }
         }
-        let older = self
-            .update
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .older
-            .take();
-        if let Some(older) = older {
-            let accepted = self.model.borrow_mut().set_latest_release_older(older);
+        for event in tray_events {
+            self.on_tray(hwnd, event);
+            if self.shutdown.borrow().is_some() {
+                return;
+            }
+        }
+        let releases = self.created().work.borrow_mut().take_releases();
+        for release in releases {
+            let accepted = match release {
+                ReleaseAnswer::Newer(Some(version)) => {
+                    self.model.borrow_mut().set_newer_release(version)
+                }
+                ReleaseAnswer::Older(older) => {
+                    self.model.borrow_mut().set_latest_release_older(older)
+                }
+                ReleaseAnswer::Newer(None) => continue,
+            };
             self.apply(hwnd, accepted);
         }
         self.resume_selection_actions(hwnd);
@@ -4635,6 +4662,7 @@ impl MainWindow {
                 PaneAction::Move(id, before) => operations.move_before(id, before),
                 PaneAction::CancelAll => {
                     self.dropping.borrow_mut().clear();
+                    self.cancel_paste(None);
                     operations.cancel_all();
                 }
                 PaneAction::CloseReport => self.model.borrow_mut().close_operation_report(),
@@ -4759,6 +4787,7 @@ impl MainWindow {
     fn act_operation(&self, id: OperationId, action: QueueAction) {
         if action == QueueAction::Cancel {
             self.abandon_drop(id);
+            self.cancel_paste(Some(id));
         }
         if let Some(operations) = self.file_operations.get() {
             operations.act(id, action);
@@ -5194,45 +5223,65 @@ impl MainWindow {
             return;
         };
         let destination = PathBuf::from(OsString::from_wide(&entry.path));
+        let sequence = clipboard::sequence();
         let Some(id) = self.accept_transfer(destination.clone(), false) else {
             return;
         };
-        let (sender, files) = channel();
-        let waker = self.created().waker.clone();
-        clipboard::read_files(move |read| waker.deliver(|| sender.send(read).is_ok()));
-        self.pasting.borrow_mut().push(Pasting {
-            id,
-            destination: destination.clone(),
-            files,
-        });
+        self.pasting.borrow_mut().insert(id, destination);
+        self.created().work.borrow_mut().paste.read(id, sequence);
     }
 
     /// Paste's files, once their thread has read them from the clipboard.
     fn finish_paste(&self) {
-        let mut ready = Vec::new();
-        {
-            let mut pending = self.pasting.borrow_mut();
-            let mut index = 0;
-            while index < pending.len() {
-                match pending[index].files.try_recv() {
-                    Err(TryRecvError::Empty) => index += 1,
-                    result => ready.push((pending.remove(index), result.ok().flatten())),
-                }
+        let answer = {
+            let mut work = self.created().work.borrow_mut();
+            let answer = work.paste.take();
+            let retired = work.paste.take_retired();
+            work.retire(retired);
+            answer
+        };
+        let Some((id, mut files)) = answer else {
+            return;
+        };
+        let destination = self.pasting.borrow_mut().remove(&id);
+        let Some(destination) = destination else {
+            if let Some(files) = &mut files {
+                files.release_source();
+            }
+            let mut retired = Retirement::default();
+            retired.push(files, crate::core::work::INLINE_ITEMS + 1);
+            self.created().work.borrow_mut().retire(retired);
+            return;
+        };
+        let (sources, moves) = files.as_mut().map_or_else(
+            || (Vec::new(), false),
+            |files| (files.take_paths(), files.cut),
+        );
+        self.resolve_transfer(
+            id,
+            sources,
+            destination,
+            moves,
+            files.map(FilesSource::Paste),
+        );
+    }
+
+    fn cancel_paste(&self, id: Option<OperationId>) {
+        let mut work = self.created().work.borrow_mut();
+        match id {
+            Some(id) => {
+                self.pasting.borrow_mut().remove(&id);
+                work.paste.cancel(id);
+            }
+            None => {
+                let mut retired = Retirement::default();
+                retired.push(self.pasting.take(), crate::core::work::INLINE_ITEMS + 1);
+                work.retire(retired);
+                work.paste.cancel_all();
             }
         }
-        for (pasting, files) in ready {
-            let (sources, moves) = files.as_ref().map_or_else(
-                || (Vec::new(), false),
-                |files| (files.paths.clone(), files.cut),
-            );
-            self.resolve_transfer(
-                pasting.id,
-                sources,
-                pasting.destination,
-                moves,
-                files.map(FilesSource::Paste),
-            );
-        }
+        let retired = work.paste.take_retired();
+        work.retire(retired);
     }
 
     /// Shows the rows that deletes and moves have taken, `taken`, struck
@@ -5403,7 +5452,7 @@ impl MainWindow {
             };
             (strings.text("window.title").to_owned(), text)
         };
-        if let Some(tray) = self.tray.borrow().as_ref() {
+        if let Some(tray) = &mut self.created().work.borrow_mut().tray {
             tray.notify(&title, &text);
         }
     }
@@ -5441,24 +5490,18 @@ impl MainWindow {
     /// Adds the tray icon while Gozler keeps running in the notification
     /// area, and removes it otherwise; another window has none (DESIGN.md:
     /// Window lifetime).
-    fn update_tray(&self, hwnd: Hwnd) {
+    fn update_tray(&self, _hwnd: Hwnd) {
         let keeps_running =
             self.instance == Instance::First && self.model.borrow().choices().keep_running;
-        if keeps_running == self.tray.borrow().is_some() {
-            return;
+        let tip = self
+            .model
+            .borrow()
+            .strings()
+            .text("window.title")
+            .to_owned();
+        if let Some(tray) = &mut self.created().work.borrow_mut().tray {
+            tray.update(keeps_running, &tip);
         }
-        let tray = if keeps_running {
-            let tip = self
-                .model
-                .borrow()
-                .strings()
-                .text("window.title")
-                .to_owned();
-            TrayIcon::add(hwnd, IconId::Gozler.id(), &tip).ok()
-        } else {
-            None
-        };
-        self.tray.replace(tray);
     }
 
     /// A click on the tray icon, or its menu. While a dialog is open, the
@@ -5492,9 +5535,10 @@ impl MainWindow {
         let Some(saved) = self.model.borrow().choices().show_shortcut else {
             return;
         };
-        match shortcut::register(hwnd, saved, self.show_message) {
+        match shortcut::register(hwnd, saved, self.show_message, self.created().waker.clone()) {
             Ok(registration) => {
-                self.shortcut.replace(Some(registration));
+                self.starting_shortcut.replace(Some(registration));
+                self.finish_shortcut_start(hwnd);
             }
             Err(error) => {
                 self.shortcut_failure.replace(Some(error));
@@ -5502,9 +5546,28 @@ impl MainWindow {
         }
     }
 
+    fn finish_shortcut_start(&self, hwnd: Hwnd) {
+        let Some(mut registration) = self.starting_shortcut.take() else {
+            return;
+        };
+        match registration.poll() {
+            None => {
+                self.starting_shortcut.replace(Some(registration));
+            }
+            Some(Ok(())) => {
+                registration.activate();
+                self.shortcut.replace(Some(registration));
+            }
+            Some(Err(error)) => {
+                self.shortcut_failure.replace(Some(error));
+                hwnd.post(DEFERRED);
+            }
+        }
+    }
+
     /// What the window says when Windows refused `shortcut`: in Settings,
     /// or at start, when the saved shortcut no longer works.
-    fn shortcut_message(
+    pub(super) fn shortcut_message(
         &self,
         shortcut: ShowShortcut,
         error: &RegisterError,
@@ -5544,7 +5607,7 @@ impl MainWindow {
         }
     }
 
-    /// Asks GitHub for the latest release on a thread of its own, when
+    /// Asks GitHub for the latest release when
     /// Check for updates is on and the last check is a day old (DESIGN.md: The
     /// General page).
     fn check_for_updates(&self) {
@@ -5552,53 +5615,21 @@ impl MainWindow {
         if !self.model.borrow_mut().update_check_due(now) {
             return;
         }
-        self.ask_github(|reply| {
-            UpdateAnswer::Newer(
-                reply.and_then(|reply| {
-                    update::newer_release(&reply, gozler_core::escompat::version())
-                }),
-            )
-        });
+        self.created()
+            .work
+            .borrow_mut()
+            .check_release(ReleasePurpose::Update);
     }
 
-    /// Asks GitHub on a thread of its own whether its latest release is
+    /// Asks GitHub whether its latest release is
     /// older than the window, which the fix of an older service says
     /// (DESIGN.md: Daemon failures). A reply that is not a release counts
     /// as not older.
     fn ask_latest_release(&self) {
-        self.ask_github(|reply| {
-            let older = reply.and_then(|reply| {
-                update::latest_is_older(&reply, gozler_core::escompat::version())
-            });
-            UpdateAnswer::Older(older.unwrap_or(false))
-        });
-    }
-
-    /// Asks GitHub for its latest release on a thread of its own, which
-    /// gives the reply, or `None` for a failure, to `found`, while the
-    /// window is open. Parsing finishes before the answer is published under
-    /// the lock that the window also reads.
-    fn ask_github(&self, found: impl FnOnce(Option<String>) -> UpdateAnswer + Send + 'static) {
-        let check = Arc::clone(&self.update);
-        let waker = self.created().waker.clone();
-        std::thread::spawn(move || {
-            let reply = win::update::latest_release();
-            let answer = found(reply);
-            waker.deliver(|| {
-                let mut check = check.lock().unwrap_or_else(PoisonError::into_inner);
-                match answer {
-                    UpdateAnswer::Newer(version) => {
-                        let changed = version.is_some();
-                        check.newer = version;
-                        changed
-                    }
-                    UpdateAnswer::Older(older) => {
-                        check.older = Some(older);
-                        true
-                    }
-                }
-            });
-        });
+        self.created()
+            .work
+            .borrow_mut()
+            .check_release(ReleasePurpose::ServiceVersion);
     }
 
     /// A click on the status bar's right group updates Gozler while the
@@ -5676,29 +5707,45 @@ impl MainWindow {
         self.resetting.get()
     }
 
-    /// Applies what Settings edited, `edited`, which was `last` before; OK
-    /// and Apply call it (DESIGN.md: Settings dialog). A shortcut that Windows
-    /// refuses applies nothing and returns its message, so the dialog stays
-    /// open. Registry and Include changes are acknowledged separately.
+    pub(super) fn prepare_shortcut(
+        &self,
+        hwnd: Hwnd,
+        edited: &Choices,
+        last: &Choices,
+    ) -> Result<Option<Registration>, String> {
+        // Another window saves the shortcut for the first window's next
+        // start, because the first window holds it.
+        if self.instance != Instance::First || edited.show_shortcut == last.show_shortcut {
+            return Ok(None);
+        }
+        edited
+            .show_shortcut
+            .map(|shortcut| {
+                shortcut::register(
+                    hwnd,
+                    shortcut,
+                    self.show_message,
+                    self.created().waker.clone(),
+                )
+                .map_err(|error| self.shortcut_message(shortcut, &error, false))
+            })
+            .transpose()
+    }
+
+    /// Applies the captured choices after their shortcut preparation succeeds;
+    /// registry and Include changes are acknowledged separately.
     pub(super) fn apply_choices(
         &self,
         hwnd: Hwnd,
         edited: &Choices,
         last: &Choices,
-    ) -> Result<(), String> {
-        let shortcut = edited.show_shortcut;
-        // Another window saves the shortcut for the first window's next
-        // start, because the first window holds it.
-        if self.instance == Instance::First && shortcut != last.show_shortcut {
-            // The new shortcut is registered before the old one goes, so a
-            // refusal leaves the old one working.
-            let registration = match shortcut {
-                Some(shortcut) => Some(
-                    shortcut::register(hwnd, shortcut, self.show_message)
-                        .map_err(|error| self.shortcut_message(shortcut, &error, false))?,
-                ),
-                None => None,
-            };
+        registration: Option<Registration>,
+    ) {
+        if self.instance == Instance::First && edited.show_shortcut != last.show_shortcut {
+            self.starting_shortcut.take();
+            if let Some(registration) = &registration {
+                registration.activate();
+            }
             self.shortcut.replace(registration);
             self.shortcut_failure.replace(None);
         }
@@ -5754,7 +5801,16 @@ impl MainWindow {
         {
             operations.set_transfer_limit(edited.transfers_per_device);
         }
-        Ok(())
+    }
+
+    pub(super) fn settings_closed(&self, dialog: Hwnd) {
+        if self
+            .settings
+            .get()
+            .is_some_and(|open| open.dialog == dialog)
+        {
+            self.settings.set(None);
+        }
     }
 
     pub(super) fn set_sign_in(&self, on: bool) -> Id {
@@ -5894,29 +5950,24 @@ impl MainWindow {
 
     /// Starts saving the Include settings, or asking for a rebuild of the
     /// index, as administrator, after Windows asks the person for
-    /// permission over `hwnd`, the window (DESIGN.md: The Include page, The
+    /// permission (DESIGN.md: The Include page, The
     /// Drives and service page). The Settings dialog starts no second job
     /// while one runs.
-    pub(super) fn run_as_administrator(&self, hwnd: Hwnd, job: Elevated) {
-        let saving = Saving::start(PromptOwner::new(hwnd), job, self.created().waker.clone());
-        self.include_saving.replace(Some(saving));
+    pub(super) fn run_as_administrator(&self, _hwnd: Hwnd, job: Elevated) {
+        let mut work = self.created().work.borrow_mut();
+        work.elevated.start(job);
+        let retired = work.elevated.take_retired();
+        work.retire(retired);
     }
 
     /// Takes the job's answer once it arrived: tells the service, which
     /// applies saved settings and rebuilds when asked, and the Settings
     /// dialog.
     fn finish_include_save(&self) {
-        let answer = self
-            .include_saving
-            .borrow()
-            .as_ref()
-            .and_then(Saving::answer);
+        let answer = self.created().work.borrow_mut().elevated.take();
         let Some(answer) = answer else {
             return;
         };
-        if let Some(saving) = self.include_saving.take() {
-            saving.join();
-        }
         if answer.is_ok() {
             let fetch = self.model.borrow_mut().settings_saved();
             self.start(fetch);
@@ -6425,11 +6476,8 @@ impl WindowProc for MainWindow {
                 self.close(hwnd);
                 Some(LRESULT(0))
             }
-            // Every request thread is joined, and the update check stops
-            // waking the window, while the window's handle is still valid,
-            // so no wake-up reaches a reused handle (DESIGN.md: window rule 5).
-            // The shortcut and the tray icon go with the window, so Windows'
-            // own use of the shortcut's keys returns at once.
+            // Close delivery before releasing native endpoints; persistence and
+            // accepted-mutation cleanup retain their own off-UI lifetimes.
             Message::Destroy => {
                 // A window gone before the loop ended leaves nothing for
                 // close_for_setup to close.
@@ -6449,7 +6497,7 @@ impl WindowProc for MainWindow {
                 self.created().waker.close();
                 self.drop_target.replace(None);
                 self.dropping.borrow_mut().clear();
-                self.created().panel_threads.stop_all();
+                self.cancel_paste(None);
                 self.model.borrow_mut().retire_following();
                 self.retire_model();
                 let recovery_finished = self.file_operations.get().map(|operations| {
@@ -6460,31 +6508,21 @@ impl WindowProc for MainWindow {
                         .retire(operations.take_retired());
                     finished
                 });
-                let settings_finished = self.created().work.borrow_mut().close();
+                let (settings_finished, cleanup) = self.created().work.borrow_mut().close();
+                let cleanup = win::work::spawn(cleanup);
                 self.shortcut.replace(None);
-                self.tray.replace(None);
-                self.created().requests.shut_down();
-                self.created().fixer.shut_down();
-                // It ends once the person answered the permission prompt.
-                if let Some(saving) = self.include_saving.take() {
-                    saving.join();
-                }
+                self.starting_shortcut.replace(None);
                 // No Viewer outlives the message loop.
                 self.viewers.close_all();
                 let error_log = self.settings_file.with_file_name("ui-error.log");
                 let shutdown = win::window::quit_after(move |worker| {
-                    settings_finished(worker);
-                    if let Some(finished) = recovery_finished {
-                        match finished.recv() {
-                            Ok(Ok(())) => {}
-                            result => super::write_log(
-                                &error_log,
-                                &format!(
-                                    "File operation recovery state was not saved at Exit: {result:?}",
-                                ),
-                            ),
-                        }
-                    }
+                    super::work::finish_shutdown(
+                        worker,
+                        settings_finished,
+                        recovery_finished,
+                        cleanup,
+                        &error_log,
+                    );
                 });
                 self.shutdown.replace(Some(shutdown));
                 Some(LRESULT(0))
@@ -6493,10 +6531,6 @@ impl WindowProc for MainWindow {
                 let accepted = self.model.borrow_mut().show_mode(Mode::Search);
                 self.apply(hwnd, accepted);
                 self.show_window(hwnd);
-                Some(LRESULT(0))
-            }
-            Message::Tray(event) => {
-                self.on_tray(hwnd, event);
                 Some(LRESULT(0))
             }
             // A second start with `--location`, such as from Total Commander
@@ -6549,8 +6583,8 @@ impl WindowProc for MainWindow {
                 Some(LRESULT(0))
             }
             Message::Other(msg) if msg == self.taskbar_created => {
-                if let Some(tray) = self.tray.borrow().as_ref() {
-                    tray.add_again();
+                if let Some(tray) = &mut self.created().work.borrow_mut().tray {
+                    tray.restart();
                 }
                 Some(LRESULT(0))
             }

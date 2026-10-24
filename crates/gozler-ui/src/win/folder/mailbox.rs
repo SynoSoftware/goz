@@ -9,7 +9,7 @@ use std::sync::mpsc::{Receiver, SyncSender, TrySendError, sync_channel};
 // Opened and Listed/Failed must both fit before the window first drains.
 const CAPACITY: usize = 2;
 
-pub(super) struct Mailbox {
+pub(crate) struct Mailbox {
     events: Receiver<PanelEvent>,
     lost: Arc<AtomicBool>,
 }
@@ -39,7 +39,7 @@ impl Mailbox {
         )
     }
 
-    pub(super) fn drain(&self, waker: &OpenWaker) -> (Vec<PanelEvent>, bool) {
+    pub(crate) fn drain(&self, waker: &OpenWaker) -> (Vec<PanelEvent>, bool) {
         // Once terminal is observed, this producer cannot enqueue another event.
         let terminal = self.lost.load(Ordering::Acquire);
         let mut events = Vec::with_capacity(CAPACITY);

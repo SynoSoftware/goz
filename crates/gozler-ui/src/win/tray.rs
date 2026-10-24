@@ -1,20 +1,22 @@
 //! The icon in the notification area, its menu and its notification (DESIGN.md:
 //! Window lifetime).
 
-use super::Hwnd;
-use windows::Win32::Foundation::{LPARAM, WPARAM};
+use super::wake::OpenWaker;
+use std::sync::mpsc::{Receiver, SyncSender, sync_channel};
+use windows::Win32::Foundation::{ERROR_CLASS_ALREADY_EXISTS, HWND, LPARAM, LRESULT, WPARAM};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
-use windows::Win32::UI::Controls::{LIM_SMALL, LoadIconMetric};
-use windows::Win32::UI::Shell::{
-    NIF_ICON, NIF_INFO, NIF_MESSAGE, NIF_SHOWTIP, NIF_TIP, NIIF_INFO, NIM_ADD, NIM_DELETE,
-    NIM_MODIFY, NIM_SETVERSION, NIN_SELECT, NINF_KEY, NOTIFY_ICON_DATA_FLAGS, NOTIFY_ICON_MESSAGE,
-    NOTIFYICON_VERSION_4, NOTIFYICONDATAW, Shell_NotifyIconW,
+use windows::Win32::UI::Shell::{NIN_SELECT, NINF_KEY};
+use windows::Win32::UI::WindowsAndMessaging::{
+    CREATESTRUCTW, CreateWindowExW, DefWindowProcW, GWLP_USERDATA, GetWindowLongPtrW, HWND_MESSAGE,
+    RegisterClassW, SetWindowLongPtrW, WINDOW_EX_STYLE, WINDOW_STYLE, WM_CONTEXTMENU, WM_NCCREATE,
+    WM_NCDESTROY, WNDCLASSW,
 };
-use windows::Win32::UI::WindowsAndMessaging::{DestroyIcon, HICON, WM_CONTEXTMENU};
-use windows::core::PCWSTR;
+use windows::core::{PCWSTR, w};
 
-/// The private message that the icon sends the window
-/// ([`super::window::Message::Tray`]).
+mod work;
+pub(crate) use work::{Notice, Session, Update};
+
+/// The private message that the icon sends its callback endpoint.
 pub(crate) const TRAY: u32 = super::wake::WAKE + 4;
 
 /// What the person did with the icon.
@@ -48,86 +50,101 @@ impl TrayEvent {
     }
 }
 
-/// The icon, removed on drop.
-pub(crate) struct TrayIcon {
-    window: Hwnd,
-    icon: HICON,
-    tip: String,
+pub(crate) struct Endpoint {
+    window: isize,
+    events: Receiver<TrayEvent>,
 }
 
-impl TrayIcon {
-    /// Adds the icon `icon`, a resource of this module, for `window`, with
-    /// the tooltip `tip`.
-    pub(crate) fn add(window: Hwnd, icon: u16, tip: &str) -> windows::core::Result<TrayIcon> {
-        // SAFETY: the icon is a resource of this module, loaded at the size
-        // the notification area shows; DestroyIcon frees it on drop.
-        let icon = unsafe {
-            LoadIconMetric(
-                GetModuleHandleW(PCWSTR::null()).ok().map(Into::into),
-                PCWSTR(usize::from(icon) as *const u16),
-                LIM_SMALL,
+struct Callbacks {
+    sender: SyncSender<TrayEvent>,
+    waker: OpenWaker,
+}
+
+impl Endpoint {
+    /// Create once on the window's UI thread with its shared delivery lifetime.
+    /// The message-only window remains until process teardown: an Explorer call
+    /// in flight must never target a reused HWND at Exit.
+    pub(crate) fn new(waker: OpenWaker) -> windows::core::Result<Self> {
+        // SAFETY: the class procedure has process lifetime; this module owns
+        // the class name and creates its windows only on the UI thread.
+        let instance = unsafe { GetModuleHandleW(PCWSTR::null()) }?;
+        let class = WNDCLASSW {
+            lpfnWndProc: Some(procedure),
+            hInstance: instance.into(),
+            lpszClassName: w!("gozler.ui.tray"),
+            ..Default::default()
+        };
+        // SAFETY: RegisterClassW copies this complete class description.
+        if unsafe { RegisterClassW(&class) } == 0 {
+            let error = windows::core::Error::from_thread();
+            if error.code() != ERROR_CLASS_ALREADY_EXISTS.to_hresult() {
+                return Err(error);
+            }
+        }
+        let (sender, events) = sync_channel(8);
+        let callbacks = Box::new(Callbacks { sender, waker });
+        // SAFETY: callbacks remains live throughout creation. WM_NCCREATE
+        // stores its pointer; ownership transfers only after successful creation.
+        let window = unsafe {
+            CreateWindowExW(
+                WINDOW_EX_STYLE(0),
+                class.lpszClassName,
+                PCWSTR::null(),
+                WINDOW_STYLE(0),
+                0,
+                0,
+                0,
+                0,
+                Some(HWND_MESSAGE),
+                None,
+                Some(instance.into()),
+                Some((&*callbacks as *const Callbacks).cast()),
             )
         }?;
-        let tray = TrayIcon {
-            window,
-            icon,
-            tip: tip.to_owned(),
-        };
-        tray.add_again();
-        Ok(tray)
+        let _ = Box::into_raw(callbacks);
+        Ok(Self {
+            window: window.0 as isize,
+            events,
+        })
     }
 
-    /// Adds the icon again, as after Explorer restarted, which drops every
-    /// icon (`TaskbarCreated`).
-    pub(crate) fn add_again(&self) {
-        let mut data = self.data(NIF_MESSAGE | NIF_ICON | NIF_TIP | NIF_SHOWTIP);
-        copy(&mut data.szTip, &self.tip);
-        notify_icon(NIM_ADD, &data);
-        data.Anonymous.uVersion = NOTIFYICON_VERSION_4;
-        notify_icon(NIM_SETVERSION, &data);
+    pub(crate) fn take_event(&self) -> Option<TrayEvent> {
+        self.events.try_recv().ok()
     }
+}
 
-    /// Shows a Windows notification from the icon.
-    pub(crate) fn notify(&self, title: &str, text: &str) {
-        let mut data = self.data(NIF_INFO);
-        copy(&mut data.szInfoTitle, title);
-        copy(&mut data.szInfo, text);
-        data.dwInfoFlags = NIIF_INFO;
-        notify_icon(NIM_MODIFY, &data);
+unsafe extern "system" fn procedure(
+    window: HWND,
+    message: u32,
+    wparam: WPARAM,
+    lparam: LPARAM,
+) -> LRESULT {
+    if message == WM_NCCREATE {
+        // SAFETY: CreateWindowExW supplies a CREATESTRUCTW whose parameter is
+        // the live Box from Endpoint::new, borrowed until creation succeeds.
+        let create = unsafe { &*(lparam.0 as *const CREATESTRUCTW) };
+        // SAFETY: this class owns its user-data slot.
+        let _ = unsafe { SetWindowLongPtrW(window, GWLP_USERDATA, create.lpCreateParams as isize) };
     }
-
-    fn data(&self, flags: NOTIFY_ICON_DATA_FLAGS) -> NOTIFYICONDATAW {
-        NOTIFYICONDATAW {
-            cbSize: size_of::<NOTIFYICONDATAW>() as u32,
-            hWnd: self.window.0,
-            uID: 1,
-            uFlags: flags,
-            uCallbackMessage: TRAY,
-            hIcon: self.icon,
-            ..Default::default()
+    // SAFETY: only this procedure writes the slot, and the Box remains live
+    // until WM_NCDESTROY. The endpoint is never destroyed during execution.
+    let callbacks = unsafe { GetWindowLongPtrW(window, GWLP_USERDATA) } as *mut Callbacks;
+    if !callbacks.is_null() && message == TRAY {
+        // SAFETY: the UI thread owns the endpoint and its stored Box.
+        let callbacks = unsafe { &*callbacks };
+        if let Some(event) = TrayEvent::decode(wparam, lparam) {
+            callbacks
+                .waker
+                .deliver(|| callbacks.sender.try_send(event).is_ok());
         }
+        return LRESULT(0);
     }
-}
-
-impl Drop for TrayIcon {
-    fn drop(&mut self) {
-        notify_icon(NIM_DELETE, &self.data(NOTIFY_ICON_DATA_FLAGS(0)));
-        // SAFETY: the icon is this value's own, and the shell holds its own
-        // copy no more.
-        let _ = unsafe { DestroyIcon(self.icon) };
+    if message == WM_NCDESTROY {
+        // Endpoint::new owns the Box until creation succeeds; an unsuccessful
+        // creation can also send WM_NCDESTROY, so process teardown owns cleanup.
+        // SAFETY: clearing this class's slot prevents further callback access.
+        let _ = unsafe { SetWindowLongPtrW(window, GWLP_USERDATA, 0) };
     }
-}
-
-fn notify_icon(message: NOTIFY_ICON_MESSAGE, data: &NOTIFYICONDATAW) {
-    // SAFETY: `data` is complete, with its size set, and outlives the call,
-    // which copies it. A failure, such as no taskbar yet, leaves no icon,
-    // which TaskbarCreated adds later.
-    let _ = unsafe { Shell_NotifyIconW(message, data) };
-}
-
-/// Copies `text` into `field`, cut to fit with its NUL.
-fn copy(field: &mut [u16], text: &str) {
-    let units: Vec<u16> = text.encode_utf16().take(field.len() - 1).collect();
-    field[..units.len()].copy_from_slice(&units);
-    field[units.len()] = 0;
+    // SAFETY: unhandled messages and their original parameters go to Windows.
+    unsafe { DefWindowProcW(window, message, wparam, lparam) }
 }

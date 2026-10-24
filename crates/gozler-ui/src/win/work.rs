@@ -36,8 +36,11 @@ struct Running {
 impl Running {
     fn cancel(&self) {
         self.cancel.cancel();
-        // SAFETY: the JoinHandle keeps this thread handle valid, and the
-        // next invocation is not submitted until cancellation returns.
+        self.interrupt_io();
+    }
+
+    fn interrupt_io(&self) {
+        // SAFETY: the JoinHandle keeps this native thread handle valid.
         let _ = unsafe { CancelSynchronousIo(HANDLE(self.thread.as_raw_handle())) };
     }
 }
@@ -179,6 +182,13 @@ impl<I: Send + 'static, O: Send + 'static> Task<I, O> {
         }
     }
 
+    /// Interrupts a native call without ending a persistent worker's lifetime.
+    pub(crate) fn interrupt_io(&self) {
+        if let Some(running) = &self.running {
+            running.interrupt_io();
+        }
+    }
+
     pub(crate) fn take(&mut self) -> Option<(Id, O)> {
         let (id, output) = self.replies.try_recv().ok()?;
         self.complete(id, output).map(|output| (id, output))
@@ -204,6 +214,16 @@ impl<I: Send + 'static, O: Send + 'static> Task<I, O> {
         let mut retired = self.take_retired();
         retired.push(replies, work::INLINE_ITEMS + 1);
         retired
+    }
+
+    /// Waits off UI without releasing the worker's apartment. An obsolete
+    /// completion can return None while admitting the current pending input.
+    pub(crate) fn wait(&mut self, _worker: &OffThread) -> Option<(Id, O)> {
+        if !self.slot.is_running() {
+            return None;
+        }
+        let (id, output) = self.replies.recv().ok()?;
+        self.complete(id, output).map(|output| (id, output))
     }
 
     /// Essential finalization only, on a shutdown worker after delivery closes.

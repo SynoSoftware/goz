@@ -7,7 +7,6 @@
 use super::keys::key_of;
 use super::menu::Accelerators;
 use super::notify::{Command, Notification};
-use super::tray::TrayEvent;
 use super::{Hwnd, from_rect, to_rect, wide};
 use crate::core::commands::{Key, Keystroke};
 use crate::core::layout::{Dpi, Px, Rect, ScrollRequest, Size};
@@ -83,7 +82,7 @@ pub(crate) enum Message<'a> {
     Notify(Notification<'a>),
     Timer(usize),
     /// A request thread has put a reply on the channel
-    /// ([`super::wake::Waker`]).
+    /// ([`super::wake::OpenWaker`]).
     Wake,
     /// What the window posted itself with [`DEFERRED`], to act once after
     /// the messages of one user action.
@@ -185,7 +184,6 @@ pub(crate) enum Message<'a> {
     /// pressed.
     Hotkey,
     /// The tray icon was clicked or its menu asked for.
-    Tray(TrayEvent),
     /// Another process sent `text` with `WM_COPYDATA`, under `tag`.
     CopyData {
         tag: usize,
@@ -1037,10 +1035,6 @@ unsafe fn decode<'a>(msg: u32, wparam: WPARAM, lparam: LPARAM) -> Message<'a> {
             ending: wparam.0 != 0,
         },
         WM_HOTKEY => Message::Hotkey,
-        super::tray::TRAY => match TrayEvent::decode(wparam, lparam) {
-            Some(event) => Message::Tray(event),
-            None => Message::Other(msg),
-        },
         WM_COPYDATA => {
             // SAFETY: WM_COPYDATA's lparam points to a COPYDATASTRUCT whose
             // data, `cbData` bytes, lives while the message is sent.

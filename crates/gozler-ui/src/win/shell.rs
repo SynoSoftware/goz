@@ -24,7 +24,7 @@ use windows::Win32::System::Com::{
     CoInitializeEx, CoTaskMemFree, CoUninitialize, CreateBindCtx, IBindCtx, IDataObject,
 };
 use windows::Win32::System::Ole::{
-    DROPEFFECT_COPY, DROPEFFECT_LINK, DROPEFFECT_MOVE, IDropSource, OleInitialize,
+    DROPEFFECT_COPY, DROPEFFECT_LINK, DROPEFFECT_MOVE, IDropSource, OleInitialize, OleUninitialize,
 };
 use windows::Win32::System::Registry::{
     HKEY, HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, REG_ROUTINE_FLAGS, REG_SZ, RRF_RT_REG_BINARY,
@@ -246,6 +246,7 @@ fn known_folder(
 /// NOASYNC alone does not protect URI handlers after ShellExecuteEx returns.
 pub(crate) struct Session {
     initialized: windows::core::Result<()>,
+    ole: Cell<bool>,
     _thread: PhantomData<Rc<()>>,
 }
 
@@ -256,8 +257,22 @@ impl Session {
             unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE).ok() };
         Self {
             initialized,
+            ole: Cell::new(false),
             _thread: PhantomData,
         }
+    }
+
+    pub(crate) fn ole(&self, _worker: &super::work::OffThread) -> bool {
+        if self.ole.get() {
+            return true;
+        }
+        if self.initialized.is_err() {
+            return false;
+        }
+        // SAFETY: this session's STA stays on its creating worker thread.
+        let initialized = unsafe { OleInitialize(None) }.is_ok();
+        self.ole.set(initialized);
+        initialized
     }
 
     pub(crate) fn open(&self, target: &str) -> io::Result<()> {
@@ -368,6 +383,11 @@ impl Session {
 
 impl Drop for Session {
     fn drop(&mut self) {
+        if self.ole.get() {
+            // SAFETY: all source leases finish before the session leaves its
+            // worker scope; this balances that thread's OleInitialize.
+            unsafe { OleUninitialize() };
+        }
         if self.initialized.is_ok() {
             // SAFETY: match this thread's successful CoInitializeEx, after the
             // slot closes; no apartment interface crosses to another thread.
@@ -707,22 +727,6 @@ pub(crate) fn remove_search_with() {
     }
 }
 
-/// The window that owns Windows' permission prompt, which another thread
-/// passes to [`start_as_administrator`].
-#[derive(Clone, Copy)]
-pub(crate) struct PromptOwner(isize);
-
-// SAFETY: ShellExecuteExW only reads the handle to place its prompt, and
-// the window joins the thread that holds it in WM_DESTROY, while the handle
-// is valid.
-unsafe impl Send for PromptOwner {}
-
-impl PromptOwner {
-    pub(crate) fn new(window: Hwnd) -> PromptOwner {
-        PromptOwner(window.0.0 as isize)
-    }
-}
-
 /// A program that runs as administrator. Dropping it closes the handle,
 /// not the program.
 pub(crate) struct ElevatedProcess(HANDLE);
@@ -756,27 +760,40 @@ impl Drop for ElevatedProcess {
     }
 }
 
-/// Starts `program` with `parameters` as administrator, without a console
-/// window, after Windows asks the person for permission; the call returns
-/// once the person answers. A person who says no gives the error
-/// `ERROR_CANCELLED`. The window never sees or passes credentials
-/// (DESIGN.md: Daemon failures).
-pub(crate) fn start_as_administrator(
-    owner: PromptOwner,
-    program: &str,
-    parameters: &str,
-) -> io::Result<ElevatedProcess> {
-    let process = execute(
-        HWND(owner.0 as *mut _),
-        w!("runas"),
-        &HSTRING::from(program),
-        &HSTRING::from(parameters),
-        SEE_MASK_NOCLOSEPROCESS,
-        SW_HIDE,
-    )?;
-    // An executable always starts a process, so SEE_MASK_NOCLOSEPROCESS
-    // gives its handle.
-    Ok(ElevatedProcess(process))
+impl Session {
+    /// Waits for Windows' permission prompt on this worker's apartment. No
+    /// owner HWND may attach its input or lifetime to the window's thread.
+    pub(crate) fn start_as_administrator(
+        &self,
+        program: &str,
+        parameters: &str,
+    ) -> io::Result<ElevatedProcess> {
+        self.ready()?;
+        let process = execute(
+            HWND::default(),
+            w!("runas"),
+            &HSTRING::from(program),
+            &HSTRING::from(parameters),
+            SEE_MASK_NOCLOSEPROCESS | SEE_MASK_NOASYNC,
+            SW_HIDE,
+        )?;
+        if process.is_invalid() {
+            return Err(io_error(windows::Win32::Foundation::E_FAIL.into()));
+        }
+        Ok(ElevatedProcess(process))
+    }
+
+    /// A settings input file must remain until the accepted child exits,
+    /// even if that takes longer than the window's lifetime.
+    pub(crate) fn run_as_administrator_and_wait(
+        &self,
+        program: &str,
+        parameters: &str,
+    ) -> io::Result<u32> {
+        self.start_as_administrator(program, parameters)?
+            .wait(u32::MAX)?
+            .ok_or_else(|| io_error(windows::Win32::Foundation::E_FAIL.into()))
+    }
 }
 
 /// Whether `error` says that the person said no to Windows' permission
@@ -814,23 +831,6 @@ fn execute(
     // the call.
     unsafe { ShellExecuteExW(&mut info) }.map_err(io_error)?;
     Ok(info.hProcess)
-}
-
-/// How long [`run_as_administrator_and_wait`] waits for the program to end.
-const ELEVATED_WAIT_MS: u32 = 30_000;
-
-/// Runs `program` with `parameters` as administrator, as
-/// [`start_as_administrator`] does, waits for it to end, and gives its exit
-/// code. This thread waits for the person's answer and then for the
-/// program, at most [`ELEVATED_WAIT_MS`], so it is not the window's.
-pub(crate) fn run_as_administrator_and_wait(
-    owner: PromptOwner,
-    program: &str,
-    parameters: &str,
-) -> io::Result<u32> {
-    start_as_administrator(owner, program, parameters)?
-        .wait(ELEVATED_WAIT_MS)?
-        .ok_or_else(|| io::ErrorKind::TimedOut.into())
 }
 
 #[cfg(test)]

@@ -28,7 +28,17 @@ use std::sync::atomic::AtomicU32;
 use std::time::{Duration, Instant};
 
 pub(super) mod drops;
+pub(super) mod elevated;
+pub(super) mod fixes;
+pub(super) mod folders;
+pub(super) mod indexed;
+mod local_service;
+pub(super) mod paste;
+pub(super) mod programs;
 mod queue;
+pub(super) mod requests;
+pub(super) mod tray;
+pub(super) mod viewers;
 pub(super) use queue::{
     Accepted as QueueAccepted, CheckPurpose, Client as QueueClient, Ready as QueueReady,
 };
@@ -50,6 +60,26 @@ struct Report {
 }
 
 pub(super) const REPOSITORY: &str = env!("CARGO_PKG_REPOSITORY");
+
+#[derive(Clone, Copy)]
+pub(super) enum ReleasePurpose {
+    Update,
+    ServiceVersion,
+}
+
+impl ReleasePurpose {
+    fn slot(self) -> usize {
+        match self {
+            Self::Update => 0,
+            Self::ServiceVersion => 1,
+        }
+    }
+}
+
+pub(super) enum ReleaseAnswer {
+    Newer(Option<String>),
+    Older(bool),
+}
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum ShellTarget {
@@ -234,6 +264,15 @@ struct QueueStart {
 
 pub(super) struct Work {
     pub(super) drops: drops::Work,
+    pub(super) requests: requests::Requests,
+    pub(super) programs: programs::Checks,
+    pub(super) folders: folders::Work,
+    pub(super) fixes: fixes::Fixes,
+    pub(super) elevated: elevated::Saves,
+    pub(super) indexed: indexed::Work,
+    pub(super) paste: paste::Work,
+    pub(super) tray: Option<tray::Work>,
+    releases: [Task<ReleasePurpose, ReleaseAnswer>; 2],
     location: Task<String, ScopeCheck>,
     checked_location: Option<String>,
     scope: ScopeCheck,
@@ -269,9 +308,21 @@ struct ListWork {
 }
 
 impl Work {
-    pub(super) fn new(waker: OpenWaker) -> Self {
+    pub(super) fn new(waker: OpenWaker, error_log: PathBuf) -> Self {
         Self {
             drops: drops::Work::new(waker.clone()),
+            requests: requests::Requests::new(waker.clone(), error_log),
+            programs: programs::Checks::new(waker.clone()),
+            folders: folders::Work::new(waker.clone()),
+            fixes: fixes::Fixes::new(waker.clone()),
+            elevated: elevated::Saves::new(waker.clone()),
+            indexed: indexed::Work::new(waker.clone()),
+            paste: paste::Work::new(waker.clone()),
+            tray: tray::Work::new(waker.clone(), crate::core::ids::IconId::Gozler.id()).ok(),
+            releases: [
+                Task::new(waker.clone(), Replacement::Cancel, check_release).background(),
+                Task::new(waker.clone(), Replacement::Cancel, check_release),
+            ],
             location: Task::new(waker.clone(), Replacement::Cancel, check_location),
             checked_location: None,
             scope: ScopeCheck::Exists,
@@ -443,6 +494,13 @@ impl Work {
         active |= self.queue.tick(now).is_some();
         active |= self.following.tick(now).is_some();
         active |= self.reporting.tick(now).is_some();
+        active |= self.folders.tick(now);
+        active |= self.fixes.tick(now);
+        active |= self.elevated.tick(now);
+        active |= self.indexed.tick(now);
+        for task in &mut self.releases {
+            active |= task.tick(now).is_some();
+        }
         if let Some(task) = &mut self.saving {
             active |= task.tick(now).is_some();
         }
@@ -470,6 +528,17 @@ impl Work {
             active |= list.filtering.tick(now).is_some();
         }
         active
+    }
+
+    pub(super) fn check_release(&mut self, purpose: ReleasePurpose) {
+        self.releases[purpose.slot()].replace(purpose);
+    }
+
+    pub(super) fn take_releases(&mut self) -> Vec<ReleaseAnswer> {
+        self.releases
+            .iter_mut()
+            .filter_map(|task| task.take().map(|(_, answer)| answer))
+            .collect()
     }
 
     pub(super) fn save(&mut self, path: &Path, changes: Changes, report_failure: bool) {
@@ -965,9 +1034,22 @@ impl Work {
         answers
     }
 
-    /// Transfers essential writes to finalization; nonessential work is only
-    /// cancelled. The returned closure runs after the window has been destroyed.
-    pub(super) fn close(&mut self) -> impl FnOnce(&OffThread) + Send + 'static {
+    /// Returns independent persistence and accepted-mutation cleanup. Neither
+    /// closure may run on UI, and cleanup must not delay essential writes.
+    pub(super) fn close(
+        &mut self,
+    ) -> (
+        impl FnOnce(&OffThread) + Send + 'static,
+        impl FnOnce(&OffThread) + Send + 'static,
+    ) {
+        let export = self.requests.close();
+        let paste = self.paste.close();
+        crate::win::work::spawn(paste);
+        if let Some(tray) = &mut self.tray {
+            crate::win::work::spawn(tray.close());
+        }
+        let fixes = crate::win::work::spawn(self.fixes.close());
+        let elevated = crate::win::work::spawn(self.elevated.close());
         let drops = self.drops.close();
         crate::win::work::spawn(move |worker| drops(worker));
         self.location.cancel();
@@ -978,6 +1060,13 @@ impl Work {
         self.following.cancel();
         self.reporting.cancel();
         let mut retired = Retirement::default();
+        retired.append(self.programs.close());
+        retired.append(self.folders.close());
+        retired.append(self.indexed.close());
+        for task in &mut self.releases {
+            task.cancel();
+            retired.append(task.close_delivery());
+        }
         retired.append(self.location.close_delivery());
         retired.append(self.pairing.close_delivery());
         retired.append(self.labels.close_delivery());
@@ -1016,14 +1105,16 @@ impl Work {
         self.retire(retired);
         let saving = self.saving.take();
         let retiring = self.retiring.take();
+        crate::win::work::spawn(move |worker| {
+            if let Some(retiring) = retiring {
+                retiring.finish(worker);
+            }
+        });
         let registry = self.registry.take();
         let registry_write = self.registry_write.take();
         let registry = registry_write.and(registry);
         let queue_session = self.queue_session.take();
-        move |worker| {
-            if let Some(retiring) = retiring {
-                retiring.finish(worker);
-            }
+        let persist = move |worker: &OffThread| {
             if let Some(saving) = saving {
                 saving.finish(worker);
             }
@@ -1033,13 +1124,39 @@ impl Work {
             if let Some(session) = queue_session {
                 session.finish(worker);
             }
-        }
+        };
+        let cleanup = move |worker: &OffThread| {
+            export(worker);
+            let _ = fixes.join();
+            let _ = elevated.join();
+        };
+        (persist, cleanup)
     }
 }
 
 pub(super) fn load_settings(path: &Path) -> Settings {
     std::fs::read_to_string(path)
         .map_or_else(|_| Settings::default(), |text| Settings::parse(&text))
+}
+
+pub(super) fn finish_shutdown(
+    worker: &OffThread,
+    persist: impl FnOnce(&OffThread),
+    recovery: Option<std::sync::mpsc::Receiver<io::Result<()>>>,
+    cleanup: std::thread::JoinHandle<()>,
+    error_log: &Path,
+) {
+    persist(worker);
+    if let Some(finished) = recovery {
+        match finished.recv() {
+            Ok(Ok(())) => {}
+            result => crate::app::write_log(
+                error_log,
+                &format!("File operation recovery state was not saved at Exit: {result:?}"),
+            ),
+        }
+    }
+    let _ = cleanup.join();
 }
 
 pub(crate) fn write_settings(path: &Path, changes: Changes, _worker: &OffThread) -> io::Result<()> {
@@ -1066,6 +1183,22 @@ fn save(save: Save, worker: &OffThread, _cancel: &CancelToken) -> Saved {
     Saved {
         result,
         report_failure: save.report_failure,
+    }
+}
+
+fn check_release(purpose: ReleasePurpose, _worker: &OffThread, _: &CancelToken) -> ReleaseAnswer {
+    let reply = crate::win::update::latest_release();
+    match purpose {
+        ReleasePurpose::Update => ReleaseAnswer::Newer(reply.and_then(|reply| {
+            crate::core::update::newer_release(&reply, gozler_core::escompat::version())
+        })),
+        ReleasePurpose::ServiceVersion => ReleaseAnswer::Older(
+            reply
+                .and_then(|reply| {
+                    crate::core::update::latest_is_older(&reply, gozler_core::escompat::version())
+                })
+                .unwrap_or(false),
+        ),
     }
 }
 
@@ -1120,7 +1253,7 @@ fn check_pairing(
     _worker: &OffThread,
     cancel: &CancelToken,
 ) -> (LocalService, bool) {
-    let paired = !cancel.is_cancelled() && super::local_service::is_paired(&local.program);
+    let paired = !cancel.is_cancelled() && local_service::is_paired(&local.program);
     (local, paired)
 }
 
