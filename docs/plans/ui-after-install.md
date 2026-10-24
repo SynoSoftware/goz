@@ -1,7 +1,7 @@
 # The window: after install
 
-The owner's checklist for the window, from the stages of the window's plan,
-and for the copy, move and delete engine. Each item needs the installed
+The owner's checklist for the window and the copy, move and delete engine.
+Each item needs the installed
 Gozler, the owner's own settings, registry or taskbar, a second monitor, or
 for the engine other disks or an elevated run, so no agent runs it. Delete this file when the
 owner has run it, and file an issue for each item that fails.

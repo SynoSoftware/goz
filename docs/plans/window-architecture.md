@@ -44,16 +44,72 @@ runtime verification.
 
 ### Execution status
 
-**Stages 2 and 5 are complete; stages 1, 3–4 and 6–9 remain incomplete.**
-Last green full run: **47**. Full attempts: **47**; next: 48 only if needed.
-HEAD: `f5c8ec3`. Stage 6–8 work below is uncommitted. Installation remains a
-separate decision. On October 24 the owner brought deferred questions and UAC
-forward and confirmed readiness for one physical drag check after a green build.
+**Resumed unattended; no owner questions are queued.** The architectural
+refactoring is implemented and reviewed. Full49 is green: formatting, clippy,
+workspace tests and documentation; UI:282 passed,14 ignored. This continuation
+used two full runs:48 hit known restricted-token named-pipe, ACL and working-set
+failures;49 passed outside that restriction without a source/test change.
+Root should have reused that environment first. Log:
+`V:/temp/gozler-window-integrated-build49.log`. Full attempts:49.
+Base for this layout batch:124ad99, after architecture commit5fc49ca.
+All four disposable current-tree probe includes are removed.
+
+**Stages1–3 and5–7 are complete; stages4 and8–9 remain incomplete.**
+Retained native layout changes are reviewed and built: column fits before
+shrinking/after growing, actual post-move panel client widths, redraw only
+for changed columns, no layout-wide invalidation, and changed-child
+NOCOPYBITS with fallback parity. Review3 resolved review2's scrollbar-width
+finding: `V:/temp/gozler-window-stage4-layout-delta-review3.md`.
+No display tests, new painted surfaces, compositor or framework.
+
+**Native attempt6 passed** in1.91seconds: Ctrl+click selected2;
+Shift+End selected100,000 in native/model state; ended move reached its
+successful Summary, correct destination and no progress bar. Log:
+`V:/temp/gozler-window-final-native-proof6.log`.
+Handler samples: status2.068ms, key1.482ms, resize58.959ms,
+splitter70.031ms, Ctrl+click150.166ms, Shift+End49.049ms; move
+receipt0.167ms, Wake-handler sum6.589ms over2wakes. Different fixture and
+boundaries from8db8f37; no speedup claim. Native attempt5's nonreturning
+boundary remains unknown; a later pass does not explain it. Its in-thread
+deadline could not interrupt native nesting. Disposable checkpoints were
+added; no product timeout was lengthened. Potential remaining shell-icon
+waits are tracked in#148, separate from closed#87's migrated drag/open work.
+
+**Visual proof is not clean.** Historical74128aa and current real-window
+hosts completed the same finite border/splitter/typing/status/mode/copy
+sequence. Each copied8MiB and verified Summary, destination and shared pane.
+GDI outside-client artifacts are excluded. Authoritative WGC captures show
+95 baseline frames,97 initial current,105 correction1,113 correction2.
+All frames were inspected. Final audit:
+`V:/temp/gozler-window-stage4-8-wgc-correction2-audit.md`.
+Correction2 has no observed lost Search message or Search scrollbar flash.
+Mixed mode frames56–60, partial bottom controls62/64/66/70/75/77 and
+blank/partial completed-transfer card102–108 remain. Root independently
+expanded final frames26/77/105. Do not claim these resolved or delete the
+plan. Movies, frames, reports and immutable baseline remain saved in
+`V:/temp/gozler-window-*`; fixture data is disposable.
+
+Remaining work is the visual acceptance gate, followed by plan closure.
+No claim is made that independent HWND painting makes this impossible:
+the partial frames need a confirmed causal distinction between model
+presentation, native control state and native painting before another fix.
+This plan prohibits WS_EX_COMPOSITED; no new renderer is silently substituted.
+Installation and environment-specific checks remain in ui-after-install.md.
 
 #### Current batch and ownership
 
 Lead owns contracts, permanent docs, integration and the only build. Retained
-source is frozen, including the integrated watchdog. All six final specialist
+source is frozen, including the evidence-gated Stage4 native layout correction
+completed by the retained native-control implementer in MainWindow layout,
+Search/Panel column fitting, native positioning/list redraw and transfer-pane
+layout. It preserves foreign status changes and temporary probe includes.
+The correction1 frames show horizontal-scrollbar flashes, enabling Stage4's
+next conditional step: fit to the planned smaller width before moving. Native
+pixel copying and the partial transfer card are traced in the same batch.
+No owner questions, framework, new painted surface or display tests. All
+implementers/reviewers have returned ownership; the retained batch is green
+in Full49. The unresolved visual gate above remains the next plan item.
+All six final specialist
 reviews finished: five clean; flow found one Panel cancellation defect. Its owner
 fixed recovery after navigation cancellation and explicit Retry after cancelling
 that recovery; both app entry points now share the Panel cancellation owner.
@@ -61,15 +117,15 @@ The first delta found three related paths (clean folder watch, Search observatio
 later operation end after Cancel); their batched correction is frozen and clean
 in `V:/temp/gozler-window-final-cancel-delta-review2.md` (all six affected-contract
 passes, including the documentation corrections). Small corrections are batched before
-the next full build. The lead also prepares exact own-only staged blobs so foreign
-status/date work stays uncommitted and the architecture commit remains coherent.
+the next full build. Exact own-only candidate blobs preserved foreign status/date
+work while producing the coherent architecture commit `5fc49ca`.
 
 - **Stage 6:** feature/control ownership, private Panel row operations and typed
   Work groups are implemented and source-reviewed. Areas own controls and native
   interaction; shared facts stay in Model. Accepted Location/label facts belong
   to consumers, while Work retains execution inputs. Queue retains engine
   scheduling and recovery. Source reviews remain valid; Full46 verifies the
-  integrated code. Precise own-hunk commits remain.
+  integrated code; Full47 and `5fc49ca` complete the retained source batch.
 - **Stage 7:** Model has one `Accepted { touched, effects }` contract; no
   Change/Then compatibility path. MainWindow applies structure, refreshes touched
   areas, then delivers ordered actions. Native reentry coalesces repair through
@@ -86,7 +142,8 @@ status/date work stays uncommitted and the architecture commit remains coherent.
   `V:/temp/gozler-window-stage7-compile-correction-review1.md`,
   `V:/temp/gozler-window-stage7-row-tail-review1.md`,
   `V:/temp/gozler-window-stage7-full45-generation-review1.md`.
-  Full46 verifies compilation and tests; native measurements remain separate.
+  Full46 verifies compilation and tests; native measurements passed attempt6
+  with the fixture/boundary limits recorded above.
 - **Reentry identities:** FirstRow retains shown-results Generation; deferred
   Cancel compares Requests.current with Model's awaited identity. Repair dispatch
   and replies share one Model intent Generation, replacing Work's separate
@@ -117,8 +174,8 @@ status/date work stays uncommitted and the architecture commit remains coherent.
   Crate/module comments describe retained responsibilities. The latest doc audit
   confirmed native buffers, changed-rectangle batching and redraw erasure/frame/
   child flags from source. Watchdog documentation describes the retained mechanism.
-  Final review fixes, affected checks, precise stage commits and deletion of
-  this incomplete plan remain; do not treat this source/doc audit as completion.
+  Final review fixes, required full verification and own source/doc commit are
+  complete. Native timing/recordings and deletion of this incomplete plan remain.
 
 #### Verification gate and foreign changes
 
@@ -165,7 +222,10 @@ combined `-Timing timing_window_` then opened and closed its visual host, but
 the timing test failed on duplicate pane registration in that same test process.
 Log: `V:/temp/gozler-window-final-native-proof2.log`; original failure:
 `V:/temp/gozler-window-native-timing.log`. Both attempts are terminal failures;
-no timing measurements passed. Run the two filters in separate cached
+no timing measurements passed. A third attempt then caught three fixture-only
+compile errors (DialogItem/PCWSTR imports and a UTF-16 assertion); all corrected
+together in the disposable files. The fourth attempt is running:
+`V:/temp/gozler-window-final-native-proof4.log`. Run the two filters in separate cached
 test processes, without registration-sharing machinery. Foreground visual input
 proved unreliable and consumed time; its partial recording is not proof. The
 existing fixture owner prepares the plan's bounded handler-driven paired visual
@@ -211,9 +271,9 @@ passed Full46. Source hashes stayed stable during Full43 and Full44.
 Another session owns status-bar/catalogue/resource edits, its Model test hunks,
 MainWindow's indexing-entry map and DESIGN's status-bar descriptions. Preserve
 and exclude them from commits. Later staging must select own hunks in Model,
-MainWindow and DESIGN. The lead staged 52 own-only blobs from the reviewed
-candidate tree, including the verified watchdog; the index excludes foreign
-contracts, and the worktree retains them. The candidate-only status assertion
+MainWindow and DESIGN. Commit `5fc49ca` contains the own-only candidate blobs and
+plan checkpoint, including the verified watchdog; foreign contracts remain in
+the worktree. The candidate-only status assertion
 correction and formatting are included. Foreign date-column work also touches text.rs, dates.rs,
 the Search/panel captions and controls, and Model's short_header/.full hunks;
 preserve and exclude those alongside the earlier status-bar changes.
@@ -227,7 +287,7 @@ preserve and exclude those alongside the earlier status-bar changes.
 | Slow-work waiting and cancellation | `74128aa` | 39 green first run, 268 / 14 | `V:/temp/gozler-window-stage3-waiting-build39.log` |
 | Native waits and control owners | `47f06cc` | 40 green first run, 269 / 14 | `V:/temp/gozler-window-native-wait-controls-build40.log` |
 | Model state, feature captions and marquee ownership | `f5c8ec3` | 41–42; 42 green, 269 / 14 | `V:/temp/gozler-window-state-areas-build42.log` |
-| Feature owners, Work groups, Panel rows, explicit updates and watchdog | own-only blobs staged, uncommitted | 43–45 corrections; 46 green; 47 green, 282 / 14 | `V:/temp/gozler-window-integrated-build47.log`; six final specialist reviews and cancellation delta review2 |
+| Feature owners, Work groups, Panel rows, explicit updates and watchdog | `5fc49ca` | 43–45 corrections; 46 green; 47 green, 282 / 14 | `V:/temp/gozler-window-integrated-build47.log`; six final specialist reviews and cancellation delta review2 |
 
 Current retained source reviews are clean:
 `V:/temp/gozler-window-work-groups-review1.md`,
@@ -251,9 +311,14 @@ then one focused native-watchdog attempt and five later focused attempts
 (twelve total, including compile failures), plus the current own-only `core::`
 attempt (thirteenth) and its successful single-test recheck (fourteenth); one legitimate
 `-Timing timing_large_panel_selection`, two disposable watchdog timing attempts,
-and two native timing/visual attempts (both failed before timing); one baseline
+and native attempts1–6 (attempt6 passed; earlier failures retained above).
+Paired GDI and WGC runs each passed both real-copy sequences; GDI appearance
+outside the client is not used as proof. Correction1's first compile failed
+only in disposable diagnostics, then its recorded run passed behavior but
+failed the visual bar. Correction2's source delta/recheck precedes its one
+final recording; one baseline
 `-Release` attempt failed at locked executable publication; **no Criterion runs**.
-Last successful product-focused run:
+Stage1's successful product-focused run:
 `-Test a_change_batch_keeps_the_taken_names_folded_once`,
 `V:/temp/gozler-window-stage1-cache-focused6.log`.
 The selection timing observed chosen-source medians 0.969 / 70.565 ms and counts
@@ -756,6 +821,9 @@ person waits, each in one sentence until then:
 - The window waits 59–183 ms while Windows creates the folder picker.
 - The first paint of `C:\Windows\Fonts` (387 entries, 104 ms) spent 37 ms
   filling cells, inferred from the code to be icon lookups; not measured.
+  Source tracing still finds synchronous icon lookup in panel callbacks;
+  remaining icon work is tracked in #148, separating it from closed #87's
+  migrated drag/open paths. The native fixture hang has no proven icon cause.
 - A panel list's whole paint takes 28–30 ms, of which Gozler's cell
   filling is 0.65 ms (#110); one run turns off the list's settings in
   turn to find the cost.

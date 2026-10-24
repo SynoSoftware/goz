@@ -180,11 +180,16 @@ impl Search {
 
     /// Fills the list's width with its columns when the width changed
     /// ([`ColumnSizing::resized`]).
-    pub(super) fn fill_on_resize(&self, window: &MainWindow) {
-        let width = self.fill_width();
+    pub(super) fn fill_on_resize(&self, window: &MainWindow, width: Px) {
+        let width = self.fill_width() + width - self.list.hwnd().screen_rect().width;
         let widths = (self.column_sizing.borrow_mut()).resized(width, || self.column_fits(window));
-        if let Some(widths) = widths {
-            self.set_column_widths(widths);
+        if let Some(widths) = widths
+            && widths
+                .iter()
+                .enumerate()
+                .any(|(index, width)| self.list.column_width(index) != *width)
+        {
+            self.list.draw_once_after(|| self.set_column_widths(widths));
         }
     }
 
@@ -196,8 +201,7 @@ impl Search {
             (self.column_sizing.borrow_mut()).drag_ended(width, || self.column_fits(window));
         if let Some(widths) = widths {
             let list = self.list;
-            list.hwnd()
-                .draw_once_after(|| self.set_column_widths(widths));
+            list.draw_once_after(|| self.set_column_widths(widths));
         }
     }
 
@@ -222,8 +226,7 @@ impl Search {
             // A list that draws itself paints every row it shows for each
             // width it sets, and its first paints shape every text afresh.
             let list = self.list;
-            list.hwnd()
-                .draw_once_after(|| self.set_column_widths(widths));
+            list.draw_once_after(|| self.set_column_widths(widths));
         }
     }
 

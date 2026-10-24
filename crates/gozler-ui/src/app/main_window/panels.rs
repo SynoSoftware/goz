@@ -719,6 +719,16 @@ impl Panels {
     /// rest, or shares it with a search panel's Folder (DESIGN.md: A panel,
     /// Search in a panel).
     pub(super) fn fill_panel_columns(&self, window: &MainWindow) {
+        self.fill_panel_columns_at(
+            window,
+            Side::BOTH.map(|side| Some(self.panel(side).list.hwnd().client_size().width)),
+        );
+    }
+
+    pub(super) fn fill_panel_columns_at(&self, window: &MainWindow, available: [Option<Px>; 2]) {
+        if available.iter().all(Option::is_none) {
+            return;
+        }
         let created = window.created();
         let dpi = created.metrics.get().dpi;
         let fitted = [
@@ -777,7 +787,10 @@ impl Panels {
                 })
                 .collect()
         };
-        for side in Side::BOTH {
+        for (side, available) in Side::BOTH.into_iter().zip(available) {
+            let Some(available) = available else {
+                continue;
+            };
             let c = self.panel(side);
             let fitted_widths = (c.columns().iter().enumerate())
                 .filter_map(|(index, column)| {
@@ -785,13 +798,21 @@ impl Panels {
                     Some((index, widths[fit]))
                 })
                 .collect();
-            self.set_panel_widths(window, side, fitted_widths);
+            self.set_panel_widths(window, side, available, fitted_widths);
         }
     }
 
     /// Gives Name the room the other columns leave in `side`'s list.
     pub(super) fn fill_name_column(&self, window: &MainWindow, side: Side) {
-        self.set_panel_widths(window, side, Vec::new());
+        self.fill_name_column_at(
+            window,
+            side,
+            self.panel(side).list.hwnd().client_size().width,
+        );
+    }
+
+    pub(super) fn fill_name_column_at(&self, window: &MainWindow, side: Side, width: Px) {
+        self.set_panel_widths(window, side, width, Vec::new());
     }
 
     /// Gives `side`'s columns `widths`, as column index and width, and Name
@@ -804,6 +825,7 @@ impl Panels {
         &self,
         window: &MainWindow,
         side: Side,
+        available: Px,
         mut widths: Vec<(usize, Px)>,
     ) {
         let c = self.panel(side);
@@ -816,8 +838,8 @@ impl Panels {
                 let given = widths.iter().find(|(column, _)| *column == index);
                 sum + given.map_or_else(|| c.list.column_width(index), |(_, width)| *width)
             });
-        let room = (c.list.hwnd().client_size().width - others)
-            .max(Px(column_sizing::column_width(Column::Name, dpi).0 / 2));
+        let room =
+            (available - others).max(Px(column_sizing::column_width(Column::Name, dpi).0 / 2));
         match c.columns().iter().position(|c| *c == PanelColumn::Folder) {
             Some(folder) => {
                 let name = Px(room.0 * 13 / 23);
@@ -827,7 +849,7 @@ impl Panels {
         }
         widths.retain(|(index, width)| c.list.column_width(*index) != *width);
         if !widths.is_empty() {
-            c.list.hwnd().draw_once_after(|| {
+            c.list.draw_once_after(|| {
                 for (index, width) in widths {
                     c.list.set_column_width(index, width);
                 }

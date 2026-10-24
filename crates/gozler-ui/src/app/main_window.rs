@@ -1367,12 +1367,55 @@ impl MainWindow {
                 .map(|divider| divider.hwnd())
                 .zip(layout.dividers.iter().copied()),
         );
-        // The list draws once, after the fill has set its new widths, so a
-        // narrower window does not flash its horizontal scroll bar.
-        controls.search.list.hwnd().draw_once_after(|| {
-            win::move_children(&moves);
-            self.controls().search.fill_on_resize(self);
+        let search_width = search.map(|placed| {
+            (
+                placed.list.width,
+                placed.list.width < controls.search.list.hwnd().screen_rect().width,
+            )
         });
+        let panel_widths = match &layout.body {
+            Body::TwoPanels { panels, .. } => std::array::from_fn(|index| {
+                let list = controls.panels.sides[index].list.hwnd();
+                let old_width = list.screen_rect().width;
+                (
+                    list.client_size().width + panels[index].list.width - old_width,
+                    panels[index].list.width < old_width,
+                )
+            }),
+            Body::Search(_) => [(Px(0), false); 2],
+        };
+        let fill_columns = |before_move| {
+            if let Some((width, narrows)) = search_width {
+                if narrows == before_move {
+                    controls.search.fill_on_resize(self, width);
+                }
+            } else {
+                let widths = std::array::from_fn(|index| {
+                    let (planned, narrows) = panel_widths[index];
+                    if before_move {
+                        narrows.then_some(planned)
+                    } else {
+                        let actual = controls.panels.sides[index].list.hwnd().client_size().width;
+                        (!narrows || actual != planned).then_some(actual)
+                    }
+                });
+                // Border drags keep the existing fits of the other columns.
+                if controls.search.column_sizing.borrow().is_dragging() {
+                    for (side, width) in Side::BOTH.into_iter().zip(widths) {
+                        if let Some(width) = width {
+                            controls.panels.fill_name_column_at(self, side, width);
+                        }
+                    }
+                } else {
+                    controls.panels.fill_panel_columns_at(self, widths);
+                }
+            }
+        };
+        // Fit shrinking columns before the move can introduce a horizontal
+        // scroll bar; widening makes room before columns grow.
+        fill_columns(true);
+        win::move_children(&moves);
+        fill_columns(false);
         if let Some(filters) = filters {
             self.controls()
                 .filters
@@ -1426,7 +1469,6 @@ impl MainWindow {
                 maximized,
             );
         }
-        let two_panels = search.is_none();
         created.layout.replace(Some(layout));
         // Each panel's message is placed for its text in its list.
         for side in Side::BOTH {
@@ -1443,25 +1485,12 @@ impl MainWindow {
                 button.hwnd().set_visible(false);
             }
         }
-        if two_panels {
-            // During a drag of the border only Name follows the width,
-            // because fitting the other columns measures their texts, as
-            // `fill_on_resize` keeps Search's fits.
-            if self.controls().search.column_sizing.borrow().is_dragging() {
-                for side in Side::BOTH {
-                    self.controls().panels.fill_name_column(self, side);
-                }
-            } else {
-                self.controls().panels.fill_panel_columns(self);
-            }
-        }
         if inspector_moved {
             self.controls().inspector.show_field_rows(self);
             self.controls().inspector.show_inspector_fit(inspector_fit);
         }
         self.update_status();
         self.update_message();
-        hwnd.invalidate();
     }
 
     fn on_dpi_changed(&self, hwnd: Hwnd, dpi: Dpi, suggested: Rect) {

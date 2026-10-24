@@ -44,10 +44,11 @@ use windows::Win32::UI::WindowsAndMessaging::{
     BeginDeferWindowPos, DeferWindowPos, DestroyWindow, EndDeferWindowPos, GWL_EXSTYLE, GWL_STYLE,
     GetClassNameW, GetClientRect, GetParent, GetWindowLongPtrW, GetWindowPlacement, GetWindowRect,
     GetWindowTextLengthW, GetWindowTextW, IsChild, IsIconic, IsWindowVisible, PostMessageW,
-    SW_HIDE, SW_RESTORE, SW_SHOW, SW_SHOWDEFAULT, SW_SHOWMINNOACTIVE, SW_SHOWNA, SW_SHOWNORMAL,
-    SWP_NOACTIVATE, SWP_NOZORDER, SendMessageW, SetForegroundWindow, SetWindowPos, SetWindowTextW,
-    ShowWindow, UIS_CLEAR, UISF_HIDEFOCUS, WINDOW_EX_STYLE, WINDOW_STYLE, WINDOWPLACEMENT,
-    WM_CHANGEUISTATE, WM_SETREDRAW, WPF_RESTORETOMAXIMIZED, WS_VISIBLE,
+    SET_WINDOW_POS_FLAGS, SW_HIDE, SW_RESTORE, SW_SHOW, SW_SHOWDEFAULT, SW_SHOWMINNOACTIVE,
+    SW_SHOWNA, SW_SHOWNORMAL, SWP_NOACTIVATE, SWP_NOCOPYBITS, SWP_NOZORDER, SendMessageW,
+    SetForegroundWindow, SetWindowPos, SetWindowTextW, ShowWindow, UIS_CLEAR, UISF_HIDEFOCUS,
+    WINDOW_EX_STYLE, WINDOW_STYLE, WINDOWPLACEMENT, WM_CHANGEUISTATE, WM_SETREDRAW,
+    WPF_RESTORETOMAXIMIZED, WS_VISIBLE,
 };
 use windows::core::HSTRING;
 
@@ -110,6 +111,10 @@ impl Hwnd {
     /// Moves and sizes the window, in its parent's client coordinates for
     /// a control and in screen coordinates for a top-level window.
     pub(crate) fn set_rect(self, rect: Rect) {
+        self.position(rect, SWP_NOZORDER | SWP_NOACTIVATE);
+    }
+
+    fn position(self, rect: Rect, flags: SET_WINDOW_POS_FLAGS) {
         // SAFETY: plain values; a stale handle only fails.
         let _ = unsafe {
             SetWindowPos(
@@ -119,7 +124,7 @@ impl Hwnd {
                 rect.y.0,
                 rect.width.0,
                 rect.height.0,
-                SWP_NOZORDER | SWP_NOACTIVATE,
+                flags,
             )
         };
     }
@@ -288,6 +293,10 @@ impl Hwnd {
     /// visible, as a regional-format change would make the main window
     /// while it is hidden in the notification area.
     pub(crate) fn draw_once_after(self, change: impl FnOnce()) {
+        self.redraw_after(change, true);
+    }
+
+    fn redraw_after(self, change: impl FnOnce(), erase: bool) {
         if !self.styles().0.contains(WS_VISIBLE) {
             change();
             return;
@@ -302,7 +311,10 @@ impl Hwnd {
                 Some(self.0),
                 None,
                 None,
-                RDW_ERASE | RDW_FRAME | RDW_INVALIDATE | RDW_ALLCHILDREN,
+                RDW_FRAME
+                    | RDW_INVALIDATE
+                    | RDW_ALLCHILDREN
+                    | if erase { RDW_ERASE } else { Default::default() },
             );
         }
     }
@@ -396,6 +408,9 @@ pub(crate) fn move_children(moves: &[(Hwnd, Rect)]) {
     if moves.is_empty() {
         return;
     }
+    // Copied client pixels can contain a sibling's old drawing during a
+    // coordinated resize; let each changed child paint its new rectangle.
+    let flags = SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOCOPYBITS;
     // SAFETY: plain values. Each DeferWindowPos takes the batch handle and
     // returns the next one; EndDeferWindowPos, or a failed DeferWindowPos,
     // frees it.
@@ -411,7 +426,7 @@ pub(crate) fn move_children(moves: &[(Hwnd, Rect)]) {
                     rect.y.0,
                     rect.width.0,
                     rect.height.0,
-                    SWP_NOZORDER | SWP_NOACTIVATE,
+                    flags,
                 )
                 .ok()
             });
@@ -420,7 +435,7 @@ pub(crate) fn move_children(moves: &[(Hwnd, Rect)]) {
     };
     if !applied {
         for (child, rect) in moves {
-            child.set_rect(*rect);
+            child.position(*rect, flags);
         }
     }
 }
