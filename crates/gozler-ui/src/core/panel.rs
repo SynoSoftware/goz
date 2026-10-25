@@ -3399,13 +3399,35 @@ pub(crate) mod tests {
     /// (DESIGN.md: New folder).
     #[test]
     fn new_folder_checks_the_names_the_rows_show() {
-        let mut panels = showing(r"C:\f", vec![folder("Photos"), file("x.txt", 1, 0)]);
+        let mut panels = showing(
+            r"C:\f",
+            vec![folder("photos"), file("Photos", 1, 0), file("x.txt", 1, 0)],
+        );
         let shown = |panels: &Panels, name| panels.panel(Side::Left).shown_name(name);
-        assert_eq!(shown(&panels, "PHOTOS").as_deref(), Some("Photos"));
+        assert_eq!(shown(&panels, "Photos").as_deref(), Some("Photos"));
+        assert_eq!(shown(&panels, "PHOTOS").as_deref(), Some("photos"));
         let mut taken = Taken::default();
         taken.insert(OperationId::for_tests(1), Path::new(r"C:\f\x.txt"), false);
         panels.set_taken(Arc::new(taken), [None; 2]);
         assert_eq!(shown(&panels, "x.txt"), None);
+        assert_eq!(shown(&panels, "Photos").as_deref(), Some("Photos"));
+
+        panels.apply_changes(
+            Side::Left,
+            vec![FolderChange::Renamed {
+                from: wide("Photos"),
+                to: file("Images", 1, 0),
+            }],
+            None,
+        );
+        assert_eq!(shown(&panels, "Photos").as_deref(), Some("photos"));
+        assert_eq!(shown(&panels, "IMAGES").as_deref(), Some("Images"));
+        panels.set_taken(Arc::new(Taken::default()), [None; 2]);
+        assert_eq!(shown(&panels, "x.txt").as_deref(), Some("x.txt"));
+
+        list(&mut panels, r"C:\f", vec![folder("Photos")]);
+        assert_eq!(shown(&panels, "PHOTOS").as_deref(), Some("Photos"));
+        assert_eq!(shown(&panels, "Images"), None);
     }
 
     #[test]

@@ -5,6 +5,8 @@ use super::{
     Strings, SummaryRow, Surface, Waiting, captions, connected_drives, connected_volumes,
     include_drives, io, label_of, preview, summary_rows, win,
 };
+use crate::core::include::summary_drives_changed;
+use gozler_core::proto::DaemonStatus;
 
 #[derive(Clone, Copy)]
 pub(super) struct OpenSettings {
@@ -24,6 +26,8 @@ pub(in crate::app) struct SettingsBridge {
     pub(super) include_save: RefCell<IncludeSave>,
     pub(super) sign_in_saved: RefCell<Option<(Id, io::Result<()>)>>,
     pub(super) labels: RefCell<Vec<(String, Option<String>)>>,
+    include_summary_dirty: Cell<bool>,
+    include_preview_dirty: Cell<bool>,
 }
 
 impl SettingsBridge {
@@ -34,12 +38,16 @@ impl SettingsBridge {
             include_save: RefCell::new(IncludeSave::Idle),
             sign_in_saved: RefCell::new(None),
             labels: RefCell::new(Vec::new()),
+            include_summary_dirty: Cell::new(false),
+            include_preview_dirty: Cell::new(false),
         }
     }
     /// A running service fix follows the modal dialog, where its controls
     /// stay reachable; an earlier fix's result does not enter a new dialog.
     pub(in crate::app) fn settings_opened(&self, window: &MainWindow, dialog: Hwnd) {
         let follow_fix = window.model.borrow().fix().running();
+        self.include_summary_dirty.set(false);
+        self.include_preview_dirty.set(false);
         self.open.set(Some(OpenSettings { dialog, follow_fix }));
         window.update_status();
     }
@@ -99,6 +107,45 @@ impl SettingsBridge {
     pub(in crate::app) fn post_settings_reply(&self) {
         if let Some(open) = self.open.get() {
             win::dialog::post_reply(open.dialog);
+        }
+    }
+
+    pub(in crate::app) fn include_summary_changed(&self) {
+        if self.open.get().is_some() && !self.include_summary_dirty.replace(true) {
+            self.post_settings_reply();
+        }
+    }
+
+    pub(in crate::app) fn take_include_summary_changed(&self) -> bool {
+        self.include_summary_dirty.replace(false)
+    }
+
+    pub(in crate::app) fn include_preview_changed(&self) {
+        if self.open.get().is_some() && !self.include_preview_dirty.replace(true) {
+            self.post_settings_reply();
+        }
+    }
+
+    pub(in crate::app) fn take_include_preview_changed(&self) -> bool {
+        self.include_preview_dirty.replace(false)
+    }
+
+    pub(in crate::app) fn observe_include_status(
+        &self,
+        before: Option<&DaemonStatus>,
+        after: &DaemonStatus,
+    ) {
+        if self.open.get().is_none() {
+            return;
+        }
+        let drives_changed = summary_drives_changed(before, after);
+        if drives_changed
+            || before.is_none_or(|before| indexed_entries(before) != indexed_entries(after))
+        {
+            self.include_preview_changed();
+        }
+        if drives_changed {
+            self.include_summary_changed();
         }
     }
 
@@ -346,12 +393,14 @@ impl SettingsBridge {
                     .collect::<Vec<_>>()
             })
         };
-        self.labels.replace(
-            labels
-                .into_iter()
-                .filter(|(prefix, _)| prefixes.contains(prefix))
-                .collect(),
-        );
+        let labels = labels
+            .into_iter()
+            .filter(|(prefix, _)| prefixes.contains(prefix))
+            .collect::<Vec<_>>();
+        if *self.labels.borrow() != labels {
+            self.labels.replace(labels);
+            self.include_summary_changed();
+        }
     }
 
     pub(in crate::app) fn refresh_volume_labels(&self, window: &MainWindow) {
@@ -386,10 +435,7 @@ impl SettingsBridge {
     /// The entries the index holds now.
     pub(in crate::app) fn indexed_entries(&self, window: &MainWindow) -> u64 {
         let model = window.model.borrow();
-        model
-            .service()
-            .0
-            .map_or(0, |status| status.volumes.iter().map(|v| v.entries).sum())
+        model.service().0.map_or(0, indexed_entries)
     }
 
     /// The rows of the summary of the indexed folders, which Settings >
@@ -502,4 +548,12 @@ impl SettingsBridge {
     ) -> Option<Result<Option<String>, DaemonFailure>> {
         self.total_commander.take()
     }
+}
+
+fn indexed_entries(status: &DaemonStatus) -> u64 {
+    status
+        .volumes
+        .iter()
+        .map(|volume| volume.entries)
+        .fold(0, u64::saturating_add)
 }

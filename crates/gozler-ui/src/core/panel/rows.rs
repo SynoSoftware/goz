@@ -153,6 +153,11 @@ pub(super) struct FolderRows {
     totals: Totals,
     /// Indexes in display order while entries are taken; `None` when all show.
     shown: Option<Vec<u32>>,
+    /// Shown entry indexes by hash and raw name, for exact lookup.
+    exact_names: Vec<u32>,
+    /// Shown entry indexes by hash, folded name and display order, so a
+    /// folded lookup keeps the first shown spelling without scanning ties.
+    folded_names: Vec<u32>,
     /// [`FolderRows::filter`] reuses these hashes between change batches.
     taken_hashes: Option<Arc<TakenHashes>>,
     /// The ended operations that still take rows from this panel, with the
@@ -176,6 +181,8 @@ impl FolderRows {
             order,
             totals: Totals::default(),
             shown: None,
+            exact_names: Vec::new(),
+            folded_names: Vec::new(),
             taken_hashes: None,
             kept: HashMap::new(),
         }
@@ -260,10 +267,13 @@ impl FolderRows {
     }
 
     pub(super) fn row_named(&self, name: &Name, up: u64) -> Option<u64> {
-        (up..self.count(up)).find(|row| {
-            self.entry(*row, up)
-                .is_some_and(|entry| entry.hash == name.hash && entry.name == name.raw)
-        })
+        let at = self.exact_names.partition_point(|&at| {
+            let entry = &self.entries[at as usize];
+            (entry.hash, entry.name.as_ref()) < (name.hash, name.raw.as_ref())
+        });
+        let &at = self.exact_names.get(at)?;
+        let entry = &self.entries[at as usize];
+        (entry.hash == name.hash && entry.name == name.raw).then(|| self.shown_row(at, up))
     }
 
     pub(super) fn awaited_row(&self, awaited: &Awaited, up: u64) -> Option<u64> {
@@ -290,6 +300,15 @@ impl FolderRows {
         }
     }
 
+    fn shown_row(&self, at: u32, up: u64) -> u64 {
+        let row = self.shown.as_ref().map_or(at as usize, |shown| {
+            shown
+                .binary_search(&at)
+                .expect("name indexes contain only shown entries")
+        });
+        row as u64 + up
+    }
+
     /// The folder row at `index`; [`super::Panels::row`] gives a search panel's.
     pub(super) fn row(&self, index: u64, up: u64) -> Option<Row<'_>> {
         if up != 0 && index == 0 {
@@ -309,16 +328,31 @@ impl FolderRows {
     /// The row that holds `name`: the one with exactly that name, else one
     /// whose name differs only in case, because a case-sensitive folder can
     /// hold both. `near` limits the search to a row and how far from it the
-    /// name's row may have moved, so a change costs no pass over a large
-    /// folder; `None` searches every row.
+    /// name's row may have moved; `None` uses the prepared name indexes.
     pub(super) fn row_of(&self, name: &Name, near: Option<(u64, u64)>, up: u64) -> Option<u64> {
-        let all = up..self.count(up);
-        let rows = match near {
-            Some((row, reach)) => {
-                row.saturating_sub(reach).max(all.start)..(row + reach + 1).min(all.end)
+        let Some((row, reach)) = near else {
+            if let Some(row) = self.row_named(name, up) {
+                return Some(row);
             }
-            None => all,
+            let key = name_key(&name.raw);
+            let mut folding = Folding::default();
+            let compare = |at: u32, folding: &mut Folding| {
+                let entry = &self.entries[at as usize];
+                entry
+                    .hash
+                    .cmp(&name.hash)
+                    .then_with(|| folding.of(&entry.name).cmp(&key))
+            };
+            let at = self
+                .folded_names
+                .partition_point(|&at| compare(at, &mut folding).is_lt());
+            let &at = self.folded_names.get(at)?;
+            return compare(at, &mut folding)
+                .is_eq()
+                .then(|| self.shown_row(at, up));
         };
+        let all = up..self.count(up);
+        let rows = row.saturating_sub(reach).max(all.start)..(row + reach + 1).min(all.end);
         let exact = |row: &u64| {
             self.entry(*row, up)
                 .is_some_and(|e| e.hash == name.hash && e.name == name.raw)
@@ -407,6 +441,35 @@ impl FolderRows {
         }
     }
 
+    pub(super) fn filter(&mut self, folder: &str, taken: &Arc<Taken>) {
+        self.filter_taken(folder, taken);
+        self.index_names();
+    }
+
+    fn index_names(&mut self) {
+        let entries = &self.entries;
+        self.exact_names = self
+            .shown
+            .clone()
+            .unwrap_or_else(|| (0..entries.len() as u32).collect());
+        self.exact_names.sort_unstable_by(|&a, &b| {
+            let a = &entries[a as usize];
+            let b = &entries[b as usize];
+            (a.hash, &a.name).cmp(&(b.hash, &b.name))
+        });
+        self.folded_names = self.exact_names.clone();
+        let mut a_key = Folding::default();
+        let mut b_key = Folding::default();
+        self.folded_names.sort_unstable_by(|&a, &b| {
+            let left = &entries[a as usize];
+            let right = &entries[b as usize];
+            left.hash
+                .cmp(&right.hash)
+                .then_with(|| a_key.of(&left.name).cmp(b_key.of(&right.name)))
+                .then_with(|| a.cmp(&b))
+        });
+    }
+
     /// Recomputes which entries show, after the entries or the taken
     /// entries changed. Only a folder that a delete or a move takes, or
     /// one that holds a taken entry, looks at its entries, so a change in
@@ -414,7 +477,7 @@ impl FolderRows {
     /// entry whose name has a taken name's hash is looked up, by its name
     /// as the operation gave it, so a change batch folds no name; its path
     /// is compared only when the operation gave its name in another case.
-    pub(super) fn filter(&mut self, folder: &str, taken: &Arc<Taken>) {
+    fn filter_taken(&mut self, folder: &str, taken: &Arc<Taken>) {
         let kept = &self.kept;
         let keeps = |id| kept.contains_key(&id);
         if taken.is_empty() {

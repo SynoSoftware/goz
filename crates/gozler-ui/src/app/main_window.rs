@@ -636,6 +636,13 @@ impl MainWindow {
         &self.created().controls
     }
 
+    fn log_error(&self, text: String) {
+        self.created()
+            .work
+            .borrow_mut()
+            .log_error(self.settings_file.with_file_name("ui-error.log"), text);
+    }
+
     fn instance(&self) -> Instance {
         self.model.borrow().instance()
     }
@@ -1980,10 +1987,7 @@ impl MainWindow {
         match win::dialog::run_modal(hwnd, dialog, &captions, state) {
             Ok(end) => Some(end),
             Err(error) => {
-                super::write_log(
-                    &self.settings_file.with_file_name("ui-error.log"),
-                    &format!("The {dialog:?} dialog did not open: {error}"),
-                );
+                self.log_error(format!("The {dialog:?} dialog did not open: {error}"));
                 None
             }
         }
@@ -2533,6 +2537,18 @@ impl MainWindow {
                 retired.push(fetched, items);
                 continue;
             }
+            {
+                let model = self.model.borrow();
+                if model.awaits(fetched.purpose, fetched.generation) {
+                    if let crate::core::fetch::Outcome::Status(status, _, _) = &fetched.outcome {
+                        self.settings
+                            .observe_include_status(model.service().0, status);
+                    }
+                    if fetched.purpose == Purpose::IncludeCount {
+                        self.settings.include_preview_changed();
+                    }
+                }
+            }
             let accepted = self.model.borrow_mut().accept(fetched);
             self.apply(hwnd, accepted);
         }
@@ -3080,10 +3096,7 @@ impl MainWindow {
             (entry.path, model.strings().clone())
         };
         if let Err(error) = self.viewers.open(path, strings, hwnd) {
-            super::write_log(
-                &self.settings_file.with_file_name("ui-error.log"),
-                &format!("The Viewer did not open: {error}"),
-            );
+            self.log_error(format!("The Viewer did not open: {error}"));
         }
     }
 
@@ -3099,9 +3112,8 @@ impl MainWindow {
 
     fn adopt_queue(&self, hwnd: Hwnd, restored: QueueReady) {
         let strings = self.model.borrow().strings().clone();
-        let error_log = self.settings_file.with_file_name("ui-error.log");
         let queue = self.created().work.borrow_mut().queue.adopt(restored);
-        let operations = FileOperations::new(hwnd, queue, strings, error_log);
+        let operations = FileOperations::new(hwnd, queue, strings);
         operations.set_transfer_limit(self.model.borrow().choices().transfers_per_device);
         let _ = self.file_operations.set(operations);
         self.controls().key_bar.update_key_bar(self);
@@ -3199,6 +3211,7 @@ impl MainWindow {
                     operations.cancel_all();
                 }
                 PaneAction::CloseReport => self.model.borrow_mut().close_operation_report(),
+                PaneAction::Log(text) => self.log_error(text),
                 PaneAction::Collapse | PaneAction::Maximize | PaneAction::Flip => {
                     let accepted = {
                         let mut model = self.model.borrow_mut();
@@ -4573,6 +4586,8 @@ impl WindowProc for MainWindow {
                 regional_format: true,
             } => {
                 self.numbers.replace(WindowsNumbers::new());
+                self.settings.include_summary_changed();
+                self.settings.include_preview_changed();
                 self.model.borrow_mut().operation_text_changed();
                 self.start_list_passes();
                 hwnd.draw_once_after(|| self.refresh_text(hwnd));

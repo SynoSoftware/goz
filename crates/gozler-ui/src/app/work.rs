@@ -8,6 +8,7 @@ use crate::win::wake::OpenWaker;
 use crate::win::work::{OffThread, Task};
 use gozler_client::CancelToken;
 use gozler_fileops::Taken;
+use std::collections::LinkedList;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -43,6 +44,8 @@ pub(super) use settings::{RegistryAnswer, load_settings};
 pub(super) use shell::{OpenTarget, Opened, ShellPurpose, ShellTarget};
 
 pub(super) const REPOSITORY: &str = env!("CARGO_PKG_REPOSITORY");
+
+type Diagnostics = LinkedList<(PathBuf, String)>;
 
 #[derive(Clone, Copy)]
 pub(super) enum ReleasePurpose {
@@ -114,6 +117,7 @@ pub(super) struct Work {
     pub(super) queue: queue::Work,
     releases: [Task<ReleasePurpose, ReleaseAnswer>; 2],
     retiring: Option<Task<Retirement, ()>>,
+    diagnostics: Option<Task<Diagnostics, ()>>,
     watchdog: Option<(
         crate::win::work::watchdog::Thread,
         crate::win::watchdog::Endpoint,
@@ -156,6 +160,10 @@ impl Work {
                 Retirement::items,
                 retire,
             )),
+            diagnostics: Some(
+                Task::new(waker.clone(), Replacement::Finish, write_diagnostics)
+                    .with_size(Diagnostics::len),
+            ),
             watchdog,
         }
     }
@@ -295,8 +303,25 @@ impl Work {
         }
     }
 
+    pub(super) fn log_error(&mut self, path: PathBuf, text: String) {
+        let Some(task) = self.diagnostics.as_mut() else {
+            return;
+        };
+        let _ = task.take();
+        task.submit([(path, text)].into(), |mut older, mut newer| {
+            older.append(&mut newer);
+            older
+        });
+        let retired = task.take_retired();
+        self.retire(retired);
+    }
+
     fn retire_groups(&mut self) {
         let mut retired = self.requests.take_retired();
+        if let Some(task) = self.diagnostics.as_mut() {
+            let _ = task.take();
+            retired.append(task.take_retired());
+        }
         retired.append(self.drops.take_retired());
         retired.append(self.paste.take_retired());
         if let Some(tray) = &mut self.tray {
@@ -359,6 +384,12 @@ impl Work {
         self.retire(retired);
         self.retire_groups();
         let retiring = self.retiring.take();
+        let diagnostics = self.diagnostics.take();
+        crate::win::work::spawn(move |worker| {
+            if let Some(diagnostics) = diagnostics {
+                diagnostics.finish(worker);
+            }
+        });
         crate::win::work::spawn(move |worker| {
             if let Some(retiring) = retiring {
                 retiring.finish(worker);
@@ -378,6 +409,12 @@ impl Work {
             let _ = source_completion.recv_timeout(left);
         };
         (persist, cleanup)
+    }
+}
+
+fn write_diagnostics(messages: Diagnostics, _worker: &OffThread, _: &CancelToken) {
+    for (path, text) in messages {
+        crate::app::write_log(&path, &text);
     }
 }
 

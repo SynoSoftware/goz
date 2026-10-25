@@ -47,9 +47,53 @@ runtime verification.
 **Plan incomplete.** The first five review findings are corrected and verified
 by Full55; the subsequent coverage report's six source findings are corrected
 and verified by Full56. Stages 4 and 8 have not passed recorded-frame proof.
-Stage 9's permanent documentation is implemented; deletion awaits that proof.
+The three subsequent reported UI waits are corrected and verified by Full57.
+Stage 9's permanent documentation is implemented; deletion awaits painting proof.
 
 #### Remaining work and current decision
+
+**Completion resumed on 2026-10-25.** The owner requests finishing the plan,
+including the three remaining reported UI waits. One coherent correction round
+corrected #149 (New folder name lookup), #151 (error logging) and #152 (Include
+summary rebuilding). Root owns app/work.rs, native logging, MainWindow and
+FileOperations wiring, documentation and the sole build. Independent owners
+take the folder-row/name caller files and Settings Include refresh files.
+Expected code/review/build work: one round, about 45–75 minutes. Retain only
+tests of lasting lookup/refresh or work-lifetime contracts; no new wording or
+control-snapshot tests. Reuse Full56 and the clean six-fix recheck where source
+is unchanged. No installation or physical-device check is needed for this round.
+
+Load-bearing source checks: New folder currently scans accepted rows from its
+modal validation callback; unrelated Settings replies rebuild every Include
+row; native creation failures append ui-error.log on UI. Fix each at its
+existing owner, keeping handles/controls on UI and slow work with Work.
+An independent read-only painting investigation first reconciles the existing
+failed recordings and rejected candidates, with a 20–30 minute discovery bound.
+It must identify a concrete new cause and bounded native correction before any
+new experiment; it cannot relax acceptance or repeat failed flag trials.
+
+The read-only painting pass found no new missing repaint obligation, but did
+find that the failing native-integrated1 recording saved zero native snapshots.
+Its pixels cannot be attributed to a particular child-position/paint boundary.
+Root authorized one new attribution check, prepared by painting_cause in
+`V:/temp/gozler-completion-paint-check/`: Search border resizing only, unchanged
+paint policy, test-owned native subclasses and bounded strip samples joined to
+event indices. No real copy, broad action suite or repeat flag trial. Preparation
+and one focused run add about 20–40 minutes; remove both temporary module hooks
+before final review/build. An inconclusive trace cannot pass painting acceptance
+or justify deleting this plan. Root remains the only builder.
+
+The wait-correction implementation and independent affected-contract review are
+complete: `V:/temp/gozler-completion-waits-review1.md`. Full57 passed formatting,
+clippy, workspace tests and private docs in one full run; UI **294 passed,
+14 ignored**. The existing New folder regression now covers exact/folded names,
+taken filtering, rename and relisting. One new pure test pins Include summary
+invalidation to actual drive locations, not indexing counters. Logging reuses
+the existing worker admission/finish tests; no OS-mirroring test was added.
+No focused or benchmark run was needed for these fixes. All 311 source/build
+inputs in `V:/temp/gozler-completion-full57-inputs.json` match after the run.
+The related actual-edit Include cloning/comparison/summary cost remains outside
+this recurring-reply correction and is tracked as suspected, unmeasured #153.
 
 **Coverage-report correction batch completed on 2026-10-24.** Corrected lost
 selection effects at operation receipts, stale sizes after empty answers,
@@ -153,12 +197,12 @@ and saved evidence: `docs/research/native-window-buffering.md`.
 
 #### Verified retained baseline
 
-- Full56 is green: formatting, clippy, workspace tests and docs; UI
-  **293 passed, 14 ignored**. The six-fix batch used one full run;
-  cumulative full attempts: 56.
-  `V:/temp/gozler-window-integrated-build56.log`.
+- Full57 is green: formatting, clippy, workspace tests and docs; UI
+  **294 passed, 14 ignored**. The three-wait batch used one full run;
+  cumulative full attempts: 57.
+  `V:/temp/gozler-window-integrated-build57.log`.
   All 311 recorded source/build inputs match:
-  `V:/temp/gozler-window-full56-inputs.json`.
+  `V:/temp/gozler-completion-full57-inputs.json`.
   The earlier corrected totals assertion's focused recheck is
   `V:/temp/gozler-window-five-fixes-totals-test.log`.
 - The six final specialist reviews are

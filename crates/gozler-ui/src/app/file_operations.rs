@@ -31,7 +31,6 @@ use crate::win::{self, Hwnd};
 use gozler_fileops::{Operation, OperationId, OrderRefused, Request, SpeedSettings, Taken};
 use std::cell::{Cell, OnceCell, RefCell};
 use std::collections::HashMap;
-use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::Arc;
 use windows::Win32::Foundation::LRESULT;
@@ -59,8 +58,6 @@ pub(super) struct FileOperations {
     /// inside when it could not open, and the operations then show only in
     /// the status bar and on the taskbar button.
     window: OnceCell<Option<Rc<Pane>>>,
-    /// Where a failure to create the transfer controls is written.
-    error_log: PathBuf,
     /// Where the files of each copy or move came from, until the source
     /// hears what became of them.
     sources: RefCell<HashMap<OperationId, FilesSource>>,
@@ -70,13 +67,14 @@ pub(super) struct FileOperations {
     actions: Rc<RefCell<Vec<PaneAction>>>,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 pub(super) enum PaneAction {
     Select(Detail),
     Command(OperationId, QueueAction),
     Move(OperationId, Option<OperationId>),
     CancelAll,
     CloseReport,
+    Log(String),
     Collapse,
     Maximize,
     Flip,
@@ -231,20 +229,13 @@ impl FilesSource {
 }
 
 impl FileOperations {
-    /// Adopts a fully restored queue. Transfer controls stay lazy; `error_log`
-    /// gets the reason when they cannot open.
-    pub(super) fn new(
-        owner: Hwnd,
-        queue: QueueClient,
-        strings: Strings,
-        error_log: PathBuf,
-    ) -> FileOperations {
+    /// Adopts a fully restored queue. Transfer controls stay lazy.
+    pub(super) fn new(owner: Hwnd, queue: QueueClient, strings: Strings) -> FileOperations {
         FileOperations {
             owner,
             queue,
             strings: RefCell::new(strings),
             window: OnceCell::new(),
-            error_log,
             sources: RefCell::new(HashMap::new()),
             taskbar: OnceCell::new(),
             actions: Rc::default(),
@@ -646,10 +637,10 @@ impl FileOperations {
             ) {
                 Ok(window) => Some(window),
                 Err(error) => {
-                    super::write_log(
-                        &self.error_log,
-                        &format!("The transfer pane did not open: {error}"),
-                    );
+                    self.actions.borrow_mut().push(PaneAction::Log(format!(
+                        "The transfer pane did not open: {error}"
+                    )));
+                    self.owner.post(QUEUE_CHANGED);
                     None
                 }
             }

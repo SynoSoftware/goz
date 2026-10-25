@@ -704,11 +704,11 @@ impl<'a> SettingsDialog<'a> {
         if let Some(edit) = self.control(SettingsPage::Include, ControlId::IncludeNames) {
             edit.set_text(&include.excluded_names);
         }
-        self.include_rows.borrow_mut().clear();
         self.refresh_include_rows(include);
     }
 
     fn refresh_include_rows(&self, include: &IndexSettings) {
+        self.main.settings.take_include_summary_changed();
         let Some(list) = self.include_folders() else {
             return;
         };
@@ -733,6 +733,7 @@ impl<'a> SettingsDialog<'a> {
     /// service's count of the edited settings (DESIGN.md: The Include
     /// page).
     fn show_preview(&self) {
+        self.main.settings.take_include_preview_changed();
         let Some(label) = self.control(SettingsPage::Include, ControlId::IncludePreview) else {
             return;
         };
@@ -1162,6 +1163,12 @@ impl<'a> SettingsDialog<'a> {
                 }
             }
         }
+        self.update_rebuild(dialog);
+        self.show_status(dialog);
+    }
+
+    fn update_rebuild(&self, dialog: Hwnd) {
+        let saving = self.saving.borrow().is_some();
         let answers = self.index.borrow().as_ref().is_some_and(|c| c.has_report);
         if let Some(rebuild) = self.control(SettingsPage::Index, ControlId::IndexRebuild) {
             if saving || !answers {
@@ -1169,7 +1176,6 @@ impl<'a> SettingsDialog<'a> {
             }
             rebuild.set_enabled(answers && !saving);
         }
-        self.show_status(dialog);
     }
 
     fn show_status(&self, dialog: Hwnd) {
@@ -1234,7 +1240,8 @@ impl<'a> SettingsDialog<'a> {
         } else {
             dialog.kill_timer(WAIT_TIMER);
         }
-        let changed = self.draft.borrow().can_apply() && self.saving.borrow().is_none();
+        let changed =
+            dialog::item(dialog, ControlId::SettingsApply.id()).is_some_and(Hwnd::is_enabled);
         if status.render(
             &[
                 (
@@ -1779,7 +1786,7 @@ impl<'a> SettingsDialog<'a> {
             report.set_enabled(captions.has_report);
         }
         if shown.is_none_or(|shown| shown.has_report != captions.has_report) {
-            self.update_apply(dialog);
+            self.update_rebuild(dialog);
         }
     }
 
@@ -2242,6 +2249,9 @@ impl<'a> SettingsDialog<'a> {
             if let Some(include) = &mut self.draft.borrow_mut().edited.include {
                 *value(include) = checked;
             }
+            if control == ControlId::IncludeNewDrives {
+                self.main.settings.include_summary_changed();
+            }
             self.include_changed(dialog);
         } else if is(id, ControlId::IndexDatesCreated) {
             let checked = self
@@ -2460,12 +2470,19 @@ impl DialogProc for SettingsDialog<'_> {
             }
             DialogMessage::Reply => {
                 self.total_commander_found(dialog);
-                let include = self.draft.borrow().edited.include.clone();
-                if let Some(include) = include {
-                    self.refresh_include_rows(&include);
+                if self.main.settings.take_include_summary_changed()
+                    && self.include_folders().is_some()
+                {
+                    let include = self.draft.borrow().edited.include.clone();
+                    if let Some(include) = include {
+                        self.refresh_include_rows(&include);
+                    }
                 }
-                // The Include count, which the model holds.
-                self.show_preview();
+                if self.main.settings.take_include_preview_changed()
+                    || self.draft.borrow().edited.include.is_none()
+                {
+                    self.show_preview();
+                }
                 self.save_answered(dialog);
                 // A fix moved on, which the fix button follows.
                 self.refresh_index(dialog);

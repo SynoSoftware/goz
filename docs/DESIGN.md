@@ -318,6 +318,12 @@ workers on the window thread. The file-operation engine retains its own
 workers, device scheduling, operation cancellation and recovery; the UI owner
 serializes commands through that engine's interface and observes its answers.
 
+Native dialog, Viewer and transfer-pane creation failures submit diagnostics to
+Work instead of opening ui-error.log on UI. One worker serializes the append
+requests; pending batches concatenate in constant time. Closing transfers their
+completion off UI independently of essential persistence. These diagnostics are
+best effort and never keep the window or essential writes waiting.
+
 Work also owns the window watchdog and its dedicated UI-thread heartbeat HWND.
 Its worker samples native top-level visibility every 100 ms, including system
 dialogs and tray menus while the main window is hidden or minimized. With no
@@ -933,6 +939,13 @@ The page sets the speed settings that every copy, move and delete starts with. `
 
 The page follows Windows' Indexing Options, which every Windows user can meet: a list of the indexed folders with what is left out inside each, a Modify… button that opens a folder tree with check boxes, and a count of what is indexed. "Include settings" has the rules it edits.
 
+Settings rebuilds the folder summary only when its draft, connected mount
+prefixes, accepted labels or number format changes. Preview invalidation also
+follows indexed entry totals and its current count reply. Unrelated replies and
+waiting timers neither clone the Include rules nor rebuild native rows. The
+list keeps its actual previous rows through replacement, including an empty
+replacement, so native row removal remains correct.
+
 - **The top of the page says** "These settings apply to every user of this PC. Changing them needs administrator permission." While they differ from what the service applies, OK and Apply show the administrator shield.
 - **The preview line** says what OK would change before it is pressed: "Indexed now: 2,273,581 entries. After OK: about 1,871,204." The service counts it with `CountIncluded`, 300 ms after the last change, through the window's worker, and a newer change cancels the older request (window rule 4). Each change, and closing Settings, also forgets the count that arrived (`Model::forget_included_count`), so the preview shows "…" until the count of the settings it shows arrives, and a late count never shows in the next Settings session. The preview reads the connected drives from the status, without asking Windows for their labels, so an edit costs no Win32 call per drive; the page reads the labels when it fills and after Modify. The dialog formats the preview and the folder summary in its own language, as its captions, until it closes. Folders checked again add ", and the folders you checked again, counted once they are indexed", because the index does not hold them yet. It counts the whole index, not the entries the person may see, because the change reaches every user.
 - **Folders Gozler indexes** is Windows' "Index these locations" list: one row for each indexed folder, a checked drive or a checked folder below an unchecked one, with the folders left out inside it. Its columns are Folder (`C:\`), Left out, the count ("2 folders", or "None"), and Folders, those folders below the drive's root (`ProgramData; Windows`). The count has its own column, because the Folders column cuts a long list off. A row's tooltip lists those folders by their full paths; a list view asks for a tooltip per row, not per column, so it shows over the whole row. The list is read-only, as in Windows; Modify… changes it, and so does a double-click on a row, because Indexed folders already shows every folder in full. The index holds nothing for a folder left out, so the list shows no sizes.
@@ -1314,6 +1327,12 @@ The engine opens paths with `\\?\`, which turns off Windows' own trimming and it
 ### New folder
 
 `F7` opens a dialog titled New folder, with "Name:" and an empty edit box, and Create and Cancel. Create is disabled while the box holds no name, also while it holds only dots and spaces. The name follows "Names the person types".
+
+The accepted folder-row snapshot carries compact exact and folded name orders,
+prepared with its filtering and ordering through the existing Calculation work.
+Name validation searches these orders instead of scanning all rows on UI. Exact
+spelling wins; a folded match keeps the first shown spelling. The indexes and
+rows publish and retire together, including after watch and taken-entry changes.
 
 - A character that Windows does not allow in a name is refused as it is typed, with File Explorer's balloon: "A file name can't contain any of the following characters: \ / : * ? " < > |". So `\` is refused too, because the box names one folder.
 - A name that a row of the panel shows, without regard to case: a message box says "Photos is already in this folder. Choose another name.", and the dialog stays open with the name selected. It names the row's entry as the row spells it, without its folder, because a long path breaks across the message box's lines. The check reads the panel's rows in memory, never the disk, and leaves out the rows that a delete or a move takes, because the person does not see them. A name that another program takes meanwhile is refused by the engine, which never replaces it, and the failure dialog says so.

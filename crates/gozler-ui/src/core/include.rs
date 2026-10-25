@@ -31,20 +31,14 @@ pub(crate) fn include_drives(
     settings: &IndexSettings,
     label: &dyn Fn(&str) -> Option<String>,
 ) -> Vec<IncludeDrive> {
-    let connected = status
-        .volumes
-        .iter()
-        .map(|v| (&v.guid, v.mounted()))
-        .chain(status.left_out.iter().map(|v| (&v.guid, v.mounted())));
-    let mut drives: Vec<IncludeDrive> = connected
-        .map(|(guid, mounted)| {
-            let prefix = mounted.display_prefix();
+    let mut drives: Vec<IncludeDrive> = mounted_drives(status)
+        .map(|(guid, prefix)| {
             let name = match label(prefix).filter(|label| !label.is_empty()) {
                 Some(label) => format!("{prefix} {label}"),
                 None => prefix.to_owned(),
             };
             IncludeDrive {
-                volume: guid.clone(),
+                volume: guid.to_owned(),
                 name,
                 prefix: prefix.to_owned(),
                 root: Some(prefix.to_owned()),
@@ -78,12 +72,28 @@ pub(crate) fn include_drives(
     drives
 }
 
+fn mounted_drives(status: &DaemonStatus) -> impl Iterator<Item = (&str, &str)> {
+    status
+        .volumes
+        .iter()
+        .map(|v| (v.guid.as_str(), v.mounted().display_prefix()))
+        .chain(
+            status
+                .left_out
+                .iter()
+                .map(|v| (v.guid.as_str(), v.mounted().display_prefix())),
+        )
+}
+
+pub(crate) fn summary_drives_changed(before: Option<&DaemonStatus>, after: &DaemonStatus) -> bool {
+    before.is_none_or(|before| !mounted_drives(before).eq(mounted_drives(after)))
+}
+
 /// The GUID paths of the drives that `status` lists, indexed or left out:
 /// the connected drives of [`include_drives`], read without their labels.
 pub(crate) fn connected_volumes(status: &DaemonStatus) -> Vec<String> {
-    let indexed = status.volumes.iter().map(|v| v.guid.clone());
-    indexed
-        .chain(status.left_out.iter().map(|v| v.guid.clone()))
+    mounted_drives(status)
+        .map(|(guid, _)| guid.to_owned())
         .collect()
 }
 
@@ -172,4 +182,57 @@ pub(crate) fn preview(
         "settings_include.preview",
         &[&numbers.integer(now), &after, added],
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gozler_core::proto::{LeftOutVolume, VolumeStatus};
+    use gozler_core::types::VolumePhase;
+
+    #[test]
+    fn summary_refresh_follows_drive_locations_not_index_progress() {
+        let before = DaemonStatus {
+            volumes: vec![VolumeStatus {
+                guid: r"\\?\Volume{c}\".into(),
+                mounts: vec![r"C:\".into()],
+                phase: VolumePhase::Live,
+                progress: None,
+                entries: 10,
+                generation: 1,
+                metadata_pending: false,
+                journal_max_bytes: None,
+                placeholders_created: 0,
+                delete_of_unknown: 0,
+                stale_slots: 0,
+                link_reconciles_dropped: 0,
+                memory: None,
+            }],
+            volumes_incomplete: false,
+            process_working_set: 0,
+            process_private_bytes: 0,
+            include: None,
+            left_out: Vec::new(),
+        };
+        assert!(summary_drives_changed(None, &before));
+
+        let mut after = before.clone();
+        after.volumes[0].entries = 20;
+        after.volumes[0].generation = 2;
+        after.volumes[0].mounts.push(r"C:\Mounted\".into());
+        after.process_private_bytes = 1_000;
+        assert!(!summary_drives_changed(Some(&before), &after));
+
+        let drive = after.volumes.remove(0);
+        after.left_out.push(LeftOutVolume {
+            guid: drive.guid,
+            mounts: drive.mounts,
+        });
+        assert!(!summary_drives_changed(Some(&before), &after));
+
+        after.left_out[0].mounts[0] = r"D:\".into();
+        assert!(summary_drives_changed(Some(&before), &after));
+        after.left_out.clear();
+        assert!(summary_drives_changed(Some(&before), &after));
+    }
 }
