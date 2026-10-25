@@ -4,7 +4,7 @@
 //! The list owns the focus and the selection, as Search's list does (DESIGN.md:
 //! The selection).
 
-use super::super::dialogs::{NewFolder, TransferStart};
+use super::super::dialogs::{NewFolder, TransferMode, TransferStart};
 use super::{EntryAction, MainWindow, Selected, Timer};
 use crate::core::captions::{self, PanelCaptions};
 use crate::core::commands::{
@@ -2176,6 +2176,13 @@ impl Panels {
         };
         Some(TransferStart {
             policy: model.choices().copy_policy,
+            mode: if moves {
+                TransferMode::Move
+            } else {
+                TransferMode::Copy {
+                    single_folder: one.as_ref().is_some_and(|(_, folder)| *folder),
+                }
+            },
             title: strings.text(title).to_owned(),
             line,
             text,

@@ -980,6 +980,10 @@
     "copy_move_sync": "Kopiëren, verplaatsen en synchroniseren"
   },
   "transfer": {
+    "mirror": "Spiegelen",
+    "sync": "Synchroniseren",
+    "mirror_hint": "Selecteer één map. Spiegelen werkt gewijzigde bestanden bij en verwijdert extra doelbestanden definitief.",
+    "sync_hint": "Selecteer één map. Synchroniseren werkt gewijzigde bestanden bij en behoudt extra doelbestanden.",
     "copy_name": "{0} kopiëren naar:",
     "copy_items_one": "{0} item kopiëren naar:",
     "copy_items_other": "{0} items kopiëren naar:",

@@ -139,6 +139,13 @@ struct Check {
 
 enum Command {
     Prepare(ReservedId, Request, SpeedSettings),
+    SynchronizeTo(
+        ReservedId,
+        PathBuf,
+        gozler_fileops::Destination,
+        bool,
+        SpeedSettings,
+    ),
     Accept(ReservedId, Request, SpeedSettings),
     Resolve(OperationId, Request),
     FailIntake(OperationId),
@@ -293,6 +300,12 @@ impl Session {
                     Command::Accept(id, request, settings) => {
                         let created = id.id();
                         self.queue.accept_reserved(id, request, settings);
+                        replies.push(Reply::Created(created));
+                    }
+                    Command::SynchronizeTo(id, source, destination, mirror, settings) => {
+                        let created = id.id();
+                        self.queue
+                            .synchronize_reserved(id, source, destination, mirror, settings);
                         replies.push(Reply::Created(created));
                     }
                     Command::Resolve(id, request) => {
@@ -500,6 +513,26 @@ impl Client {
         self.send(Command::Prepare(reserved, request, settings));
         id
     }
+    pub(in crate::app) fn synchronize_to(
+        &self,
+        source: PathBuf,
+        destination: gozler_fileops::Destination,
+        mirror: bool,
+        settings: SpeedSettings,
+    ) -> OperationId {
+        let reserved = self.queue.reserve_id();
+        let id = reserved.id();
+        self.cache.borrow_mut().pending.insert(id);
+        self.send(Command::SynchronizeTo(
+            reserved,
+            source,
+            destination,
+            mirror,
+            settings,
+        ));
+        id
+    }
+
     pub(in crate::app) fn accept(&self, request: Request, settings: SpeedSettings) -> OperationId {
         let reserved = self.queue.reserve_id();
         let id = reserved.id();

@@ -2360,6 +2360,7 @@ pub(crate) fn refusal_text(
     match refusal {
         Refusal::SynchronizationRootsOverlap => strings.text("sync.overlap").to_owned(),
         Refusal::SynchronizationChanged => strings.text("sync.changed").to_owned(),
+        Refusal::SynchronizationConflicts => strings.text("sync.conflicts").to_owned(),
         Refusal::ComparisonFailed(code) => strings.format("sync.failed", &[&windows_text(code)]),
         Refusal::SourceUnavailable => strings
             .text("file_operations.source_unavailable")

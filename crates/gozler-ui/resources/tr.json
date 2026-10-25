@@ -980,6 +980,10 @@
     "copy_move_sync": "Kopyala, taşı ve eşitle"
   },
   "transfer": {
+    "mirror": "Yansıt",
+    "sync": "Eşitle",
+    "mirror_hint": "Bir klasör seçin. Yansıt, değişen dosyaları günceller ve hedefteki fazla dosyaları kalıcı olarak siler.",
+    "sync_hint": "Bir klasör seçin. Eşitle, değişen dosyaları günceller ve hedefteki fazla dosyaları korur.",
     "copy_name": "{0} şuraya kopyalanacak:",
     "copy_items_one": "{0} öğe şuraya kopyalanacak:",
     "copy_items_other": "{0} öğe şuraya kopyalanacak:",

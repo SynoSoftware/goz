@@ -10,7 +10,7 @@ use crate::core::ids::ControlId;
 use crate::core::query::{DateRange, DateRangeError, Day, SizeRange, SizeRangeError, SizeUnit};
 use crate::core::text::Strings;
 use crate::core::typed::{self, Refusal};
-use crate::win::controls::{Balloon, DatePicker, DropDownList, Edit};
+use crate::win::controls::{Balloon, DatePicker, DropDownList, Edit, Tooltip};
 use crate::win::dialog::{self, DialogEnd, DialogMessage, DialogProc, Opened};
 use crate::win::gdi::{Font, TextMeter};
 use crate::win::{self, Hwnd};
@@ -442,12 +442,26 @@ pub(super) struct Transfer {
     reserved: String,
     policy: Policy,
     policies: [String; 4],
-    chosen: RefCell<Option<(Destination, Policy)>>,
+    mode: TransferMode,
+    sync_hint: String,
+    mirror_hint: String,
+    chosen: RefCell<Option<(Destination, TransferAction)>>,
+}
+
+pub(super) enum TransferAction {
+    Transfer(Policy),
+    Synchronize { mirror: bool },
+}
+
+pub(super) enum TransferMode {
+    Copy { single_folder: bool },
+    Move,
 }
 
 /// What [`Transfer`] opens with.
 pub(super) struct TransferStart {
     pub(super) policy: Policy,
+    pub(super) mode: TransferMode,
     /// The dialog's title, which names its command.
     pub(super) title: String,
     /// What it acts on, such as "Copy report.pdf to:".
@@ -473,12 +487,14 @@ impl Transfer {
             title: start.title,
             characters: strings.text("name.characters").to_owned(),
             reserved: strings.text("name.reserved").to_owned(),
+            mode: start.mode,
+            sync_hint: strings.text("transfer.sync_hint").to_owned(),
+            mirror_hint: strings.text("transfer.mirror_hint").to_owned(),
             chosen: RefCell::new(None),
         }
     }
 
-    /// The destination Copy or Move chose.
-    pub(super) fn chosen(&self) -> Option<(Destination, Policy)> {
+    pub(super) fn chosen(&self) -> Option<(Destination, TransferAction)> {
         self.chosen.take()
     }
 
@@ -487,10 +503,23 @@ impl Transfer {
     }
 
     /// Copy or Move stays disabled while the box is empty.
-    fn update_ok(dialog: Hwnd) {
+    fn update_ok(&self, dialog: Hwnd) {
         let empty = Transfer::path(dialog).is_none_or(|path| path.text().trim().is_empty());
         if let Some(ok) = dialog::item(dialog, DialogItem::Ok.id()) {
             ok.set_enabled(!empty);
+        }
+        for id in [ControlId::TransferMirror, ControlId::TransferSync] {
+            if let Some(button) = dialog::item(dialog, id.id()) {
+                button.set_enabled(
+                    !empty
+                        && matches!(
+                            self.mode,
+                            TransferMode::Copy {
+                                single_folder: true
+                            }
+                        ),
+                );
+            }
         }
     }
 }
@@ -520,7 +549,22 @@ impl DialogProc for Transfer {
                 .unwrap_or(0);
             list.set_items(&self.policies, selected);
         }
-        Transfer::update_ok(dialog);
+        let buttons: Vec<_> = [ControlId::TransferMirror, ControlId::TransferSync]
+            .into_iter()
+            .filter_map(|id| dialog::item(dialog, id.id()))
+            .collect();
+        for button in &buttons {
+            button.set_visible(matches!(self.mode, TransferMode::Copy { .. }));
+            if matches!(self.mode, TransferMode::Move) {
+                button.set_text("");
+            }
+        }
+        if let Ok(tips) = Tooltip::create(dialog, &buttons) {
+            for (button, hint) in buttons.iter().zip([&self.mirror_hint, &self.sync_hint]) {
+                tips.set(*button, hint);
+            }
+        }
+        self.update_ok(dialog);
         Opened {
             focus: ControlId::TransferPath.id(),
             fonts: Vec::new(),
@@ -530,7 +574,7 @@ impl DialogProc for Transfer {
     fn message(&self, dialog: Hwnd, message: DialogMessage) -> bool {
         match message {
             DialogMessage::Edited { .. } => {
-                Transfer::update_ok(dialog);
+                self.update_ok(dialog);
                 true
             }
             DialogMessage::Command { id } if id == ControlId::TransferBrowse.id() => {
@@ -545,7 +589,22 @@ impl DialogProc for Transfer {
                 }
                 true
             }
-            DialogMessage::Command { id } if id == DialogItem::Ok.id() => {
+            DialogMessage::Command { id }
+                if id == DialogItem::Ok.id()
+                    || id == ControlId::TransferSync.id()
+                    || id == ControlId::TransferMirror.id() =>
+            {
+                let synchronize = id != DialogItem::Ok.id();
+                if synchronize
+                    && !matches!(
+                        self.mode,
+                        TransferMode::Copy {
+                            single_folder: true
+                        }
+                    )
+                {
+                    return true;
+                }
                 let Some(path) = Transfer::path(dialog) else {
                     return true;
                 };
@@ -563,7 +622,14 @@ impl DialogProc for Transfer {
                                 .and_then(DropDownList::selected)
                                 .and_then(|i| Policy::ALL.get(i).copied())
                                 .unwrap_or(self.policy);
-                        self.chosen.replace(Some((destination, policy)));
+                        let action = if synchronize {
+                            TransferAction::Synchronize {
+                                mirror: id == ControlId::TransferMirror.id(),
+                            }
+                        } else {
+                            TransferAction::Transfer(policy)
+                        };
+                        self.chosen.replace(Some((destination, action)));
                         dialog::end(dialog, DialogEnd::Ok);
                     }
                     // Copy or Move is disabled then.
@@ -585,6 +651,41 @@ impl DialogProc for Transfer {
             | DialogMessage::Focus { .. }
             | DialogMessage::KeysCaptured { .. }
             | DialogMessage::Other => false,
+        }
+    }
+
+    fn buttons_sized(&self, dialog: Hwnd, width: crate::core::layout::Px) {
+        use crate::core::layout::{Px, Rect};
+        let ids = [
+            ControlId::TransferMirror.id(),
+            ControlId::TransferSync.id(),
+            DialogItem::Ok.id(),
+            DialogItem::Cancel.id(),
+        ];
+        let buttons: Vec<_> = ids
+            .into_iter()
+            .filter_map(|id| dialog::item(dialog, id))
+            .collect();
+        if buttons.len() != 4 || matches!(self.mode, TransferMode::Move) {
+            return;
+        }
+        let first = buttons[0].rect_in(dialog);
+        let margin = first.x;
+        let gap = buttons[1].rect_in(dialog).x - first.right();
+        let required = margin + margin + Px(width.0 * 4) + Px(gap.0 * 4);
+        let extra = required - dialog.client_size().width;
+        if extra > Px(0) {
+            dialog::widen(dialog, margin + Px(1), extra);
+        }
+        let right = dialog.client_size().width - margin;
+        let positions = [
+            margin,
+            margin + width + gap,
+            right - width - width - gap,
+            right - width,
+        ];
+        for (button, x) in buttons.into_iter().zip(positions) {
+            button.set_rect(Rect { x, width, ..first });
         }
     }
 }

@@ -1433,6 +1433,17 @@ last-write timestamps directly.
 
 ### Synchronize folders
 
+The Copy to folder dialog also offers Mirror and Sync at the left of its
+button row, with Copy and Cancel at the right. Copy remains the default;
+F5 still opens Copy. These extra actions require one selected folder and
+apply immediately, without opening the comparison dialog. They follow Copy's
+destination rules: a folder destination receives the selected folder under
+its own name; a new typed name renames that destination root. Sync keeps
+extra files. Mirror permanently deletes extras only inside that root, never
+its siblings. The engine still compares and validates before applying;
+file/folder conflicts refuse the operation. The Copy policy does not change
+the synchronization rule. Move offers neither extra action.
+
 File > Synchronize folders opens a native dialog in either mode. Source and
 Destination are explicit folder roots. Two panels fills them from its actual
 folder panels, from active to other; Search selections never stand in for a

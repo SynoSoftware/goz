@@ -980,6 +980,10 @@
     "copy_move_sync": "Copy, Move & Synchronize"
   },
   "transfer": {
+    "mirror": "Mirror",
+    "sync": "Sync",
+    "mirror_hint": "Select one folder. Mirror updates changed files and permanently deletes extra destination files.",
+    "sync_hint": "Select one folder. Sync updates changed files and keeps extra destination files.",
     "copy_name": "Copy {0} to:",
     "copy_items_one": "Copy {0} item to:",
     "copy_items_other": "Copy {0} items to:",

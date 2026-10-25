@@ -11,7 +11,10 @@
 //! their delivery and are consumed once. [`Message::Deferred`] repairs
 //! interrupted areas.
 
-use super::dialogs::{About, CustomDate, CustomSize, SearchSyntax, Transfer, TransferStart};
+use super::dialogs::{
+    About, CustomDate, CustomSize, SearchSyntax, Transfer, TransferAction, TransferMode,
+    TransferStart,
+};
 use super::file_operations::{FileOperations, FilesSource};
 use super::icons::Icons;
 use super::include::{Elevated, NotSaved};
@@ -120,6 +123,9 @@ mod selection;
 mod settings;
 mod synchronize;
 mod tray;
+
+#[cfg(test)]
+mod navigation_tests;
 
 use drops::DragIn;
 use filters::{FilterPane, RangeList};
@@ -2161,7 +2167,12 @@ impl MainWindow {
                     }
                     match prepared.action {
                         PathAction::Transfer { moves } => {
-                            self.copy_paths_to_folder(hwnd, moves, prepared.paths);
+                            self.copy_paths_to_folder(
+                                hwnd,
+                                moves,
+                                prepared.paths,
+                                prepared.single_folder,
+                            );
                         }
                         PathAction::PanelTransfer {
                             moves,
@@ -3615,7 +3626,7 @@ impl MainWindow {
         hwnd: Hwnd,
         start: TransferStart,
         moves: bool,
-    ) -> Option<(Destination, gozler_fileops::Policy)> {
+    ) -> Option<(Destination, TransferAction)> {
         let (dialog, captions) = {
             let model = self.model.borrow();
             let strings = model.strings();
@@ -3656,7 +3667,7 @@ impl MainWindow {
         let side = place.side;
         let folder = start.folder.clone();
         let one = start.one.clone();
-        let Some((destination, policy)) = self.ask_transfer(hwnd, start, moves) else {
+        let Some((destination, action)) = self.ask_transfer(hwnd, start, moves) else {
             self.retire_paths(sources);
             return;
         };
@@ -3668,20 +3679,7 @@ impl MainWindow {
             }
             _ => None,
         };
-        let request = match moves {
-            true => Request::Move {
-                policy,
-                sources,
-                destination,
-            },
-            false => Request::Copy {
-                policy,
-                sources,
-                destination,
-            },
-        };
-        self.remember_copy_policy(hwnd, policy);
-        let id = self.start_operation(request, None);
+        let id = self.start_transfer(hwnd, moves, sources, destination, action);
         let follows = {
             let model = self.model.borrow();
             model.mode() == Mode::TwoPanels && model.panels().place_is_current(place)
@@ -3700,7 +3698,48 @@ impl MainWindow {
         }
     }
 
-    fn copy_paths_to_folder(&self, hwnd: Hwnd, moves: bool, sources: Vec<PathBuf>) {
+    fn start_transfer(
+        &self,
+        hwnd: Hwnd,
+        moves: bool,
+        mut sources: Vec<PathBuf>,
+        destination: Destination,
+        action: TransferAction,
+    ) -> Option<OperationId> {
+        let policy = match action {
+            TransferAction::Transfer(policy) => policy,
+            TransferAction::Synchronize { mirror } => {
+                let operations = self.file_operations.get()?;
+                let source = sources.pop().expect("Sync and Mirror require one folder");
+                let settings = self.model.borrow().choices().speed.settings();
+                let id = operations.synchronize_to(source, destination, mirror, settings);
+                self.model.borrow_mut().file_operation_started(id, None);
+                return Some(id);
+            }
+        };
+        let request = match moves {
+            true => Request::Move {
+                policy,
+                sources,
+                destination,
+            },
+            false => Request::Copy {
+                policy,
+                sources,
+                destination,
+            },
+        };
+        self.remember_copy_policy(hwnd, policy);
+        self.start_operation(request, None)
+    }
+
+    fn copy_paths_to_folder(
+        &self,
+        hwnd: Hwnd,
+        moves: bool,
+        sources: Vec<PathBuf>,
+        single_folder: bool,
+    ) {
         let Some(first) = sources.first() else {
             return;
         };
@@ -3744,6 +3783,11 @@ impl MainWindow {
             let text = crate::core::panel::join(model.destination_folder().unwrap_or(&folder), "");
             TransferStart {
                 policy: model.choices().copy_policy,
+                mode: if moves {
+                    TransferMode::Move
+                } else {
+                    TransferMode::Copy { single_folder }
+                },
                 title: strings.text(title).to_owned(),
                 line,
                 selected: (0, text.encode_utf16().count()),
@@ -3753,7 +3797,7 @@ impl MainWindow {
                 one,
             }
         };
-        let Some((destination, policy)) = self.ask_transfer(hwnd, start, moves) else {
+        let Some((destination, action)) = self.ask_transfer(hwnd, start, moves) else {
             self.retire_paths(sources);
             return;
         };
@@ -3764,21 +3808,7 @@ impl MainWindow {
                 .set_destination_folder(folder.to_string_lossy().into_owned());
             self.apply(hwnd, accepted);
         }
-        self.remember_copy_policy(hwnd, policy);
-        let request = if moves {
-            Request::Move {
-                policy,
-                sources,
-                destination,
-            }
-        } else {
-            Request::Copy {
-                policy,
-                sources,
-                destination,
-            }
-        };
-        self.start_operation(request, None);
+        self.start_transfer(hwnd, moves, sources, destination, action);
     }
 
     /// Delete, and the list's `Delete` and `Shift+Delete`: the Delete

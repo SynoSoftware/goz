@@ -271,6 +271,8 @@ impl CaptionTable {
                 plain: &[
                     (Control(C::TransferPolicyHint), "copy_policy.hint"),
                     (Control(C::TransferBrowse), "settings_context_menu.browse"),
+                    (Control(C::TransferMirror), "transfer.mirror"),
+                    (Control(C::TransferSync), "transfer.sync"),
                     (Ok, "file_operations.copy"),
                     (Cancel, "button.cancel"),
                 ],

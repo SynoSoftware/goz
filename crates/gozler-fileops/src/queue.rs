@@ -133,6 +133,9 @@ struct Tracked {
     /// Continue's prepare: it submits with the interrupted run's choice and
     /// start as soon as it is prepared.
     continuing: Option<Rule>,
+    /// Explicit Sync/Mirror consent from the destination dialog; recovery
+    /// requires a fresh preview instead of retaining this consent.
+    synchronize: Option<crate::Destination>,
     /// It was submitted, so its sources are taken while it lives, and not
     /// only while it prepares.
     submitted: bool,
@@ -326,6 +329,30 @@ impl Queue {
         Shared::prepare(&self.shared, id);
     }
 
+    /// Starts an explicitly chosen Sync or Mirror without a preview. The
+    /// destination follows Copy's folder/new-name rules. Comparison and all
+    /// Mirror safeguards still run; conflicts refuse the operation.
+    pub fn synchronize_reserved(
+        &self,
+        reserved: ReservedId,
+        source: PathBuf,
+        destination: crate::Destination,
+        mirror: bool,
+        settings: SpeedSettings,
+    ) {
+        let id = reserved.id();
+        let request = Request::Synchronize {
+            source,
+            destination: destination.path(),
+            mirror,
+        };
+        self.accept_reserved(reserved, request, settings);
+        if let Some(operation) = self.shared.lock().by_id.get_mut(&id) {
+            operation.synchronize = Some(destination);
+        }
+        Shared::prepare(&self.shared, id);
+    }
+
     pub fn accept_reserved(&self, reserved: ReservedId, request: Request, settings: SpeedSettings) {
         let id = reserved.id();
         {
@@ -406,28 +433,7 @@ impl Queue {
     pub fn synchronize(&self, id: OperationId) -> Result<(), NotCompared> {
         let starts = {
             let mut operations = self.shared.lock();
-            let operation = operations.by_id.get_mut(&id).ok_or(NotCompared)?;
-            match &operation.phase {
-                Phase::Compared { review, .. } if review.comparison.summary().conflicts == 0 => {}
-                _ => return Err(NotCompared),
-            }
-            let Phase::Compared { review, plan } =
-                std::mem::replace(&mut operation.phase, Phase::Preparing)
-            else {
-                unreachable!("the phase was just matched");
-            };
-            operation.progress = Arc::default();
-            operation.continuing = None;
-            let ready = Ready {
-                prepared: crate::Prepared {
-                    entries: 1,
-                    total: Some(review.total()),
-                },
-                work: vec![(plan, Work::Synchronize(review))],
-                failures: Vec::new(),
-                resolved: None,
-            };
-            self.shared.enqueue(&mut operations, id, ready)
+            self.shared.commit_comparison(&mut operations, id)?
         };
         self.shared.start(starts);
         (self.shared.wake)();
@@ -906,6 +912,7 @@ impl Tracked {
             progress: Arc::default(),
             io: Arc::default(),
             continuing: None,
+            synchronize: None,
             submitted: false,
             total: None,
             renames: false,
@@ -961,7 +968,7 @@ impl Shared {
 
     /// Prepares the operation `id`, which is preparing, on its own thread.
     fn prepare(shared: &Arc<Shared>, id: OperationId) {
-        let (request, settings, continuing, cancel, io) = {
+        let (request, settings, continuing, synchronize, cancel, io) = {
             let mut operations = shared.lock();
             let Some(operation) = operations.by_id.get_mut(&id) else {
                 return;
@@ -974,6 +981,7 @@ impl Shared {
                 Arc::clone(&operation.request),
                 operation.settings,
                 operation.continuing,
+                operation.synchronize.clone(),
                 Arc::clone(&operation.cancel),
                 Arc::clone(&operation.io),
             )
@@ -994,16 +1002,19 @@ impl Shared {
                 run: Run::First { started: None },
             };
             let rule = continuing.unwrap_or(first);
-            let prepared = prepare(
-                &request,
-                &Preparation {
-                    settings: &settings,
-                    rule,
-                    index: &*thread.index,
-                    cancel: &cancel,
-                    pause: None,
-                },
-            );
+            let preparing = Preparation {
+                settings: &settings,
+                rule,
+                index: &*thread.index,
+                cancel: &cancel,
+                pause: None,
+            };
+            let prepared = match synchronize {
+                Some(destination) => {
+                    crate::prepare::synchronize(&request, &destination, &preparing)
+                }
+                None => prepare(&request, &preparing),
+            };
             drop(entered);
             let starts = {
                 let mut operations = thread.lock();
@@ -1306,12 +1317,10 @@ impl Shared {
                             ))),
                         };
                         match compared {
-                            Ok(review) => {
-                                if shared.finish_comparison(id, review) {
-                                    return;
-                                }
-                                Outcome::ended(End::Cancelled)
-                            }
+                            Ok(review) => match shared.finish_comparison(id, review) {
+                                Ok(()) => return,
+                                Err(end) => Outcome::ended(end),
+                            },
                             Err(end) => Outcome::ended(end),
                         }
                     }
@@ -1341,7 +1350,7 @@ impl Shared {
         self: &Arc<Self>,
         id: TransferId,
         review: crate::sync::windows::Review,
-    ) -> bool {
+    ) -> Result<(), End> {
         let starts = {
             let mut operations = self.lock();
             let operation = operations
@@ -1349,7 +1358,11 @@ impl Shared {
                 .get_mut(&id.operation)
                 .expect("a live worker owns its operation");
             if operation.cancel.load(Ordering::Relaxed) {
-                return false;
+                return Err(End::Cancelled);
+            }
+            let synchronize = operation.synchronize.is_some();
+            if synchronize && review.comparison.summary().conflicts != 0 {
+                return Err(End::Refused(Refusal::SynchronizationConflicts));
             }
             let Phase::Queued(run) = &operation.phase else {
                 unreachable!("comparison retains its admitted part");
@@ -1360,11 +1373,45 @@ impl Shared {
                 review: Box::new(review),
                 plan,
             };
-            self.schedule(&mut operations)
+            if synchronize {
+                self.commit_comparison(&mut operations, id.operation)
+                    .expect("an unconflicted comparison was just retained")
+            } else {
+                self.schedule(&mut operations)
+            }
         };
         self.start(starts);
         (self.wake)();
-        true
+        Ok(())
+    }
+
+    fn commit_comparison(
+        &self,
+        operations: &mut Operations,
+        id: OperationId,
+    ) -> Result<Vec<Admitted>, NotCompared> {
+        let operation = operations.by_id.get_mut(&id).ok_or(NotCompared)?;
+        match &operation.phase {
+            Phase::Compared { review, .. } if review.comparison.summary().conflicts == 0 => {}
+            _ => return Err(NotCompared),
+        }
+        let Phase::Compared { review, plan } =
+            std::mem::replace(&mut operation.phase, Phase::Preparing)
+        else {
+            unreachable!("the phase was just matched");
+        };
+        operation.progress = Arc::default();
+        operation.continuing = None;
+        let ready = Ready {
+            prepared: crate::Prepared {
+                entries: 1,
+                total: Some(review.total()),
+            },
+            work: vec![(plan, Work::Synchronize(review))],
+            failures: Vec::new(),
+            resolved: None,
+        };
+        Ok(self.enqueue(operations, id, ready))
     }
 
     fn finish_part(

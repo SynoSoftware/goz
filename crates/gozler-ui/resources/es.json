@@ -980,6 +980,10 @@
     "copy_move_sync": "Copiar, mover y sincronizar"
   },
   "transfer": {
+    "mirror": "Espejo",
+    "sync": "Sincronizar",
+    "mirror_hint": "Seleccione una carpeta. Espejo actualiza los archivos modificados y elimina permanentemente los archivos sobrantes del destino.",
+    "sync_hint": "Seleccione una carpeta. Sincronizar actualiza los archivos modificados y conserva los archivos sobrantes del destino.",
     "copy_name": "Copiar {0} en:",
     "copy_items_one": "Copiar {0} elemento en:",
     "copy_items_other": "Copiar {0} elementos en:",

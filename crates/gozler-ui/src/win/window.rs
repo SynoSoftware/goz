@@ -569,6 +569,31 @@ pub(crate) fn run_messages_until(
     }
 }
 
+#[cfg(test)]
+pub(crate) fn post_key(target: Hwnd, key: VIRTUAL_KEY) {
+    use windows::Win32::UI::WindowsAndMessaging::PostMessageW;
+
+    // SAFETY: the key messages carry values only; the caller owns the window.
+    unsafe {
+        windows::Win32::UI::Input::KeyboardAndMouse::SetKeyboardState(&[0; 256])
+            .expect("the test thread owns its keyboard state");
+        PostMessageW(
+            Some(target.0),
+            WM_KEYDOWN,
+            WPARAM(key.0 as usize),
+            LPARAM(1),
+        )
+        .expect("the test's key target remains alive");
+        PostMessageW(
+            Some(target.0),
+            windows::Win32::UI::WindowsAndMessaging::WM_KEYUP,
+            WPARAM(key.0 as usize),
+            LPARAM((3_u32 << 30 | 1) as isize),
+        )
+        .expect("the test's key target remains alive");
+    }
+}
+
 /// The loop of [`run_message_loop`], until `done` gives true; gives the
 /// exit code of the `WM_QUIT` that ended it.
 fn run_messages(

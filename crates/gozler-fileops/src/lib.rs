@@ -8,7 +8,9 @@
 //! Queue commands on a worker, because state decisions can acquire engine
 //! locks. The queue calls its wake function after each change of state.
 //! Synchronization compares complete trees under device admission, releases
-//! its grants for preview, and reacquires them only after explicit commit.
+//! its grants for preview, and reacquires them after explicit commit. Direct
+//! Sync/Mirror commands give that consent before comparison and apply it
+//! without a preview, while refusing file/folder conflicts.
 //! Mirror verifies required output before deleting unchanged approved extras;
 //! recovery always compares again rather than restoring deletion approval.
 //!

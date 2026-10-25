@@ -332,6 +332,17 @@ impl FileOperations {
         id
     }
 
+    pub(super) fn synchronize_to(
+        &self,
+        source: std::path::PathBuf,
+        destination: gozler_fileops::Destination,
+        mirror: bool,
+        settings: SpeedSettings,
+    ) -> OperationId {
+        self.queue
+            .synchronize_to(source, destination, mirror, settings)
+    }
+
     pub(super) fn accept(&self, request: Request, settings: SpeedSettings) -> OperationId {
         self.queue.accept(request, settings)
     }

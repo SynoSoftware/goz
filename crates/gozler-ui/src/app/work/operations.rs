@@ -84,6 +84,7 @@ impl PreparingPaths {
 pub(in crate::app) struct PreparedPaths {
     pub(in crate::app) action: PathAction,
     pub(in crate::app) paths: Vec<PathBuf>,
+    pub(in crate::app) single_folder: bool,
 }
 
 pub(in crate::app) struct Work {
@@ -264,6 +265,7 @@ impl Work {
 }
 
 fn prepare_paths(input: PreparingPaths, cancel: &CancelToken) -> PreparedPaths {
+    let single_folder = input.entries.one().is_some_and(|entry| entry.is_folder);
     let paths = if cancel.is_cancelled() {
         Vec::new()
     } else {
@@ -284,6 +286,7 @@ fn prepare_paths(input: PreparingPaths, cancel: &CancelToken) -> PreparedPaths {
     PreparedPaths {
         action: input.action,
         paths,
+        single_folder,
     }
 }
 

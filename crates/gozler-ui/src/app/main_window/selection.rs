@@ -16,6 +16,7 @@ pub(super) struct NativeSelection {
     update: Option<NativeUpdate>,
     action: Option<SelectionAction>,
     keep_quick: bool,
+    restore_focus: bool,
     unhighlight: Option<Unhighlight>,
     unhighlighting: bool,
 }
@@ -102,6 +103,27 @@ impl NativeRead {
 }
 
 impl MainWindow {
+    /// EnableWindow clears a disabled list's focus; only restore focus that
+    /// this update displaced, while the person has not focused another control.
+    fn set_selection_enabled(&self, list: List, enabled: bool) {
+        let control = self.list_control(list).hwnd();
+        if !enabled && Hwnd::focused() == Some(control) {
+            self.native_selection(list).borrow_mut().restore_focus = true;
+        }
+        control.set_enabled(enabled);
+        if enabled && control.is_enabled() {
+            let restore =
+                std::mem::take(&mut self.native_selection(list).borrow_mut().restore_focus);
+            if restore
+                && Hwnd::focused().is_none()
+                && control.is_visible()
+                && control.parent().is_active()
+            {
+                control.focus();
+            }
+        }
+    }
+
     fn schedule_native_selection(&self, hwnd: Hwnd) {
         if self.shutdown.borrow().is_none() && !self.selection_timer.replace(true) {
             // Posted continuations outrank input and paint in GetMessage. A
@@ -181,7 +203,7 @@ impl MainWindow {
             }
         };
         if accepted {
-            self.list_control(list).hwnd().set_enabled(false);
+            self.set_selection_enabled(list, false);
         }
     }
 
@@ -224,7 +246,7 @@ impl MainWindow {
             }
             self.native_selection(list).borrow_mut().action = None;
             if !self.native_update_active(list) && !self.native_deselection_pending(list) {
-                self.list_control(list).hwnd().set_enabled(true);
+                self.set_selection_enabled(list, true);
             }
             if current {
                 match action {
@@ -354,7 +376,7 @@ impl MainWindow {
         } else {
             self.controls().search.selection_pending.set(false);
         }
-        self.list_control(list).hwnd().set_enabled(true);
+        self.set_selection_enabled(list, true);
     }
 
     pub(super) fn selected_rows(&self, list: List) -> Option<RowSelection> {
@@ -555,7 +577,7 @@ impl MainWindow {
                 .native_selection_pending(side, true);
         }
         let control = self.list_control(list);
-        control.hwnd().set_enabled(false);
+        self.set_selection_enabled(list, false);
         self.schedule_native_selection(control.hwnd().parent());
     }
 
@@ -617,7 +639,7 @@ impl MainWindow {
             };
             if complete && current {
                 if !self.selection_command_pending(list) {
-                    control.hwnd().set_enabled(true);
+                    self.set_selection_enabled(list, true);
                 }
                 match list {
                     List::Search => self.controls().search.selection_pending.set(true),
@@ -695,7 +717,7 @@ impl MainWindow {
             .native_selection_pending(side, true);
         self.created().work.borrow_mut().retire(retired);
         let control = self.list_control(list);
-        control.hwnd().set_enabled(false);
+        self.set_selection_enabled(list, false);
         control.set_count(count);
         self.apply_native_place(side);
     }
@@ -793,7 +815,7 @@ impl MainWindow {
         self.created().work.borrow_mut().lists.tell(list, input);
         self.retire_native_selection(list);
         if !self.selection_command_pending(list) && !self.native_deselection_pending(list) {
-            control.hwnd().set_enabled(true);
+            self.set_selection_enabled(list, true);
         }
         let select_focus = update.to_focus
             && update.selected.positions.is_empty()

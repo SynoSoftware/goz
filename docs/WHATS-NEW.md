@@ -1,8 +1,8 @@
 # What's new
 
-## Gozler 0.5.1 — Faster copying and folder synchronization
+## Gozler 0.5.5 — Faster copying and folder synchronization
 
-Likely the fastest copy algorithm on the planet (educated guess—we haven't tested that ranking): 17% less waiting compared with our previous copy algorithm, inspired by AngelCopy and FastCopy.
+Possibly the fastest copy algorithm on the planet (educated guess—we haven't tested that ranking): 17% less waiting after further optimizing our previous AngelCopy/FastCopy-inspired algorithm.
 
 ### Copy and move
 
@@ -14,6 +14,7 @@ Likely the fastest copy algorithm on the planet (educated guess—we haven't tes
 
 ### Synchronize folders
 
+- **Sync directly from Copy.** In Two panels, select one folder and press F5. Choose Sync to keep extra files, or Mirror to remove them. Copy stays the default; neither extra action opens a preview.
 - **Compare before you copy.** File > Synchronize folders previews what will be added, updated or left unchanged. Changes go from Source to Destination. In Two panels, the active folder is the source.
 - **Keep extra files, or choose Mirror.** Destination-only files stay by default. Mirror permanently deletes approved extras after additions and updates succeed and the required checks pass.
 - **Pause, cancel and review progress.** Synchronization uses the same queue and reports as Copy and Move. After an interruption, compare again before continuing.
@@ -31,6 +32,8 @@ Likely the fastest copy algorithm on the planet (educated guess—we haven't tes
 - **See which drives are still indexing.** Progress appears for each drive, and narrow status bars still indicate when results may be incomplete.
 
 ### Before upgrading
+
+**A major app refactoring.** Background work, selection, event handling and shutdown have been reworked. Manual testing has been limited. **Expect regressions. Please report them.**
 
 The installer upgrades Gozler 0.5.0 in place and updates all three programs together. Keep `gozler.exe`, `gozlerd.exe` and `gozler-ui.exe` from the same release.
 

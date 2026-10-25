@@ -39,7 +39,9 @@ use windows::Win32::Graphics::Gdi::{
     InvalidateRect, MapWindowPoints, RDW_ALLCHILDREN, RDW_ERASE, RDW_FRAME, RDW_INVALIDATE,
     RDW_UPDATENOW, REDRAW_WINDOW_FLAGS, RedrawWindow,
 };
-use windows::Win32::UI::Input::KeyboardAndMouse::{GetFocus, IsWindowEnabled, SetFocus};
+use windows::Win32::UI::Input::KeyboardAndMouse::{
+    GetActiveWindow, GetFocus, IsWindowEnabled, SetFocus,
+};
 use windows::Win32::UI::WindowsAndMessaging::{
     BeginDeferWindowPos, DeferWindowPos, DestroyWindow, EndDeferWindowPos, GWL_EXSTYLE, GWL_STYLE,
     GetClassNameW, GetClientRect, GetParent, GetWindowLongPtrW, GetWindowPlacement, GetWindowRect,
@@ -324,6 +326,11 @@ impl Hwnd {
     pub(crate) fn focus(self) {
         // SAFETY: plain values.
         let _ = unsafe { SetFocus(Some(self.0)) };
+    }
+
+    pub(crate) fn is_active(self) -> bool {
+        // SAFETY: this thread's active top-level window is a plain handle.
+        unsafe { GetActiveWindow() == self.0 }
     }
 
     /// Shows the focus rectangles in this top-level window, as

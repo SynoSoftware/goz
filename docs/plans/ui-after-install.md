@@ -190,6 +190,13 @@ implementation did not mark these visual or environment checks passed.
 
 ## The copy, move and delete engine
 
+- With one folder selected, F5 opens Copy with Copy as the default. Mirror
+  and Sync stay at the left, Copy and Cancel at the right, on one line at
+  each DPI and in each language. Enter from the destination box copies.
+  Mirror and Sync start without another dialog; only Mirror deletes extra
+  files, inside the selected folder's destination, leaving siblings alone.
+  A file or multiple selection disables the extra actions; F6 hides them.
+
 - Open a waiting transfer's context menu, including by right-clicking a row
   that was not selected. Move up and Move down update while the native menu
   stays open; choosing one moves that row only when Queue still allows it.

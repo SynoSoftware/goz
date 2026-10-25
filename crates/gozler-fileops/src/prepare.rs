@@ -174,6 +174,43 @@ pub(crate) fn prepare(request: &Request, preparing: &Preparation<'_>) -> Result<
     }
 }
 
+pub(crate) fn synchronize(
+    request: &Request,
+    destination: &Asked,
+    preparing: &Preparation<'_>,
+) -> Result<Ready, Refusal> {
+    let Request::Synchronize { source, mirror, .. } = request else {
+        unreachable!("only explicit synchronization carries a destination choice");
+    };
+    let sources = std::slice::from_ref(source);
+    let decided = match destination {
+        Asked::Typed(path) => decide_typed(sources, path),
+        destination => destination.clone(),
+    };
+    let target = match decided {
+        Asked::Folder(folder) => folder.join(source.file_name().ok_or(Refusal::SourceUnavailable)?),
+        Asked::Named { folder, name } => folder.join(name),
+        Asked::Typed(_) => unreachable!("typed destinations were decided above"),
+    };
+    // Validate identities before creating a missing destination, so an
+    // overlapping root cannot create folders inside its source.
+    let (received, _) = receive(sources, Some(&target), preparing.cancel, preparing.pause)?;
+    if received.entries.len() != 1 || !received.entries[0].folder() {
+        return Err(Refusal::SourceUnavailable);
+    }
+    std::fs::create_dir_all(&target).map_err(|error| {
+        Refusal::DestinationUnreadable(error.raw_os_error().unwrap_or(5) as u32)
+    })?;
+    let resolved = Request::Synchronize {
+        source: source.clone(),
+        destination: target,
+        mirror: *mirror,
+    };
+    let mut ready = prepare(&resolved, preparing)?;
+    ready.resolved = Some(resolved);
+    Ok(ready)
+}
+
 fn one(plan: Plan, work: Work) -> Ready {
     Ready {
         prepared: Prepared {

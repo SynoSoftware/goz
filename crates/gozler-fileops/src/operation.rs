@@ -351,6 +351,8 @@ pub enum Refusal {
     SynchronizationRootsOverlap,
     #[error("the folders changed since comparison")]
     SynchronizationChanged,
+    #[error("file and folder names conflict between the synchronization roots")]
+    SynchronizationConflicts,
     #[error("the folders cannot be compared: Windows error {0}")]
     ComparisonFailed(u32),
     #[error("the clipboard or dropped files are no longer available")]

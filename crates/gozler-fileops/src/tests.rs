@@ -235,6 +235,95 @@ impl Watched {
 }
 
 #[test]
+fn direct_mirror_uses_the_copy_target_and_preserves_its_siblings() {
+    let scratch = Scratch::new("direct-mirror");
+    let source = scratch
+        .write(r"source\new.txt", b"new")
+        .parent()
+        .unwrap()
+        .to_path_buf();
+    let extra = scratch.write(r"destination\source\extra.txt", b"extra");
+    let sibling = scratch.write(r"destination\sibling.txt", b"keep");
+    let watched = Watched::new(&scratch.saved());
+    let reserved = watched.queue.reserve_id();
+    let id = reserved.id();
+    watched.queue.synchronize_reserved(
+        reserved,
+        source.clone(),
+        Destination::Folder(scratch.path("destination")),
+        true,
+        SpeedSettings::automatic(),
+    );
+    assert!(matches!(
+        watched.wait(id, |state| !matches!(state, State::Preparing)),
+        State::Prepared(_)
+    ));
+    watched
+        .queue
+        .submit(id)
+        .expect("prepared direct comparison");
+    assert!(watched.ended(id).succeeded);
+    assert_eq!(
+        fs::read(scratch.path(r"destination\source\new.txt")).unwrap(),
+        b"new"
+    );
+    assert!(!extra.exists());
+    assert_eq!(fs::read(sibling).unwrap(), b"keep");
+
+    let reserved = watched.queue.reserve_id();
+    let id = reserved.id();
+    watched.queue.synchronize_reserved(
+        reserved,
+        source,
+        Destination::Typed(scratch.path(r"missing\renamed")),
+        false,
+        SpeedSettings::automatic(),
+    );
+    assert!(matches!(
+        watched.wait(id, |state| !matches!(state, State::Preparing)),
+        State::Prepared(_)
+    ));
+    watched.queue.submit(id).expect("prepared new destination");
+    assert!(watched.ended(id).succeeded);
+    assert_eq!(
+        fs::read(scratch.path(r"missing\renamed\new.txt")).unwrap(),
+        b"new"
+    );
+}
+
+#[test]
+fn direct_mirror_refuses_file_folder_conflicts_without_deleting_extras() {
+    let scratch = Scratch::new("direct-mirror-conflict");
+    scratch.write(r"source\conflict", b"file");
+    fs::create_dir_all(scratch.path(r"destination\source\conflict")).unwrap();
+    let extra = scratch.write(r"destination\source\extra.txt", b"keep");
+    let watched = Watched::new(&scratch.saved());
+    let reserved = watched.queue.reserve_id();
+    let id = reserved.id();
+    watched.queue.synchronize_reserved(
+        reserved,
+        scratch.path("source"),
+        Destination::Folder(scratch.path("destination")),
+        true,
+        SpeedSettings::automatic(),
+    );
+    assert!(matches!(
+        watched.wait(id, |state| !matches!(state, State::Preparing)),
+        State::Prepared(_)
+    ));
+    watched
+        .queue
+        .submit(id)
+        .expect("prepared direct comparison");
+    assert_eq!(
+        watched.ended(id).end,
+        End::Refused(Refusal::SynchronizationConflicts)
+    );
+    assert_eq!(fs::read(extra).unwrap(), b"keep");
+    assert!(scratch.path(r"destination\source\conflict").is_dir());
+}
+
+#[test]
 fn synchronization_waits_for_commit_releases_devices_and_keeps_extras_by_default() {
     let scratch = Scratch::new("sync-commit");
     let source = scratch.path("source");
