@@ -22,6 +22,7 @@ pub(in crate::app) struct Reader {
     mailbox: Arc<Mailbox>,
     generation: u64,
     pending: Option<(Read, Instant)>,
+    vetoed: bool,
 }
 
 impl Reader {
@@ -37,10 +38,12 @@ impl Reader {
             mailbox,
             generation: 0,
             pending: None,
+            vetoed: false,
         }
     }
 
     pub(in crate::app) fn open(&mut self, path: Vec<u16>) {
+        self.vetoed = false;
         self.pending = Some((Read::Open, Instant::now()));
         self.command(Command::Open(path), true);
     }
@@ -90,6 +93,17 @@ impl Reader {
     pub(in crate::app) fn release(&mut self, keep_registration: bool) {
         self.pending = None;
         self.command(Command::Release { keep_registration }, true);
+    }
+
+    pub(in crate::app) fn query_remove(&mut self) -> bool {
+        self.release(true);
+        let allowed = self.mailbox.released();
+        self.vetoed = !allowed;
+        allowed
+    }
+
+    pub(in crate::app) fn removal_failed(&self) -> bool {
+        !self.vetoed
     }
 
     fn command(&mut self, command: Command, interrupt: bool) {

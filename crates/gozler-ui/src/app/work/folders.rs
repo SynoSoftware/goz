@@ -12,6 +12,7 @@ struct Watching {
     back: ReadBack,
     suspended: bool,
     waiting: bool,
+    vetoed: bool,
     _registration: Option<Registration>,
 }
 
@@ -19,6 +20,7 @@ pub(crate) struct Work {
     waker: OpenWaker,
     readings: [Task<Reading, Registration>; 2],
     watching: [Option<Watching>; 2],
+    closing: [Option<Watching>; 2],
     frees: [Task<(Side, String), Option<PanelEvent>>; 2],
     labels: [Task<char, Option<PanelEvent>>; 26],
     retired: Retirement,
@@ -32,6 +34,7 @@ impl Work {
                     .with_size(|_| INLINE_ITEMS + 1)
             }),
             watching: Default::default(),
+            closing: Default::default(),
             frees: std::array::from_fn(|_| {
                 Task::new(waker.clone(), Replacement::Cancel, folder::free).background()
             }),
@@ -50,6 +53,7 @@ impl Work {
             back,
             suspended: false,
             waiting: true,
+            vetoed: false,
             _registration: None,
         });
         self.readings[side.index()].replace(reading);
@@ -58,7 +62,13 @@ impl Work {
     pub(crate) fn cancel_read(&mut self, side: Side) {
         if let Some(mut old) = self.watching[side.index()].take() {
             old.back.stop();
-            self.retired.push(old, INLINE_ITEMS + 1);
+            if old.back.closed() {
+                self.retired.push(old, INLINE_ITEMS + 1);
+            } else {
+                // A pending reading cannot open before its predecessor closes.
+                let earlier = self.closing[side.index()].replace(old);
+                self.retired.push(earlier, INLINE_ITEMS + 1);
+            }
         }
         self.readings[side.index()].cancel();
     }
@@ -97,6 +107,13 @@ impl Work {
     pub(crate) fn drain(&mut self) -> Vec<PanelEvent> {
         let mut events = Vec::new();
         for side in Side::BOTH {
+            if self.closing[side.index()]
+                .as_ref()
+                .is_some_and(|watching| watching.back.closed())
+            {
+                self.retired
+                    .push(self.closing[side.index()].take(), INLINE_ITEMS + 1);
+            }
             // Completion admits the latest pending reading before its mailbox
             // is drained; the previous reading has already lost its receiver.
             if let Some((_, registration)) = self.readings[side.index()].take() {
@@ -154,23 +171,53 @@ impl Work {
         events
     }
 
-    pub(crate) fn removal(&mut self, notification: isize, removal: Removal) -> Option<Side> {
-        let side = Side::BOTH.into_iter().find(|side| {
+    pub(crate) fn removal(
+        &mut self,
+        notification: isize,
+        removal: Removal,
+    ) -> (Option<Side>, bool) {
+        for side in Side::BOTH {
+            if let Some(closing) = &mut self.closing[side.index()]
+                && closing.back.names(notification)
+            {
+                let closed = closing.back.closed();
+                if !closed {
+                    closing.back.stop();
+                    self.readings[side.index()].interrupt_io();
+                }
+                return (None, removal != Removal::Query || closed);
+            }
+        }
+        let Some(side) = Side::BOTH.into_iter().find(|side| {
             self.watching[side.index()]
                 .as_ref()
                 .is_some_and(|watching| watching.back.names(notification))
-        })?;
+        }) else {
+            return (None, true);
+        };
+        let mut allowed = true;
         match removal {
             Removal::Query => {
-                let watching = self.watching[side.index()].as_mut()?;
+                let watching = self.watching[side.index()]
+                    .as_mut()
+                    .expect("the notification names this reading");
                 watching.suspended = true;
                 watching.waiting = false;
                 watching.back.stop();
                 self.readings[side.index()].interrupt_io();
+                allowed = watching.back.closed();
+                watching.vetoed = !allowed;
+            }
+            Removal::Failed
+                if self.watching[side.index()]
+                    .as_ref()
+                    .is_some_and(|watching| watching.vetoed) =>
+            {
+                return (None, true);
             }
             Removal::Failed | Removal::Complete => self.cancel_read(side),
         }
-        Some(side)
+        (Some(side), allowed)
     }
 
     pub(crate) fn stop_all(&mut self) {
@@ -215,6 +262,9 @@ impl Work {
 
     pub(crate) fn close(&mut self) -> Retirement {
         self.stop_all();
+        for closing in &mut self.closing {
+            self.retired.push(closing.take(), INLINE_ITEMS + 1);
+        }
         for task in &mut self.readings {
             self.retired.append(task.close_delivery());
         }

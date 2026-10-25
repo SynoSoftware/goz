@@ -127,9 +127,6 @@ fn apply_order(entries: &mut [Entry], mut order: Vec<usize>) {
 /// Gives each folder of a listing its size from `sizes`, matched by name
 /// as [`super::Panels::accept_sizes`] matches gozlerd's.
 pub(crate) fn give_sizes(entries: &mut [Entry], sizes: &[(Box<[u16]>, u64)]) {
-    if sizes.is_empty() {
-        return;
-    }
     // By the hash of the folded name.
     let mut by_hash = HashMap::<u64, Vec<_>>::new();
     for named in sizes {
@@ -724,11 +721,64 @@ fn extension_key<'k>(key: &'k [u8], entry: &Entry) -> &'k [u8] {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::fetch::Chunk;
     use crate::core::panel::{
-        Panels, Side,
+        FILE_ATTRIBUTE_DIRECTORY, Panels, Side,
         tests::{file, names, showing},
     };
     use std::path::Path;
+
+    #[test]
+    fn an_empty_size_answer_clears_known_sizes_and_restores_size_order() {
+        let folder = |name: &str| {
+            Entry::new(
+                name.encode_utf16().collect(),
+                FILE_ATTRIBUTE_DIRECTORY,
+                0,
+                0,
+            )
+        };
+        let sort = SortSpec {
+            key: SortKey::Size,
+            dir: SortDir::Desc,
+        };
+        let mut entries = vec![folder("a"), folder("b"), file("f", 7, 0)];
+        give_sizes(
+            &mut entries,
+            &[
+                ("a".encode_utf16().collect(), 10),
+                ("b".encode_utf16().collect(), 90),
+            ],
+        );
+        sort_listing(&mut entries, sort);
+        let mut rows = FolderRows::empty(sort);
+        rows.replace_listing(entries, sort);
+        let names = |rows: &FolderRows| {
+            rows.entries()
+                .iter()
+                .map(Entry::display_name)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(names(&rows), ["b", "a", "f"]);
+        rows.apply_sizes(&Outcome::Rows(Chunk {
+            start: 0,
+            rows: Arc::from([]),
+            total: 0,
+            volumes_incomplete: false,
+            metadata_pending: false,
+            sums: None,
+            rest_follows: false,
+            made: None,
+        }));
+        assert_eq!(names(&rows), ["a", "b", "f"]);
+        assert_eq!(
+            rows.shown_totals(),
+            Totals {
+                bytes: 7,
+                unknown: 2,
+            }
+        );
+    }
 
     /// More changes than go in one by one rebuild the entries, which must
     /// put each new entry at its sorted place among the old ones.

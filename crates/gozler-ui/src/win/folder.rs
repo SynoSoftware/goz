@@ -93,6 +93,7 @@ pub(crate) struct ReadBack {
     pub(crate) mailbox: Mailbox,
     stop: Arc<Stop>,
     notification: Arc<AtomicIsize>,
+    closed: Arc<AtomicBool>,
     registering: Option<Receiver<Register>>,
 }
 
@@ -104,6 +105,10 @@ impl ReadBack {
 
     pub(crate) fn names(&self, notification: isize) -> bool {
         notification != 0 && self.notification.load(Ordering::Acquire) == notification
+    }
+
+    pub(crate) fn closed(&self) -> bool {
+        self.closed.load(Ordering::Acquire)
     }
 
     pub(crate) fn take_registration(&self) -> Option<Register> {
@@ -118,6 +123,7 @@ pub(crate) struct Reading {
     ask: ReadAsk,
     stop: Arc<Stop>,
     notification: Arc<AtomicIsize>,
+    closed: Arc<AtomicBool>,
     delivery: Delivery,
     registering: SyncSender<Register>,
     waker: OpenWaker,
@@ -127,6 +133,7 @@ impl Reading {
     pub(crate) fn new(side: Side, ask: ReadAsk, waker: OpenWaker) -> (Self, ReadBack) {
         let stop = Arc::new(Stop::new());
         let notification = Arc::new(AtomicIsize::new(0));
+        let closed = Arc::new(AtomicBool::new(true));
         let (mailbox, delivery) = Mailbox::new(Arc::clone(&stop), waker.clone());
         let (registering, registered) = sync_channel(1);
         let back = ReadBack {
@@ -134,6 +141,7 @@ impl Reading {
             mailbox,
             stop: Arc::clone(&stop),
             notification: Arc::clone(&notification),
+            closed: Arc::clone(&closed),
             registering: Some(registered),
         };
         (
@@ -142,6 +150,7 @@ impl Reading {
                 ask,
                 stop,
                 notification,
+                closed,
                 delivery,
                 registering,
                 waker,

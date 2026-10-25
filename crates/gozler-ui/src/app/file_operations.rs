@@ -38,6 +38,8 @@ use windows::Win32::Foundation::LRESULT;
 
 const WINDOW_CLASS: &str = "gozler.ui.file_operations";
 
+const TILES: usize = 1;
+
 /// The timer that scrolls the queue list while a dragged row is held above
 /// or below it.
 const DRAG_SCROLL: usize = 2;
@@ -198,7 +200,7 @@ struct Pane {
     tiles: RefCell<Option<TileApply>>,
     tile_revision: Cell<u64>,
     tile_fit: Cell<u64>,
-    tile_posted: Cell<bool>,
+    tile_timer: Cell<bool>,
     applying_tiles: Cell<bool>,
     tiles_blocked: Cell<bool>,
     flipped: Cell<bool>,
@@ -727,7 +729,7 @@ impl Pane {
             tiles: RefCell::new(None),
             tile_revision: Cell::new(0),
             tile_fit: Cell::new(0),
-            tile_posted: Cell::new(false),
+            tile_timer: Cell::new(false),
             applying_tiles: Cell::new(false),
             tiles_blocked: Cell::new(false),
             flipped: Cell::new(true),
@@ -1392,14 +1394,19 @@ impl Pane {
             }
         };
         self.tiles.replace(Some(next));
-        if !self.tile_posted.replace(true) {
-            hwnd.post(window::DEFERRED);
+        self.schedule_tiles(hwnd);
+    }
+
+    fn schedule_tiles(&self, hwnd: Hwnd) {
+        if self.hwnd.get() == Some(hwnd) && !self.tile_timer.replace(true) {
+            hwnd.set_timer(TILES, 1);
         }
     }
 
     fn apply_tiles(&self, hwnd: Hwnd) {
-        self.tile_posted.set(false);
-        if self.applying_tiles.replace(true) {
+        hwnd.kill_timer(TILES);
+        self.tile_timer.set(false);
+        if self.hwnd.get() != Some(hwnd) || self.applying_tiles.replace(true) {
             return;
         }
         let pending = self.tiles.take();
@@ -1485,9 +1492,6 @@ impl Pane {
                 }
             } else if current() {
                 self.tiles.replace(Some(pending));
-                if !self.tile_posted.replace(true) {
-                    hwnd.post(window::DEFERRED);
-                }
             } else {
                 self.retired
                     .borrow_mut()
@@ -1496,10 +1500,12 @@ impl Pane {
         }
         self.applying_tiles.set(false);
         if self.hwnd.get() == Some(hwnd) {
-            if self.tiles.borrow().is_some() && !self.tile_posted.replace(true) {
-                hwnd.post(window::DEFERRED);
+            if self.tiles.borrow().is_some() {
+                self.schedule_tiles(hwnd);
             }
-            self.owner.post(QUEUE_CHANGED);
+            if !self.retired.borrow().is_empty() {
+                self.owner.post(QUEUE_CHANGED);
+            }
         }
     }
 
@@ -1828,8 +1834,14 @@ impl DialogProc for FailureDialog {
 impl WindowProc for Pane {
     fn message(&self, hwnd: Hwnd, message: Message<'_>) -> Option<LRESULT> {
         match message {
-            Message::Deferred => {
+            Message::Timer(TILES) => {
                 self.apply_tiles(hwnd);
+                Some(LRESULT(0))
+            }
+            Message::Destroy => {
+                hwnd.kill_timer(TILES);
+                self.tile_timer.set(false);
+                self.hwnd.set(None);
                 Some(LRESULT(0))
             }
             Message::Size => {

@@ -616,26 +616,36 @@ impl Viewer {
     }
 
     /// Windows asks `removal` of the file's drive (DESIGN.md: The Viewer);
-    /// `false` when `notification` is not this Viewer's.
-    fn removal(&self, hwnd: Hwnd, notification: isize, removal: Removal) -> bool {
+    /// `None` when `notification` is not this Viewer's.
+    fn removal(&self, hwnd: Hwnd, notification: isize, removal: Removal) -> Option<LRESULT> {
         let ours = self
             .reader
             .borrow()
             .as_ref()
             .is_some_and(|reader| reader.is_registration(notification));
         if !ours {
-            return false;
+            return None;
         }
+        let mut allowed = true;
         match removal {
             Removal::Query => {
                 self.remember_place();
                 if let Some(reader) = self.reader.borrow_mut().as_mut() {
-                    reader.release(true);
+                    allowed = reader.query_remove();
                 }
-                self.set_shown(hwnd, Shown::Removed);
+                self.set_shown(hwnd, Shown::Removing);
             }
             // Another program kept the drive, so the file can show again.
-            Removal::Failed => self.read_file(hwnd),
+            Removal::Failed => {
+                let reopen = self
+                    .reader
+                    .borrow()
+                    .as_ref()
+                    .is_some_and(Reader::removal_failed);
+                if reopen {
+                    self.read_file(hwnd);
+                }
+            }
             // A drive pulled out without asking sends only this.
             Removal::Complete => {
                 self.remember_place();
@@ -645,7 +655,11 @@ impl Viewer {
                 self.set_shown(hwnd, Shown::Removed);
             }
         }
-        true
+        Some(LRESULT(if allowed {
+            1
+        } else {
+            windows::Win32::UI::WindowsAndMessaging::BROADCAST_QUERY_DENY as isize
+        }))
     }
 
     fn on_key(&self, hwnd: Hwnd, key: ViewerKey) {
@@ -830,9 +844,7 @@ impl WindowProc for Viewer {
             Message::DeviceRemoval {
                 removal,
                 notification,
-            } => self
-                .removal(hwnd, notification, removal)
-                .then_some(LRESULT(1)),
+            } => self.removal(hwnd, notification, removal),
             Message::InitMenuPopup => {
                 let mode = self.shown.borrow().document().map(Document::mode);
                 if let Some(menu) = Menu::of(hwnd) {

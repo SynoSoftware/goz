@@ -342,6 +342,7 @@ impl ButtonWidths {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct StatusWidths {
     view: Px,
+    indexing: Px,
     running: Px,
     done: Px,
     panel_index: Px,
@@ -354,6 +355,7 @@ impl StatusWidths {
             |texts: &[String]| texts.iter().map(|t| measure(t)).max().unwrap_or_default();
         StatusWidths {
             view: widest_of(&widest.view),
+            indexing: measure(&widest.indexing),
             running: widest_of(&widest.running),
             done: widest_of(&widest.done),
             panel_index: widest_of(&widest.panel_index),
@@ -1900,6 +1902,15 @@ pub(crate) enum TextForm {
 }
 
 impl StatusLayout {
+    pub(crate) fn job_text_width(&self, wanted: Px, controls: Px, indexing: Px, dpi: Dpi) -> Px {
+        let gap = if indexing > Px(0) && wanted + controls > Px(0) {
+            Dip(6).to_px(dpi)
+        } else {
+            Px(0)
+        };
+        wanted.min((self.middle.width - controls - indexing - gap).max(Px(0)))
+    }
+
     pub(crate) fn center_entries(&self, widths: &[Px], width: Px, dpi: Dpi) -> Vec<Rect> {
         let gap = Dip(6).to_px(dpi);
         let total = widths.iter().fold(Px(0), |sum, width| sum + *width)
@@ -1985,7 +1996,19 @@ impl StatusLayout {
         } else {
             widths.running
         };
-        let running = running_text + related + px(PROGRESS_WIDTH) + related + cancel_width;
+        let minimum_text = if window_end.is_some() {
+            running_text.max(
+                widths.indexing
+                    + if widths.indexing > Px(0) {
+                        related
+                    } else {
+                        Px(0)
+                    },
+            )
+        } else {
+            running_text
+        };
+        let running = minimum_text + related + px(PROGRESS_WIDTH) + related + cancel_width;
         let minimum_middle = if window_end.is_some() {
             running
         } else {
@@ -2188,12 +2211,46 @@ mod tests {
         assert_eq!(placed[1].right(), Px(878));
     }
 
+    #[test]
+    fn indexing_stays_readable_beside_a_cancellable_job_at_minimum_width() {
+        let dpi = Dpi::new(96).unwrap();
+        let captions = captions(dpi, 5.0, false);
+        assert!(captions.status.indexing > Dip(220).to_px(dpi));
+        let end = WindowEnd {
+            width: Px(800),
+            memory: None,
+            icons: true,
+            show_details: false,
+        };
+        let layout = StatusLayout::compute(
+            &captions.status,
+            captions.status_cancel.width(dpi),
+            dpi,
+            Px(15),
+            Px(24),
+            Some(&end),
+        );
+        let width = layout.min_width(dpi);
+        let layout = layout.fit_groups(layout.groups[0], Px(1000), width, dpi);
+        let indexing = captions.status.indexing + Px(4);
+        let controls = layout.progress.width + layout.cancel.width + Px(12);
+        let wanted = layout.running_text + Px(4);
+        let text = layout.job_text_width(wanted, controls, indexing, dpi);
+        assert_eq!(text, Px(12));
+        let placed = layout.center_entries(&[indexing, text + controls], width, dpi);
+        assert!(placed[0].width >= captions.status.indexing);
+        assert!(placed[1].width > controls);
+        assert_eq!(placed[1].right(), layout.middle.right());
+        assert_eq!(layout.job_text_width(wanted, controls, Px(0), dpi), wanted);
+    }
+
     /// The main window's right group of 800 px, and the width it has room
     /// for.
     fn right_room() -> (StatusLayout, Px) {
         let dpi = Dpi::new(96).expect("96 is not zero");
         let widths = StatusWidths {
             view: Px(100),
+            indexing: Px(0),
             running: Px(100),
             done: Px(100),
             panel_index: Px(100),

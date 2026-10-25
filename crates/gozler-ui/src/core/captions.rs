@@ -29,8 +29,8 @@ pub(crate) use settings::{
     settings_pages_matching, settings_status_view, settings_status_widest,
 };
 pub(crate) use status::{
-    JobCaption, JobProgress, MemoryCaptions, MemoryWidest, StatusCaptions, StatusWidest,
-    shows_update,
+    IndexingCaption, JobCaption, JobProgress, MemoryCaptions, MemoryWidest, StatusCaptions,
+    StatusWidest, shows_update,
 };
 #[cfg(test)]
 pub(crate) use status::{export_status, index_status, results_status, selection_status};
@@ -831,6 +831,7 @@ impl WindowCaptions {
 /// figure.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct ValuePart {
+    pub(crate) connector: Option<String>,
     pub(crate) glyph: Option<Glyph>,
     pub(crate) text: String,
     pub(crate) narrow: Option<Narrow>,
@@ -839,6 +840,7 @@ pub(crate) struct ValuePart {
 impl ValuePart {
     pub(crate) fn plain(text: String) -> ValuePart {
         ValuePart {
+            connector: None,
             glyph: None,
             text,
             narrow: None,

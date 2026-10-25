@@ -287,8 +287,8 @@ impl Model {
         steps
     }
 
-    pub(crate) fn has_operation_release(&self) -> bool {
-        self.following.release.is_some()
+    pub(crate) fn can_release_operations(&self) -> bool {
+        self.following.state.is_some() && !self.following.dirty && self.following.release.is_some()
     }
 
     pub(crate) fn release_operations(&mut self) -> Vec<QueueStep> {

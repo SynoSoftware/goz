@@ -132,8 +132,12 @@ owner has run it, and file an issue for each item that fails.
 - Open Indexed folders on a sleeping volume, close and reopen it, then expand
   folders on another volume. The dialog stays usable, the independent volume
   lists, and the earlier dialog's results never enter the new tree.
-- With Viewer open on a removable drive, attempt removal and then cancel it.
-  Viewer can reopen after failed removal; close during a pending read remains
+- With a panel and Viewer open on a removable drive, attempt safe removal.
+  An attempt while release is pending is denied without freezing the window;
+  retry after closure succeeds unless another program holds the drive. Gozler's
+  own veto leaves its handles closed. After Gozler consents, another program's
+  veto restores the panel watch and Viewer. Also unplug the drive without a
+  query and navigate away during release. Close during a pending read remains
   immediate.
 
 ## DPI and contrast

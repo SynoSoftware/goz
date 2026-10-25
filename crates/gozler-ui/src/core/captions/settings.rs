@@ -383,6 +383,7 @@ pub(crate) fn settings_status_widest(strings: &Strings) -> StatusWidest {
     let view = vec![settings_status_view(strings, true).to_owned()];
     StatusWidest {
         view,
+        indexing: String::new(),
         running: Vec::new(),
         done: Vec::new(),
         panel_index: Vec::new(),

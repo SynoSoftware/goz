@@ -8,7 +8,7 @@ use windows::Win32::Graphics::Gdi::COLOR_BTNTEXT;
 use windows::Win32::UI::Controls::{
     NMHDR, SB_GETICON, SB_GETPARTS, SB_GETRECT, SB_GETTEXTLENGTHW, SB_GETTEXTW, SB_GETTIPTEXTW,
     SB_SETICON, SB_SETMINHEIGHT, SB_SETPARTS, SB_SETTEXTW, SB_SETTIPTEXTW, SBARS_SIZEGRIP,
-    SBARS_TOOLTIPS, STATUSCLASSNAMEW,
+    SBARS_TOOLTIPS, SBT_NOBORDERS, STATUSCLASSNAMEW,
 };
 use windows::Win32::UI::Shell::{DefSubclassProc, RemoveWindowSubclass, SetWindowSubclass};
 use windows::Win32::UI::WindowsAndMessaging::{
@@ -97,13 +97,19 @@ impl StatusBar {
     /// because the bar erases and draws the part for every text it is
     /// given, also an unchanged one (DESIGN.md: Painting).
     pub(crate) fn set_text(self, part: usize, text: &str) {
-        if self.text(part) == text {
+        self.set_text_with_border(part, text, true);
+    }
+
+    pub(crate) fn set_text_with_border(self, part: usize, text: &str, border: bool) {
+        let style = if border { 0 } else { SBT_NOBORDERS as usize };
+        let current = (send(self.0, SB_GETTEXTLENGTHW, part, 0) >> 16) as usize;
+        if self.text(part) == text && current == style {
             return;
         }
         let text = wide(text);
         // SAFETY: `text` is NUL-terminated and outlives the call, which
         // copies it.
-        unsafe { send_pointer(self.0, SB_SETTEXTW, part, text.as_ptr()) };
+        unsafe { send_pointer(self.0, SB_SETTEXTW, part | style, text.as_ptr()) };
     }
 
     pub(crate) fn text(self, part: usize) -> String {

@@ -8,7 +8,7 @@ use crate::win::wake::OpenWaker;
 use crate::win::work::OffThread;
 use gozler_client::CancelToken;
 use gozler_winfs::{Access, Entry, Reparse, WinError, open_entry};
-use std::sync::atomic::{AtomicIsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicIsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex, PoisonError};
 
 pub(crate) enum Command {
@@ -32,6 +32,7 @@ pub(crate) struct Mailbox {
     pending: Mutex<Pending>,
     changed: Condvar,
     notification: Arc<AtomicIsize>,
+    active: AtomicBool,
 }
 
 impl Mailbox {
@@ -70,6 +71,20 @@ impl Mailbox {
 
     pub(crate) fn is_registration(&self, notification: isize) -> bool {
         notification != 0 && self.notification.load(Ordering::Acquire) == notification
+    }
+
+    pub(crate) fn released(&self) -> bool {
+        !self.active.load(Ordering::Acquire)
+    }
+
+    fn opening(&self, generation: u64) -> bool {
+        let pending = self.pending.lock().unwrap_or_else(PoisonError::into_inner);
+        if pending.closed || pending.generation != generation {
+            return false;
+        }
+        // Query invalidation uses this same lock before checking release.
+        self.active.store(true, Ordering::Release);
+        true
     }
 
     pub(crate) fn take_registration(&self, generation: u64) -> Option<Register> {
@@ -151,8 +166,17 @@ struct Reading {
 }
 
 impl Reading {
+    fn release(&mut self, keep_registration: bool) {
+        drop(self.file.take());
+        self.mailbox.active.store(false, Ordering::Release);
+        if !keep_registration {
+            self.clear();
+        }
+    }
+
     fn clear(&mut self) {
         drop(self.file.take());
+        self.mailbox.active.store(false, Ordering::Release);
         self.failed = None;
         let notification = self.mailbox.notification.swap(0, Ordering::AcqRel);
         unregister((notification != 0).then_some(notification));
@@ -161,11 +185,12 @@ impl Reading {
     fn open(
         &mut self,
         path: &[u16],
+        generation: u64,
         current: impl Fn() -> bool,
         register: impl Fn(&Entry),
     ) -> Result<Option<ViewerEvent>, WinError> {
         self.clear();
-        if !current() {
+        if !current() || !self.mailbox.opening(generation) {
             return Ok(None);
         }
         let file = open_entry(&verbatim_wide(path), Access::Read, Reparse::Follow)?;
@@ -232,7 +257,7 @@ pub(crate) fn run(session: Session, _worker: &OffThread, cancel: &CancelToken) {
             continue;
         }
         let result = match command {
-            Command::Open(path) => reading.open(&path, current, |file| {
+            Command::Open(path) => reading.open(&path, generation, current, |file| {
                 session
                     .mailbox
                     .register(generation, file.handle_value(), &session.waker);
@@ -249,14 +274,14 @@ pub(crate) fn run(session: Session, _worker: &OffThread, cancel: &CancelToken) {
             }
             Command::Cancel => continue,
             Command::Release { keep_registration } => {
-                // Retain the registration until Windows reports removal failure.
-                drop(reading.file.take());
-                if !keep_registration {
-                    reading.clear();
-                }
+                // Keep removal notifications through our own veto's failure event.
+                reading.release(keep_registration);
                 continue;
             }
         };
+        if reading.file.is_none() {
+            session.mailbox.active.store(false, Ordering::Release);
+        }
         if !session.mailbox.current(generation) || cancel.is_cancelled() {
             continue;
         }
@@ -266,6 +291,7 @@ pub(crate) fn run(session: Session, _worker: &OffThread, cancel: &CancelToken) {
             // A removal query can race the preceding generation check.
             // Keep its notification until replacement, completion or close.
             drop(reading.file.take());
+            session.mailbox.active.store(false, Ordering::Release);
             // Cancel can discard this answer while the document stays visible.
             reading.failed = Some((opened, reason.clone()));
             Some(ViewerEvent::Failed { opened, reason })
@@ -279,6 +305,60 @@ pub(crate) fn run(session: Session, _worker: &OffThread, cancel: &CancelToken) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_queued_release_does_not_acknowledge_an_open_file() {
+        let path = std::env::temp_dir().join(format!("gozler-release-{}.bin", std::process::id()));
+        std::fs::write(&path, "contents").expect("a test file");
+        let wide: Vec<_> = path
+            .to_str()
+            .expect("a Unicode temp folder")
+            .encode_utf16()
+            .collect();
+        crate::win::work::spawn(move |_| {
+            let mailbox = Arc::new(Mailbox::default());
+            let mut reading = Reading {
+                file: None,
+                failed: None,
+                len: 0,
+                mailbox: Arc::clone(&mailbox),
+            };
+            assert!(
+                reading
+                    .open(&wide, 0, || true, |_| {})
+                    .expect("the file opens")
+                    .is_some()
+            );
+            mailbox.post(
+                1,
+                Command::Release {
+                    keep_registration: true,
+                },
+            );
+            assert!(
+                !mailbox.released(),
+                "posting cancellation cannot consent to removal"
+            );
+            assert!(
+                !mailbox.opening(0),
+                "a superseded open cannot race release consent"
+            );
+            let (_, Command::Release { keep_registration }) =
+                mailbox.next().expect("a release is queued")
+            else {
+                panic!("the queued command releases the file");
+            };
+            reading.release(keep_registration);
+            assert!(mailbox.released());
+            assert!(
+                reading.file.is_none(),
+                "consent follows actual handle ownership release"
+            );
+        })
+        .join()
+        .expect("the reader ends");
+        std::fs::remove_file(path).expect("the file was released");
+    }
 
     /// A later block 0 must not reset the page or leave its awaited block unresolved.
     #[test]
@@ -298,7 +378,7 @@ mod tests {
                 mailbox: Arc::default(),
             };
             assert!(
-                matches!(reading.open(&wide, || true, |_| {}), Ok(Some(ViewerEvent::Opened { len, .. }))
+                matches!(reading.open(&wide, 0, || true, |_| {}), Ok(Some(ViewerEvent::Opened { len, .. }))
                 if len == BLOCK_BYTES as u64 + 1)
             );
             for index in [1, 0] {

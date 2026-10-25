@@ -2333,15 +2333,15 @@ impl Panels {
         hwnd: Hwnd,
         removal: Removal,
         notification: isize,
-    ) {
-        let side = window
+    ) -> bool {
+        let (side, allowed) = window
             .created()
             .work
             .borrow_mut()
             .folders
             .removal(notification, removal);
         let Some(side) = side else {
-            return;
+            return allowed;
         };
         match removal {
             // The worker was signalled; resource cleanup never holds this callback.
@@ -2370,6 +2370,7 @@ impl Panels {
             }
         }
         window.retire_model();
+        allowed
     }
 
     /// Gives every list the taken entries `taken` and shows the panels

@@ -1,4 +1,4 @@
-use super::{Narrow, ValuePart, failure_text, joined, size_with_unknown, too_many};
+use super::{Narrow, ValuePart, failure_text, joined, too_many};
 use crate::core::fetch::List;
 use crate::core::file_operations::{self, Bar};
 use crate::core::fixer::{
@@ -20,13 +20,21 @@ pub(crate) struct StatusCaptions {
     /// What the view holds: the results and the selection.
     pub(crate) view: String,
     pub(crate) job: JobCaption,
-    pub(crate) indexing: Vec<String>,
+    pub(crate) indexing: Vec<IndexingCaption>,
     /// The service and index state, followed by the search's totals, each
     /// after its icon.
     pub(crate) right: Vec<ValuePart>,
     /// The main window's memory group; `None` while Settings > General
     /// hides it.
     pub(crate) memory: Option<MemoryCaptions>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct IndexingCaption {
+    pub(crate) label: String,
+    pub(crate) compact: String,
+    pub(crate) value: String,
+    pub(crate) progress: JobProgress,
 }
 
 /// The status bar's memory group: the working sets of the service and of
@@ -52,11 +60,13 @@ impl MemoryCaptions {
         let app = figure(model.app_working_set());
         MemoryCaptions {
             service: ValuePart {
+                connector: None,
                 glyph: Some(Glyph::Component),
                 text: strings.format("status.service_memory", &[&service]),
                 narrow: None,
             },
             app: ValuePart {
+                connector: None,
                 glyph: Some(Glyph::Favicon),
                 text: strings.format("status.ui_memory", &[&app]),
                 narrow: None,
@@ -126,6 +136,7 @@ pub(crate) enum JobProgress {
 /// text (DESIGN.md: Look).
 pub(crate) struct StatusWidest {
     pub(crate) view: Vec<String>,
+    pub(crate) indexing: String,
     /// A running job's texts, which share the middle group with its
     /// progress bar and Cancel.
     pub(crate) running: Vec<String>,
@@ -190,6 +201,15 @@ impl StatusCaptions {
                     .volumes
                     .iter()
                     .filter_map(|volume| indexing_progress(model.strings(), numbers, volume))
+                    .enumerate()
+                    .map(|(index, mut caption)| {
+                        caption.label = if index == 0 {
+                            model.strings().format("status.indexing", &[&caption.label])
+                        } else {
+                            format!("· {}", caption.label)
+                        };
+                        caption
+                    })
                     .collect(),
                 _ => Vec::new(),
             },
@@ -313,6 +333,7 @@ pub(super) fn status_widest(strings: &Strings, numbers: &dyn Numbers) -> StatusW
     let [operation_running, operation_ended] =
         file_operations::status_widest(strings, numbers, WIDEST_TOTAL);
     StatusWidest {
+        indexing: strings.text("status.indexing_short").to_owned(),
         view: results
             .iter()
             .flat_map(|results| {
@@ -338,21 +359,16 @@ pub(super) fn status_widest(strings: &Strings, numbers: &dyn Numbers) -> StatusW
             // An active search panel's index state and totals, as Search
             // shows them; the layout adds the room of their two glyphs.
             let widest = sizes[sizes.len() - 1];
-            let total = |key, size: String| strings.count(key, WIDEST_TOTAL, numbers, &[&size]);
-            let totals = joined(
-                strings,
-                total(
-                    "status.files",
-                    size_with_unknown(strings, numbers, Some(widest), WIDEST_TOTAL),
-                ),
-                total("status.folders", size_at_least(strings, numbers, widest)),
+            let files = strings.count(
+                "status.files",
+                WIDEST_TOTAL,
+                numbers,
+                &[&text::bytes(strings, numbers, widest)],
             );
-            let volumes = [
-                "status.volume_indexing",
-                "status.volume_offline",
-                "status.volume_failed",
-            ]
-            .map(|key| joined(strings, strings.format(key, &["C:"]), totals.clone()));
+            let folders = strings.count("inspector.folders", WIDEST_TOTAL, numbers, &[]);
+            let totals = format!("{files} {} {folders}", strings.text("status.and"));
+            let volumes = ["status.volume_offline", "status.volume_failed"]
+                .map(|key| joined(strings, strings.format(key, &["C:"]), totals.clone()));
             [
                 strings.format("panel.not_indexed", &["C:\\"]),
                 strings.format("panel.indexing", &["C:\\"]),
@@ -378,8 +394,8 @@ fn status_list(model: &Model) -> Option<List> {
     }
 }
 
-/// `list`'s files and folders, each kind after its icon and with the space
-/// it takes, and a kind no match is left out; none while the status bar
+/// `list`'s file count and size and folder count, each after its icon;
+/// a kind with no match is left out. None while the status bar
 /// names a search as running, or when the service sent no sums (DESIGN.md:
 /// Status bar).
 fn totals_status(model: &Model, list: List, numbers: &dyn Numbers) -> Vec<ValuePart> {
@@ -390,26 +406,26 @@ fn totals_status(model: &Model, list: List, numbers: &dyn Numbers) -> Vec<ValueP
     let Some(sums) = results.sums().filter(|_| !results.search_named()) else {
         return Vec::new();
     };
-    let file_bytes = size_with_unknown(
-        strings,
-        numbers,
-        (sums.files_without_size < sums.files).then_some(sums.file_bytes),
-        sums.files_without_size,
-    );
-    let folder_bytes = if sums.folder_bytes_at_least {
-        size_at_least(strings, numbers, sums.folder_bytes)
-    } else {
-        text::bytes(strings, numbers, sums.folder_bytes)
-    };
+    let file_bytes = text::bytes(strings, numbers, sums.file_bytes);
     let mut parts: Vec<ValuePart> = [
-        (Glyph::Page, "status.files", sums.files, file_bytes),
-        (Glyph::Folder, "status.folders", sums.folders, folder_bytes),
+        (
+            Glyph::Page,
+            strings.count("status.files", sums.files, numbers, &[&file_bytes]),
+            sums.files,
+        ),
+        (
+            Glyph::Folder,
+            strings.count("inspector.folders", sums.folders, numbers, &[]),
+            sums.folders,
+        ),
     ]
     .into_iter()
-    .filter(|(_, _, count, _)| *count > 0)
-    .map(|(glyph, key, count, size)| ValuePart {
+    .filter(|(_, _, count)| *count > 0)
+    .map(|(glyph, text, _)| ValuePart {
+        connector: (glyph == Glyph::Page && sums.folders > 0)
+            .then(|| strings.text("status.and").to_owned()),
         glyph: Some(glyph),
-        text: strings.count(key, count, numbers, &[&size]),
+        text,
         narrow: None,
     })
     .collect();
@@ -425,15 +441,6 @@ fn totals_status(model: &Model, list: List, numbers: &dyn Numbers) -> Vec<ValueP
         });
     }
     parts
-}
-
-/// A folder sum that counts only the files whose size was read: "at least
-/// 18.2 GB".
-fn size_at_least(strings: &Strings, numbers: &dyn Numbers, bytes: u64) -> String {
-    strings.format(
-        "status.size_at_least",
-        &[&text::bytes(strings, numbers, bytes)],
-    )
 }
 
 /// How many results, or that a search runs once the status bar names it
@@ -651,7 +658,7 @@ fn indexing_progress(
     strings: &Strings,
     numbers: &dyn Numbers,
     volume: &gozler_core::proto::VolumeStatus,
-) -> Option<String> {
+) -> Option<IndexingCaption> {
     if !matches!(
         volume.phase,
         VolumePhase::Bootstrapping | VolumePhase::Rescanning
@@ -659,22 +666,31 @@ fn indexing_progress(
         return None;
     }
     let prefix = volume.mounted().display_prefix();
-    let activity = strings.format("status.indexing", &[prefix]);
-    Some(match volume.progress {
+    let (value, progress) = match volume.progress {
         Some(IndexProgress::Scanning {
             percent: Some(percent),
             ..
-        }) => strings.format(
-            "status.progress_percent",
-            &[&activity, &numbers.integer(u64::from(percent))],
+        }) => (
+            strings.format(
+                "status.indexing_percent",
+                &[&numbers.integer(u64::from(percent))],
+            ),
+            JobProgress::Measured {
+                done: u64::from(percent),
+                total: 100,
+            },
         ),
-        Some(IndexProgress::Scanning { entries, .. }) => {
-            strings.count("status.indexing_found", entries, numbers, &[prefix])
-        }
-        Some(IndexProgress::Preparing { .. }) => {
-            strings.format("status.index_preparing", &[prefix])
-        }
-        None => activity,
+        Some(IndexProgress::Scanning { entries, .. } | IndexProgress::Preparing { entries }) => (
+            strings.count("status.indexing_entries", entries, numbers, &[]),
+            JobProgress::Unmeasured,
+        ),
+        None => (String::new(), JobProgress::Unmeasured),
+    };
+    Some(IndexingCaption {
+        label: prefix.trim_end_matches('\\').to_owned(),
+        compact: strings.text("status.indexing_short").to_owned(),
+        value,
+        progress,
     })
 }
 
@@ -708,12 +724,19 @@ pub(crate) fn index_status(model: &Model) -> String {
             .unwrap_or_default();
     };
     let coverage = model.coverage(list);
-    if let Some(volume) = coverage.incomplete() {
+    if let Some(volume) = coverage.volumes().find(|volume| {
+        matches!(
+            volume.phase,
+            VolumePhase::Offline | VolumePhase::Failed { .. }
+        )
+    }) {
         let key = match volume.phase {
-            VolumePhase::Live | VolumePhase::Snapshot => {
-                unreachable!("an incomplete volume is neither live nor a snapshot")
+            VolumePhase::Live
+            | VolumePhase::Snapshot
+            | VolumePhase::Bootstrapping
+            | VolumePhase::Rescanning => {
+                unreachable!("only offline and failed volumes reach this branch")
             }
-            VolumePhase::Bootstrapping | VolumePhase::Rescanning => "status.volume_indexing",
             VolumePhase::Offline => "status.volume_offline",
             VolumePhase::Failed { .. } => "status.volume_failed",
         };
@@ -721,6 +744,7 @@ pub(crate) fn index_status(model: &Model) -> String {
     }
     coverage
         .sizes_or_dates_unknown()
+        .filter(|volume| volume.phase.is_complete())
         .map(|volume| strings.format("status.metadata", &[volume.mounted().display_prefix()]))
         .or_else(|| {
             model
@@ -740,7 +764,10 @@ fn panel_index_status(model: &Model) -> Option<String> {
         let root = panels.panel(panels.active()).root();
         return Some(strings.format("panel.not_indexed", &[&root]));
     };
-    (!volume.phase.is_complete() || volume.metadata_pending)
+    (matches!(
+        volume.phase,
+        VolumePhase::Offline | VolumePhase::Failed { .. }
+    ) || (volume.phase.is_complete() && volume.metadata_pending))
         .then(|| strings.format("panel.indexing", &[volume.mounted().display_prefix()]))
 }
 

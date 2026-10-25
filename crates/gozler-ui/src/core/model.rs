@@ -536,7 +536,11 @@ impl Model {
             let changed = self
                 .list(list)
                 .is_some_and(|shown| shown.selection.files().is_some());
-            let filtered = self.refilter_selection(list);
+            let filtered = if self.refilter_selection(list) {
+                self.inline_filter(list)
+            } else {
+                None
+            };
             let deselect = match filtered {
                 Some(accepted) => accepted
                     .effects
@@ -1893,31 +1897,33 @@ impl Model {
         }
     }
 
-    fn refilter_selection(&mut self, list: List) -> Option<Accepted> {
-        let shown = self.list(list)?;
+    fn refilter_selection(&mut self, list: List) -> bool {
+        let Some(shown) = self.list(list) else {
+            return false;
+        };
         let source = match &shown.selection {
             Selection::Files(_) if !shown.is_keeping() && self.panels.taken().is_empty() => {
-                return None;
+                return false;
             }
             Selection::Files(files) => SelectionSource::Files(Arc::clone(files)),
             Selection::Folder { folder, .. }
                 if !shown.is_keeping() && !shown.takes(self.panels.taken(), folder) =>
             {
-                return None;
+                return false;
             }
             Selection::Folder { folder, .. } => SelectionSource::Files(Arc::from([folder.clone()])),
             Selection::Filtering { source, .. } => source.clone(),
-            _ => return None,
+            _ => return false,
         };
         let generation = self.generation();
-        let shown = self.list_mut(list)?;
+        let shown = self.list_mut(list).expect("the selection's list exists");
         shown.set_selection(Selection::Filtering {
             generation,
             source,
             running: false,
         });
         shown.chosen_bytes = None;
-        self.inline_filter(list)
+        true
     }
 
     fn adopt_selection(
@@ -3336,14 +3342,35 @@ pub(crate) mod tests {
         );
         assert_eq!(
             captions::StatusCaptions::new(&model, &English).indexing,
-            ["Indexing C:\\ · 62%", "Indexing D:\\ · 4,300 entries found"]
+            [
+                captions::IndexingCaption {
+                    label: "Indexing C:".into(),
+                    compact: "Indexing".into(),
+                    value: "62%".into(),
+                    progress: captions::JobProgress::Measured {
+                        done: 62,
+                        total: 100
+                    },
+                },
+                captions::IndexingCaption {
+                    label: "· D:".into(),
+                    compact: "Indexing".into(),
+                    value: "4,300 entries".into(),
+                    progress: captions::JobProgress::Unmeasured,
+                },
+            ]
         );
         let status = model.status.as_mut().expect("the reply supplied status");
         status.volumes[0].progress = Some(IndexProgress::Preparing { entries: 15000 });
         status.volumes[1].phase = VolumePhase::Live;
         assert_eq!(
             captions::StatusCaptions::new(&model, &English).indexing,
-            ["Preparing C:\\ index"]
+            [captions::IndexingCaption {
+                label: "Indexing C:".into(),
+                compact: "Indexing".into(),
+                value: "15,000 entries".into(),
+                progress: captions::JobProgress::Unmeasured,
+            }]
         );
         model.failure = Some(DaemonFailure::Refused {
             detail: "refused".into(),
@@ -3835,7 +3862,7 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn t5_a_volume_that_starts_indexing_changes_part_4_and_keeps_the_rows() {
+    fn t5_a_volume_that_starts_indexing_shows_progress_and_keeps_the_rows() {
         let mut model = showing(10);
         let ask = model.status_needed().expect("no status request runs");
         model.accept(status(&ask, VolumePhase::Live));
@@ -3865,12 +3892,36 @@ pub(crate) mod tests {
             }
         );
         assert_eq!(model.search.list.results.count(), 10);
-        // S13.
+        assert_eq!(captions::index_status(&model), "");
         assert_eq!(
-            captions::index_status(&model),
-            r"C:\ is being indexed. Results might be incomplete."
+            captions::StatusCaptions::new(&model, &English)
+                .indexing
+                .len(),
+            1
         );
         assert!(model.polls_status(false));
+    }
+
+    #[test]
+    fn status_totals_keep_known_file_bytes_without_folder_bytes_or_unknown_counts() {
+        let mut model = model();
+        let fetch = search(&mut model, "report");
+        let mut reply = rows(&fetch, 5);
+        if let Outcome::Rows(chunk) = &mut reply.outcome {
+            chunk.sums = Some(gozler_core::query::MatchSums {
+                files: 3,
+                file_bytes: 1024,
+                files_without_size: 2,
+                folders: 2,
+                folder_bytes: 8192,
+                folder_bytes_at_least: true,
+            });
+        }
+        model.accept(reply);
+        let status = captions::StatusCaptions::new(&model, &English);
+        let texts: Vec<_> = status.right.iter().map(|part| part.text.as_str()).collect();
+        assert_eq!(texts, ["3 files (1 KB)", "2 folders"]);
+        assert_eq!(status.right[0].connector.as_deref(), Some("and"));
     }
 
     /// The model keeps the latest status while the service does not
@@ -4219,6 +4270,49 @@ pub(crate) mod tests {
         let selected = paths(&model);
         assert_eq!(selected.len(), 2_000);
         assert!(!selected.contains(&r"C:\row1"));
+    }
+
+    #[test]
+    fn operation_receipts_leave_folder_filters_dispatchable() {
+        let mut model = model();
+        let fetch = search(&mut model, "report");
+        let mut reply = rows(&fetch, 3);
+        let Outcome::Rows(chunk) = &mut reply.outcome else {
+            panic!("the rows fixture returns rows")
+        };
+        Arc::make_mut(&mut chunk.rows)[0].is_dir = true;
+        model.accept(reply);
+        let counted = folder_size(model.set_selection(List::Search, vec![0..1].into()));
+        model.accept(totals(&counted, 7));
+        let id = OperationId::for_tests(1);
+        let mut taken = Taken::default();
+        taken.insert(id, Path::new(r"D:\unrelated"), false);
+        let taken = Arc::new(taken);
+        model.observe_operations(
+            Arc::from([Operation {
+                id,
+                request: Arc::new(Request::Delete {
+                    sources: vec![r"D:\unrelated".into()],
+                }),
+                folder: gozler_fileops::SourcesFolder::Pending,
+                state: State::Preparing,
+            }]),
+            Arc::clone(&taken),
+            Instant::now(),
+        );
+        model.set_taken(taken, [None; 2]);
+        let pending = model.take_following().expect("the receipt needs following");
+        model.accept_followed(pending.run(&English));
+        assert_eq!(model.search_list().selection().asked(), None);
+        let filter = model
+            .take_selection_filter(List::Search)
+            .expect("receipt filtering remains available to the normal dispatcher");
+        let accepted = model.accept_filtered(List::Search, filter.run());
+        let fetched = folder_size(accepted);
+        let Ask::FolderSize(search) = fetched.ask else {
+            panic!("folder_size returns a folder query")
+        };
+        assert_eq!(search.scope.as_deref(), Some(r"C:\row0"));
     }
 
     #[test]

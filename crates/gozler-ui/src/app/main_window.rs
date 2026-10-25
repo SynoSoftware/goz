@@ -108,6 +108,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::time::{Instant, SystemTime};
 use windows::Win32::Foundation::LRESULT;
+use windows::Win32::UI::WindowsAndMessaging::BROADCAST_QUERY_DENY;
 
 mod drops;
 mod filters;
@@ -404,6 +405,7 @@ pub(crate) struct MainWindow {
     /// [`List::ALL`] ([`MainWindow::selected_rows`]).
     told: [RefCell<selection::NativeSelection>; 3],
     selection_timer: Cell<bool>,
+    operation_timer: Cell<bool>,
     ending: Cell<Ending>,
     /// The tooltip of each toolbar button, by its ID, which a toolbar asks
     /// for when the pointer rests on the button.
@@ -566,6 +568,7 @@ impl MainWindow {
             pending_effects: RefCell::new(VecDeque::new()),
             told: Default::default(),
             selection_timer: Cell::new(false),
+            operation_timer: Cell::new(false),
             ending: Cell::new(Ending::Running),
             tool_tips: RefCell::new(Vec::new()),
             splitter_drag: Cell::new(None),
@@ -883,7 +886,7 @@ impl MainWindow {
             status
                 .indexing
                 .iter()
-                .map(|text| (StatusSlot::Center, StatusEntry::Text(text))),
+                .map(|caption| (StatusSlot::Center, StatusEntry::Indexing(caption))),
         );
         if let Some(transfer) = &job.transfer {
             entries.push((StatusSlot::Center, StatusEntry::Transfer(transfer)));
@@ -3121,6 +3124,12 @@ impl MainWindow {
         Some(id)
     }
 
+    fn schedule_operations(&self, hwnd: Hwnd) {
+        if self.shutdown.borrow().is_none() && !self.operation_timer.replace(true) {
+            hwnd.set_timer(Timer::OperationDelivery.id(), 1);
+        }
+    }
+
     /// Reads the queue after it changed, and runs what the model decides:
     /// the queue's steps first, then the lists', the dialogs, which wait
     /// for [`Message::Deferred`], the transfer pane's, and the
@@ -3208,8 +3217,8 @@ impl MainWindow {
         self.run_queue_steps(released);
         self.retire_model();
         self.start_list_passes();
-        if self.model.borrow().has_operation_release() {
-            hwnd.post(QUEUE_CHANGED);
+        if self.model.borrow().can_release_operations() {
+            self.schedule_operations(hwnd);
         }
     }
 
@@ -3237,7 +3246,7 @@ impl MainWindow {
                 );
             }
         }
-        self.continue_operation_steps(hwnd);
+        self.schedule_operations(hwnd);
     }
 
     fn continue_operation_steps(&self, hwnd: Hwnd) {
@@ -3297,7 +3306,7 @@ impl MainWindow {
             hwnd.post(DEFERRED);
         }
         if finished || self.operation_delivery.borrow().is_some() {
-            hwnd.post(QUEUE_CHANGED);
+            self.schedule_operations(hwnd);
         }
     }
 
@@ -3328,6 +3337,9 @@ impl MainWindow {
         let steps = self.model.borrow_mut().release_operations();
         self.run_queue_steps(steps);
         self.start_list_passes();
+        if self.model.borrow().can_release_operations() {
+            self.schedule_operations(self.controls().search.list.hwnd().parent());
+        }
     }
 
     fn start_list_passes(&self) {
@@ -4166,6 +4178,13 @@ impl MainWindow {
             }
             Timer::Work => self.poll_work(hwnd),
             Timer::NativeSelection => self.continue_native_selections(hwnd),
+            Timer::OperationDelivery => {
+                hwnd.kill_timer(timer.id());
+                self.operation_timer.set(false);
+                if self.shutdown.borrow().is_none() && self.update_live() {
+                    self.on_operations(hwnd);
+                }
+            }
             Timer::OperationsPoll => self.poll_operations(hwnd),
         }
     }
@@ -4468,15 +4487,19 @@ impl WindowProc for MainWindow {
                 .controls()
                 .panels
                 .path_box_colors(self, colors, control),
-            // TRUE lets Windows remove the drive.
             Message::DeviceRemoval {
                 removal,
                 notification,
             } => {
-                self.controls()
-                    .panels
-                    .on_device_removal(self, hwnd, removal, notification);
-                Some(LRESULT(1))
+                let allowed =
+                    self.controls()
+                        .panels
+                        .on_device_removal(self, hwnd, removal, notification);
+                Some(LRESULT(if allowed {
+                    1
+                } else {
+                    BROADCAST_QUERY_DENY as isize
+                }))
             }
             Message::InitMenuPopup => {
                 self.update_menu(hwnd);
@@ -4601,6 +4624,8 @@ impl WindowProc for MainWindow {
                 );
                 self.created().work.borrow_mut().retire(retired);
                 self.retire_native_selections(hwnd);
+                hwnd.kill_timer(Timer::OperationDelivery.id());
+                self.operation_timer.set(false);
                 self.drag_leave();
                 self.created().waker.close();
                 self.drop_target.replace(None);
@@ -4681,7 +4706,7 @@ impl WindowProc for MainWindow {
                 Some(LRESULT(0))
             }
             Message::Other(QUEUE_CHANGED) => {
-                self.on_operations(hwnd);
+                self.schedule_operations(hwnd);
                 Some(LRESULT(0))
             }
             Message::Other(msg) if msg == self.taskbar_button_created => {

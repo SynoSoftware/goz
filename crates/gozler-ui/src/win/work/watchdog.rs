@@ -1,7 +1,7 @@
 use super::OffThread;
 use crate::core::work::watchdog::{HEARTBEAT, LOG_BYTES, Watchdog, retain_log};
 use crate::win::watchdog::Delivery;
-use std::fs::{File, OpenOptions};
+use std::fs::OpenOptions;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::PathBuf;
 use std::sync::mpsc::{Receiver, RecvTimeoutError, SyncSender, sync_channel};
@@ -68,7 +68,7 @@ fn run(delivery: Delivery, path: PathBuf, stopped: Receiver<()>, worker: &OffThr
     let thread = UiThread::open(delivery.thread_id, worker);
     let origin = Instant::now();
     let mut watchdog = Watchdog::default();
-    let mut log = Log { path, bytes: None };
+    let log = Log { path };
     loop {
         if !matches!(
             stopped.try_recv(),
@@ -125,37 +125,72 @@ fn any_visible(thread_id: u32, _worker: &OffThread) -> bool {
 
 struct Log {
     path: PathBuf,
-    bytes: Option<Vec<u8>>,
 }
 
 impl Log {
-    fn append(&mut self, line: &[u8], _worker: &OffThread) -> std::io::Result<()> {
-        if self.bytes.is_none() {
-            let mut bytes = Vec::with_capacity(LOG_BYTES);
-            match File::open(&self.path) {
-                Ok(mut file) => {
-                    let length = file.seek(SeekFrom::End(0))?;
-                    file.seek(SeekFrom::Start(length.saturating_sub(LOG_BYTES as u64)))?;
-                    file.take(LOG_BYTES as u64).read_to_end(&mut bytes)?;
-                }
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-                Err(error) => return Err(error),
-            }
-            self.bytes = Some(bytes);
-        }
-        let bytes = self
-            .bytes
-            .as_mut()
-            .expect("the first append initializes retained bytes");
-        retain_log(bytes, line);
+    fn append(&self, line: &[u8], _worker: &OffThread) -> std::io::Result<()> {
         if let Some(parent) = self.path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        OpenOptions::new()
+        let mut file = OpenOptions::new()
             .create(true)
+            .read(true)
             .write(true)
-            .truncate(true)
-            .open(&self.path)?
-            .write_all(bytes)
+            .truncate(false)
+            .open(&self.path)?;
+        // All processes reread the current tail under one lock; closing this
+        // handle releases it on both successful and failed updates.
+        file.lock()?;
+        let length = file.seek(SeekFrom::End(0))?;
+        file.seek(SeekFrom::Start(length.saturating_sub(LOG_BYTES as u64)))?;
+        let mut bytes = Vec::with_capacity(LOG_BYTES);
+        Read::by_ref(&mut file)
+            .take(LOG_BYTES as u64)
+            .read_to_end(&mut bytes)?;
+        retain_log(&mut bytes, line);
+        file.rewind()?;
+        file.write_all(&bytes)?;
+        file.set_len(bytes.len() as u64)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::os::windows::fs::OpenOptionsExt;
+    use windows::Win32::Storage::FileSystem::FILE_SHARE_READ;
+
+    #[test]
+    fn independent_watchdogs_preserve_interleaved_diagnostics() {
+        let bytes = super::super::spawn(|worker| {
+            let path = std::env::temp_dir()
+                .join(format!("gozler-watchdog-log-{}.txt", std::process::id()));
+            std::fs::write(&path, vec![b'x'; LOG_BYTES + 7]).unwrap();
+            let first = Log { path: path.clone() };
+            let second = Log { path: path.clone() };
+            first.append(b"window A first\n", worker).unwrap();
+            second.append(b"window B\n", worker).unwrap();
+            let reader = OpenOptions::new()
+                .read(true)
+                .share_mode(FILE_SHARE_READ.0)
+                .open(&path)
+                .unwrap();
+            assert!(first.append(b"failed append\n", worker).is_err());
+            drop(reader);
+            first.append(b"window A last\n", worker).unwrap();
+            let bytes = std::fs::read(&path).unwrap();
+            std::fs::remove_file(path).unwrap();
+            bytes
+        })
+        .join()
+        .unwrap();
+        let lines = b"window A first\nwindow B\nwindow A last\n";
+        assert_eq!(bytes.len(), 65_536);
+        assert!(bytes.ends_with(lines));
+        assert!(
+            bytes[..bytes.len() - lines.len()]
+                .iter()
+                .all(|&byte| byte == b'x')
+        );
     }
 }

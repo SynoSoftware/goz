@@ -44,13 +44,43 @@ runtime verification.
 
 ### Execution status
 
-**Plan incomplete.** All five source findings from the 2026-10-24 independent
-review are corrected, independently reviewed and verified by Full55. Stages 4
-and 8 still have not passed their recorded-frame proof. Stage 9's permanent
-documentation is implemented; deletion awaits that proof. The current working
-tree's 311 source/build inputs match the Full55 manifest.
+**Plan incomplete.** The first five review findings are corrected and verified
+by Full55; the subsequent coverage report's six source findings are corrected
+and verified by Full56. Stages 4 and 8 have not passed recorded-frame proof.
+Stage 9's permanent documentation is implemented; deletion awaits that proof.
 
 #### Remaining work and current decision
+
+**Coverage-report correction batch completed on 2026-10-24.** Corrected lost
+selection effects at operation receipts, stale sizes after empty answers,
+premature safe-eject consent, posted queue continuations, hidden indexing state
+at narrow widths and cross-process watchdog log overwrites.
+Report: `V:/temp/gozler-review-coverage-20261024-2245/report.md`. Its build errors
+were already superseded by Full55; Full56 verifies these six corrections.
+
+The lead owns receipt effects and MainWindow queue delivery/release contracts,
+shared wiring, documentation and the sole build. Independent retained owners
+handled row sizes, Pane tile delivery, status layout, device-handle release and
+watchdog logging in separate files. One affected-contract review and its final
+measurement/state delta are clean:
+`V:/temp/gozler-coverage-six-fixes-review1.md`. One full run passed formatting,
+clippy, workspace tests and private docs; UI **293 passed, 14 ignored**. No
+focused, benchmark or timing run, new broad review, install, hardware prompt or
+painting capture was needed.
+
+Five lasting regressions watch a receipt's otherwise lost folder-size query,
+empty answers retaining stale sizes and sort order, queued release being
+mistaken for handle closure, indexing disappearing beside a cancellable job at
+the actual measured minimum, and independent watchdogs overwriting log lines.
+There are no new display-wording or native-message-loop imitation tests.
+
+Safe-eject ruling for this batch: device-query consent is synchronous. Request
+release without waiting on UI; deny until actual handle closure is acknowledged.
+Our own veto must not reopen handles on QueryRemoveFailed and perpetually veto
+every retry. After consent, another application's veto still permits recovery.
+The Viewer distinguishes preparation from actual removal. Real hardware and
+provider behavior remain on the After install list; no physical eject success
+is claimed by the native-file lifecycle regression.
 
 **Correction batch completed on 2026-10-24.** The lead kept native selection
 and timer routing together; retained implementers corrected independent
@@ -123,13 +153,13 @@ and saved evidence: `docs/research/native-window-buffering.md`.
 
 #### Verified retained baseline
 
-- Full55 is green: formatting, clippy, workspace tests and docs; UI
-  **288 passed, 14 ignored**. The five-fix batch used two full runs;
-  cumulative full attempts: 55.
-  `V:/temp/gozler-window-integrated-build55.log`.
+- Full56 is green: formatting, clippy, workspace tests and docs; UI
+  **293 passed, 14 ignored**. The six-fix batch used one full run;
+  cumulative full attempts: 56.
+  `V:/temp/gozler-window-integrated-build56.log`.
   All 311 recorded source/build inputs match:
-  `V:/temp/gozler-window-full55-inputs.json`.
-  The corrected totals assertion's focused recheck is
+  `V:/temp/gozler-window-full56-inputs.json`.
+  The earlier corrected totals assertion's focused recheck is
   `V:/temp/gozler-window-five-fixes-totals-test.log`.
 - The six final specialist reviews are
   `V:/temp/gozler-window-final-{spec,paths,flow,architecture,conventions,elegance}-review1.md`.

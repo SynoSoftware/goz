@@ -791,7 +791,7 @@ pub(crate) enum Shown {
         opened: bool,
         reason: String,
     },
-    /// Windows asked to remove the drive that holds the file.
+    Removing,
     Removed,
 }
 
@@ -825,6 +825,7 @@ impl Shown {
                 };
                 (strings.format(key, &[name, reason.as_str()]), true)
             }
+            Shown::Removing => (strings.text("viewer.removing").to_owned(), true),
             Shown::Removed => (strings.text("viewer.removed").to_owned(), true),
         })
     }

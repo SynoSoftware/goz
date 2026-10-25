@@ -13,6 +13,7 @@ use gozler_winfs::{
     watch_folder,
 };
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 use std::time::Duration;
 use windows::Win32::Foundation::{
     ERROR_INVALID_FUNCTION, ERROR_INVALID_PARAMETER, ERROR_NOT_SUPPORTED,
@@ -49,7 +50,11 @@ const FILE_ATTRIBUTE_DIRECTORY: u32 = 0x10;
 
 pub(crate) fn read(reading: Reading, _worker: &OffThread, cancel: &CancelToken) -> Registration {
     let registration = Registration(Arc::clone(&reading.notification));
+    let closed = Arc::clone(&reading.closed);
+    closed.store(false, Ordering::Release);
     read_and_watch(reading, cancel);
+    // All listing/watch handles have dropped before removal can be granted.
+    closed.store(true, Ordering::Release);
     registration
 }
 
@@ -59,6 +64,7 @@ fn read_and_watch(reading: Reading, cancel: &CancelToken) {
         ask,
         stop,
         notification,
+        closed: _,
         delivery,
         registering,
         waker,
