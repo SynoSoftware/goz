@@ -4975,10 +4975,7 @@ pub(crate) mod tests {
         );
         model.accept(status(&ask, VolumePhase::Live));
         assert!(!model.polls_status(false));
-        assert_eq!(
-            captions::StatusCaptions::new(&model, &English).job.text,
-            english().text("fixing.done")
-        );
+        assert_eq!(captions::StatusCaptions::new(&model, &English).job.text, "");
     }
 
     /// S6, and C6's search as you type: with them off, the empty search and

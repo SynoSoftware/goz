@@ -619,7 +619,7 @@ fn setup_step(strings: &Strings, numbers: &dyn Numbers, step: &SetupStep) -> (St
 fn command_result(strings: &Strings, fix: CommandFix, result: &CommandResult) -> String {
     let text = |key: &'static str| strings.text(key).to_owned();
     match result {
-        CommandResult::Done => text("fixing.done"),
+        CommandResult::Done => String::new(),
         CommandResult::Cancelled => text("fixing.cancelled"),
         CommandResult::Refused => text("fixing.refused"),
         CommandResult::Failed(why) => strings.format("fixing.failed", &[why]),
