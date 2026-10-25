@@ -254,6 +254,19 @@ finish the agreed change and review its retained implementation before
 compiling. Replace or delete temporary paths before reviewing them. Reuse
 valid review and verification evidence.
 
+**Keep diagnosis proportional.** Trace the failing behavior and choose the
+smallest credible check. Reuse existing tests and fixtures before building
+new infrastructure. Once the cause is established, implement the correction;
+reopen the investigation only when new evidence contradicts it.
+
+A regression test watches the reported failure and relevant boundaries, not
+adjacent features. If a new probe or fixture fails before reaching the behavior
+under investigation, correct its setup once. If it still cannot reach that
+behavior, change to a simpler way of checking it instead of extending the
+harness. Preserve the behavior being checked; never weaken assertions to get
+green. Distinguish product defects, mistakes in newly written checks and
+environment restrictions when reporting failures or delays.
+
 **Compile at the end.** During development, use source inspection and existing
 binaries. The only early-compilation exception is a concrete development
 blocker that cannot be resolved that way. Before using it, state the exact
