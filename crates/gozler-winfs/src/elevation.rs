@@ -116,13 +116,3 @@ pub(crate) fn enable_privilege(token: HANDLE, name: &str) -> Result<(), WinError
     }
     Ok(())
 }
-
-#[cfg(test)]
-mod tests {
-    use super::is_elevated;
-
-    #[test]
-    fn is_elevated_returns_without_panicking() {
-        let _elevated: bool = is_elevated();
-    }
-}

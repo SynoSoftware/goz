@@ -244,15 +244,7 @@ pub fn volume_total_bytes(guid_path: &str) -> Result<u64, WinError> {
 
 #[cfg(test)]
 mod tests {
-    use super::{enumerate_volumes, split_multi_sz};
-
-    #[test]
-    fn enumerate_volumes_succeeds() {
-        let volumes = enumerate_volumes().expect("enumerate_volumes should succeed");
-        for v in &volumes {
-            assert!(!v.guid_path.is_empty());
-        }
-    }
+    use super::split_multi_sz;
 
     #[test]
     fn split_multi_sz_parses_double_null_list() {

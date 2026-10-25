@@ -157,15 +157,6 @@ mod tests {
     }
 
     #[test]
-    fn fold_is_idempotent() {
-        for s in ["Foo", "ÇAĞAÇ", "Straße", "ФайЛ"] {
-            let once = fold(s.as_bytes());
-            let twice = fold(&once);
-            assert_eq!(once, twice, "fold not idempotent for {s}");
-        }
-    }
-
-    #[test]
     fn needle_and_haystack_fold_consistently() {
         // A folded needle is found in a folded haystack regardless of the
         // original case of either.

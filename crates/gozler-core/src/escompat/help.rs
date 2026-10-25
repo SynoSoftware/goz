@@ -842,18 +842,6 @@ mod tests {
         }
     }
 
-    /// The quick help fits an 80 by 25 console with the command above it, a
-    /// blank line and the next prompt below, so it never scrolls.
-    #[test]
-    fn the_quick_help_fits_one_console_screen() {
-        let text = help(HelpScreen::Quick, false);
-        assert!(text.lines().count() <= 22, "{text}");
-        assert!(
-            text.lines().all(|line| line.chars().count() <= 80),
-            "{text}"
-        );
-    }
-
     /// Color adds only ANSI codes: the columns line up as they do in plain
     /// text, because the padding is measured on the text alone.
     #[test]

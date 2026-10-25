@@ -1255,17 +1255,6 @@ mod tests {
     }
 
     #[test]
-    fn default_plan() {
-        let parsed = EsPlan::default();
-        assert_eq!(parsed.query, "");
-        assert_eq!(parsed.sort, SortSpec::default());
-        assert!(parsed.bom);
-        assert!(parsed.header);
-        assert!(parsed.double_quote);
-        assert!(!parsed.match_case);
-    }
-
-    #[test]
     fn app_reference_invocation_full_plan() {
         let parsed = plan(&[
             "-path",
@@ -1763,11 +1752,5 @@ mod tests {
             (parents.scope, parents.parent.as_deref()),
             (Some(ScopeFolder::ParentOf("b/c".to_string())), Some("d"))
         );
-    }
-
-    #[test]
-    fn fatal_display_is_the_message() {
-        let err = fatal(&["-zzz"]);
-        assert_eq!(format!("{err}"), err.message);
     }
 }

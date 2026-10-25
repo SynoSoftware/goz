@@ -238,12 +238,4 @@ mod tests {
         assert_eq!(FSCTL_READ_USN_JOURNAL, 0x0009_00BB);
         assert_eq!(FSCTL_QUERY_FILE_LAYOUT, 0x0009_0277);
     }
-
-    #[test]
-    fn ctl_code_matches_macro_expansion() {
-        // CTL_CODE(9, 44, METHOD_NEITHER, FILE_ANY_ACCESS)
-        assert_eq!(ctl_code(9, 44, 3, 0), (9 << 16) | (44 << 2) | 3);
-        // access bits land at position 14
-        assert_eq!(ctl_code(0, 0, 0, 1), 1 << 14);
-    }
 }

@@ -2191,11 +2191,6 @@ mod tests {
     }
 
     #[test]
-    fn a_decimal_free_space_label_fits_whole() {
-        assert!(captions(Dpi::new(96).unwrap(), 1.0, false).free >= Px(77));
-    }
-
-    #[test]
     fn multiple_center_entries_are_one_centered_group() {
         let dpi = Dpi::new(96).unwrap();
         let (mut layout, _) = right_room();

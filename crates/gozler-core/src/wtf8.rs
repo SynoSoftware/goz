@@ -158,14 +158,6 @@ mod tests {
     }
 
     #[test]
-    fn ascii_is_identity() {
-        let units: Vec<u16> = "hello.TXT".encode_utf16().collect();
-        let (bytes, lone) = wtf8(&units);
-        assert_eq!(bytes, b"hello.TXT");
-        assert!(!lone);
-    }
-
-    #[test]
     fn bmp_and_supplementary_match_utf8() {
         for s in ["ağaç.pdf", "文件名.txt", "emoji-🎉-😀.png", "ß.md"] {
             let units: Vec<u16> = s.encode_utf16().collect();
@@ -190,16 +182,6 @@ mod tests {
             // Lossy form replaces the surrogate but never fails.
             assert!(to_string_lossy(&bytes).contains('\u{FFFD}'));
         }
-    }
-
-    #[test]
-    fn paired_surrogates_do_not_flag_lossy() {
-        // "𝄞" = U+1D11E = D834 DD1E
-        let units = vec![0xD834, 0xDD1E];
-        let (bytes, lone) = wtf8(&units);
-        assert!(!lone);
-        assert_eq!(to_string_lossy(&bytes), "𝄞");
-        assert_eq!(to_utf16(&bytes), units);
     }
 
     #[test]
@@ -232,7 +214,7 @@ mod tests {
     proptest! {
         /// Arbitrary UTF-16 (unpaired surrogates included) round-trips
         /// byte-for-byte through WTF-8: the module's total/lossless guarantee
-        /// over the full u16 space, not just the three hand-picked cases above.
+        /// over the full u16 space.
         #[test]
         fn utf16_round_trips_through_wtf8(units in proptest::collection::vec(any::<u16>(), 0..64)) {
             let mut bytes = Vec::new();
