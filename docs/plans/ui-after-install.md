@@ -105,11 +105,17 @@ owner has run it, and file an issue for each item that fails.
 ## The shortcut and the tray
 
 - With `Win+S` set, Windows Search does not open, Start stays closed and
-  Gozler comes forward, with no restart or sign-out. After choosing another
-  shortcut, and after Exit, `Win+S` opens Windows Search again at once. With a
-  program that runs as administrator in front, `Win+S` opens Windows Search. If
-  Windows needs a restart or a sign-out for the shortcut, the Keyboard page
-  needs a message that says so.
+  Gozler comes forward. The Keyboard page names Windows Search and warns that
+  related combinations can be disabled and that Windows may need a sign-out.
+  Explorer's `DisabledHotkeys` value gains `S` without losing other keys.
+  Choose `Win+E`: `S` is restored before `E` is added, and the page names File
+  Explorer. Clear the shortcut or uninstall: the prior value and its type are
+  restored, including its absence; a key disabled before Gozler stays disabled.
+  If another program changes the value meanwhile, its other keys survive.
+  After terminating Gozler without normal exit, its next start recovers the
+  saved registry change. Check Explorer's behavior after sign-out as well:
+  the registry setting may outlast the live hook until then. Keys outside
+  letters and digits keep the hook alone, and the page says so.
 - The tray icon: a click and `Enter` show the window; its menu holds Show
   window and Exit; it comes back after Explorer restarts; the first hide shows
   the notification once, and later hides show none.

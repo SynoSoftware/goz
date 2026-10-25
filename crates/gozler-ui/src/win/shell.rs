@@ -1,7 +1,6 @@
 //! COM and OLE, the known folders, the save dialog, the folder and program
 //! pickers, the shell's verbs: open, show in File Explorer, Properties and
-//! run as administrator, dragging entries out, and what Settings > General
-//! keeps in the registry.
+//! run as administrator, dragging entries out, and the person's registry settings.
 
 use super::Hwnd;
 use crate::core::selection::wide_path;
@@ -45,6 +44,15 @@ use windows::Win32::UI::Shell::{
 };
 use windows::Win32::UI::WindowsAndMessaging::{SHOW_WINDOW_CMD, SW_HIDE, SW_SHOWNORMAL};
 use windows::core::{HSTRING, IUnknown, Interface, PCWSTR, w};
+
+mod windows_shortcut;
+
+pub(crate) fn set_windows_shortcut_disabled(
+    key: Option<u8>,
+    worker: &super::work::OffThread,
+) -> io::Result<()> {
+    windows_shortcut::set_disabled(key, worker)
+}
 
 /// Starts COM on this thread in the apartment model, which the shell's
 /// dialogs need.

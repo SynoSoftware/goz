@@ -535,6 +535,11 @@
     "show_gozler": "Show Gozler",
     "shortcut": "S&hortcut from any program:",
     "shortcut_hint": "Press the keys together. To remove the shortcut, press Backspace.",
+    "windows_use": "Windows normally uses {0} for {1}.",
+    "windows_unknown": "Windows may already use {0}.",
+    "windows_registry_hint": "This can disable other Win+{0} shortcuts too. Sign out to apply or undo it. Windows may keep some reserved shortcuts.",
+    "windows_hook_hint": "The registry setting doesn't support this key. Gozler replaces it only while running.",
+    "windows_failed": "Couldn't change the Windows shortcut setting. {0}",
     "closed_note": "It works only while the window is open. To use it after that, turn on Keep running in the notification area in General.",
     "running_note": "It also works after you close the window.",
     "commands": "Commands",
@@ -554,6 +559,14 @@
     "shortcut_taken": "Another program uses {0}. Choose another shortcut.",
     "shortcut_failed": "Couldn't use {0}. {1}",
     "two_panels": "Two panels keeps F3 to F9, Alt+F1, Alt+F2, Alt+F7, Ctrl+F, Ctrl+L and Ctrl+R, and Alt with a letter, a digit, a comma or a period. A shortcut on one of these keys works in Search only."
+  },
+  "windows_shortcut": {
+    "desktop": "the desktop",
+    "explorer": "File Explorer",
+    "settings": "Settings",
+    "search": "Windows Search",
+    "run": "Run",
+    "clipboard": "clipboard history"
   },
   "settings_file_operations": {
     "transfers_per_device": "&Transfers per device:",

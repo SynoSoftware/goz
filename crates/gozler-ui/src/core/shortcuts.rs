@@ -353,6 +353,33 @@ impl ShowShortcut {
         self.keystroke
     }
 
+    /// Explorer's registry setting disables a letter or digit across modifiers.
+    pub(crate) fn explorer_key(self) -> Option<u8> {
+        match self.keystroke.key {
+            Key::Letter(key) | Key::Digit(key) if self.windows => Some(key),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn windows_action(self) -> Option<&'static str> {
+        if !self.windows {
+            return None;
+        }
+        let key = self.keystroke;
+        if key.ctrl || key.alt || key.shift {
+            return None;
+        }
+        Some(match key.key {
+            Key::Letter(b'D') => "windows_shortcut.desktop",
+            Key::Letter(b'E') => "windows_shortcut.explorer",
+            Key::Letter(b'I') => "windows_shortcut.settings",
+            Key::Letter(b'Q' | b'S') => "windows_shortcut.search",
+            Key::Letter(b'R') => "windows_shortcut.run",
+            Key::Letter(b'V') => "windows_shortcut.clipboard",
+            _ => return None,
+        })
+    }
+
     /// As the dialog and the messages show it, such as "Win+S".
     pub(crate) fn text(self, strings: &Strings) -> String {
         let keys = self.keystroke.text(strings);
@@ -484,5 +511,23 @@ mod tests {
         assert!(ShowShortcut::pressed(true, key("S")).is_some());
         assert_eq!(ShowShortcut::pressed(true, key("L")), None);
         assert_eq!(ShowShortcut::new(false, key("Ctrl+F")), None);
+    }
+
+    #[test]
+    fn explorer_disables_a_key_family_without_taking_non_windows_shortcuts() {
+        for (name, expected) in [
+            ("Win+S", Some(b'S')),
+            ("Win+Shift+S", Some(b'S')),
+            ("Win+F1", None),
+            ("Ctrl+Alt+S", None),
+        ] {
+            assert_eq!(
+                ShowShortcut::from_name(name)
+                    .expect("each case is a show shortcut")
+                    .explorer_key(),
+                expected,
+                "{name}"
+            );
+        }
     }
 }

@@ -508,6 +508,7 @@ enum ModalStep {
         error: ExportError,
     },
     SettingsNotSaved(std::io::Error),
+    WindowsShortcutFailed(std::io::Error),
     OpenSettings(Id, bool),
     CopyFailed(Id, CopyFailure),
     Opened(ShellPurpose, crate::core::work::Id, Opened),
@@ -2125,6 +2126,13 @@ impl MainWindow {
                     self.error_box(hwnd, &text);
                 }
                 ModalStep::SettingsNotSaved(_) => {}
+                ModalStep::WindowsShortcutFailed(error) => {
+                    let text = self.model.borrow().strings().format(
+                        "settings_keyboard.windows_failed",
+                        &[&win::error_text(&error)],
+                    );
+                    self.error_box(hwnd, &text);
+                }
                 ModalStep::CopyFailed(id, failure) => {
                     if !self.created().work.borrow().clipboard.is_current(id) {
                         continue;
@@ -2341,7 +2349,7 @@ impl MainWindow {
         if !self.update_live() {
             return;
         }
-        self.tray.finish_shortcut_start(hwnd);
+        self.tray.finish_shortcut_start(self, hwnd);
         self.settings.post_settings_reply();
         {
             let mut work = self.created().work.borrow_mut();
@@ -2511,6 +2519,9 @@ impl MainWindow {
         loop {
             let saved = self.created().work.borrow_mut().settings.take_saved();
             let Some(saved) = saved else { break };
+            if let Some(Err(error)) = saved.windows_shortcut {
+                self.defer(hwnd, ModalStep::WindowsShortcutFailed(error));
+            }
             if let Err(error) = saved.result
                 && saved.report_failure
                 && !self.ending_session.get()

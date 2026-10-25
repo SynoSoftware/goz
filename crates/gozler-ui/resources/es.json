@@ -535,6 +535,11 @@
     "show_gozler": "Mostrar Gozler",
     "shortcut": "Método a&breviado desde cualquier programa:",
     "shortcut_hint": "Presiona las teclas a la vez. Para quitar el método abreviado, presiona Retroceso.",
+    "windows_use": "Windows suele usar {0} para {1}.",
+    "windows_unknown": "Es posible que Windows ya use {0}.",
+    "windows_registry_hint": "Esto también puede desactivar otros métodos abreviados con Win+{0}. Cierra sesión para aplicar o deshacer el cambio. Windows puede conservar algunos métodos reservados.",
+    "windows_hook_hint": "El ajuste del Registro no admite esta tecla. Gozler la sustituye solo mientras está en ejecución.",
+    "windows_failed": "No se pudo cambiar la configuración del método abreviado de Windows. {0}",
     "closed_note": "Solo funciona mientras la ventana está abierta. Para usarlo después, activa Mantener en ejecución en el área de notificación en General.",
     "running_note": "También funciona después de cerrar la ventana.",
     "commands": "Comandos",
@@ -554,6 +559,14 @@
     "shortcut_taken": "Otro programa usa {0}. Elige otro método abreviado.",
     "shortcut_failed": "No se pudo usar {0}. {1}",
     "two_panels": "Dos paneles reserva de F3 a F9, Alt+F1, Alt+F2, Alt+F7, Ctrl+F, Ctrl+L, Ctrl+R y Alt con una letra, un dígito, una coma o un punto. Un método abreviado en una de estas teclas solo funciona en Búsqueda."
+  },
+  "windows_shortcut": {
+    "desktop": "el escritorio",
+    "explorer": "el Explorador de archivos",
+    "settings": "Configuración",
+    "search": "la Búsqueda de Windows",
+    "run": "Ejecutar",
+    "clipboard": "el historial del portapapeles"
   },
   "settings_file_operations": {
     "transfers_per_device": "&Transferencias por dispositivo:",

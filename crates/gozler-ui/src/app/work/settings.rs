@@ -1,4 +1,4 @@
-//! Settings writes serialize their merge; accepted labels belong to Settings,
+//! Settings and shortcut writes serialize; accepted labels belong to Settings,
 //! while this group retains only their submitted prefixes and execution state.
 
 use super::{Surface, local_service};
@@ -14,13 +14,15 @@ use std::time::Instant;
 
 struct Save {
     path: PathBuf,
-    changes: Changes,
+    changes: Option<Changes>,
+    windows_shortcut: Option<Option<u8>>,
     report_failure: bool,
 }
 
 pub(in crate::app) struct Saved {
     pub(in crate::app) report_failure: bool,
     pub(in crate::app) result: io::Result<()>,
+    pub(in crate::app) windows_shortcut: Option<io::Result<()>>,
 }
 
 enum Registry {
@@ -52,28 +54,34 @@ impl Work {
             pairing_surface: Surface::Main,
             labels: Task::new(waker.clone(), Replacement::Cancel, read_labels).background(),
             label_prefixes: Vec::new(),
-            registry: Some(Task::new(waker.clone(), Replacement::Finish, registry)),
+            registry: Some(Task::new(waker, Replacement::Finish, registry)),
             registry_write: None,
             retired: Retirement::default(),
         }
     }
 
     pub(in crate::app) fn save(&mut self, path: &Path, changes: Changes, report_failure: bool) {
+        self.submit_save(Save {
+            path: path.to_owned(),
+            changes: Some(changes),
+            windows_shortcut: None,
+            report_failure,
+        });
+    }
+
+    fn submit_save(&mut self, save: Save) {
         self.saving
             .as_mut()
             .expect("saving is open until destruction")
-            .submit(
-                Save {
-                    path: path.to_owned(),
-                    changes,
-                    report_failure,
-                },
-                |old, mut new| {
-                    new.changes = old.changes.combine(new.changes);
-                    new.report_failure |= old.report_failure;
-                    new
-                },
-            );
+            .submit(save, |old, mut new| {
+                new.changes = match (old.changes, new.changes) {
+                    (Some(old), Some(new)) => Some(old.combine(new)),
+                    (old, new) => new.or(old),
+                };
+                new.windows_shortcut = new.windows_shortcut.or(old.windows_shortcut);
+                new.report_failure |= old.report_failure;
+                new
+            });
     }
 
     pub(in crate::app) fn take_saved(&mut self) -> Option<Saved> {
@@ -145,6 +153,15 @@ impl Work {
             self.registry_write = None;
         }
         Some(answer)
+    }
+
+    pub(in crate::app) fn set_windows_shortcut(&mut self, key: Option<u8>, path: &Path) {
+        self.submit_save(Save {
+            path: path.to_owned(),
+            changes: None,
+            windows_shortcut: Some(key),
+            report_failure: false,
+        });
     }
 
     pub(in crate::app) fn labels(&mut self, prefixes: Vec<String>) {
@@ -256,7 +273,9 @@ pub(crate) fn write_settings(path: &Path, changes: Changes, _worker: &OffThread)
 }
 
 fn save(save: Save, worker: &OffThread, _cancel: &CancelToken) -> Saved {
-    let result = write_settings(&save.path, save.changes, worker);
+    let result = save.changes.map_or(Ok(()), |changes| {
+        write_settings(&save.path, changes, worker)
+    });
     if let Err(error) = &result {
         // The UI may close after accepting this reply but before showing its
         // deferred error; preserve the failure without depending on that HWND.
@@ -268,6 +287,9 @@ fn save(save: Save, worker: &OffThread, _cancel: &CancelToken) -> Saved {
     Saved {
         result,
         report_failure: save.report_failure,
+        windows_shortcut: save
+            .windows_shortcut
+            .map(|key| windows_shortcut(key, &save.path.with_file_name("ui-error.log"), worker)),
     }
 }
 
@@ -283,6 +305,17 @@ fn registry(input: Registry, worker: &OffThread, _cancel: &CancelToken) -> Regis
             RegistryAnswer::SignIn(result)
         }
     }
+}
+
+fn windows_shortcut(key: Option<u8>, log: &Path, worker: &OffThread) -> io::Result<()> {
+    let result = crate::win::shell::set_windows_shortcut_disabled(key, worker);
+    if let Err(error) = &result {
+        crate::app::write_log(
+            log,
+            &format!("Windows shortcut setting was not changed: {error}"),
+        );
+    }
+    result
 }
 
 fn check_pairing(

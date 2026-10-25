@@ -535,6 +535,11 @@
     "show_gozler": "Gozler weergeven",
     "shortcut": "Sne&ltoets vanuit elk programma:",
     "shortcut_hint": "Druk de toetsen tegelijk in. Druk op Backspace om de sneltoets te verwijderen.",
+    "windows_use": "Windows gebruikt {0} doorgaans voor {1}.",
+    "windows_unknown": "Windows gebruikt {0} mogelijk al.",
+    "windows_registry_hint": "Dit kan ook andere Win+{0}-sneltoetsen uitschakelen. Meld u af om dit toe te passen of terug te draaien. Sommige Windows-sneltoetsen blijven gereserveerd.",
+    "windows_hook_hint": "De registerinstelling ondersteunt deze toets niet. Gozler vervangt deze alleen zolang het actief is.",
+    "windows_failed": "Kan de Windows-instelling voor de sneltoets niet wijzigen. {0}",
     "closed_note": "Dit werkt alleen zolang het venster open is. Als u het daarna wilt gebruiken, schakelt u Actief houden in het systeemvak in bij Algemeen.",
     "running_note": "Dit werkt ook nadat u het venster hebt gesloten.",
     "commands": "Opdrachten",
@@ -554,6 +559,14 @@
     "shortcut_taken": "Een ander programma gebruikt {0}. Kies een andere sneltoets.",
     "shortcut_failed": "Kan {0} niet gebruiken. {1}",
     "two_panels": "Twee panelen reserveert F3 tot en met F9, Alt+F1, Alt+F2, Alt+F7, Ctrl+F, Ctrl+L, Ctrl+R en Alt met een letter, cijfer, komma of punt. Een sneltoets op een van deze toetsen werkt alleen in Zoeken."
+  },
+  "windows_shortcut": {
+    "desktop": "het bureaublad",
+    "explorer": "Verkenner",
+    "settings": "Instellingen",
+    "search": "Windows Zoeken",
+    "run": "Uitvoeren",
+    "clipboard": "klembordgeschiedenis"
   },
   "settings_file_operations": {
     "transfers_per_device": "&Overdrachten per apparaat:",

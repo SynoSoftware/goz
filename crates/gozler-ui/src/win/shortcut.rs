@@ -41,8 +41,8 @@ use windows::core::PCWSTR;
 /// does not open Start when the Windows key comes up.
 const UNASSIGNED: VIRTUAL_KEY = VIRTUAL_KEY(0xE8);
 
-/// The registered shortcut, unregistered on drop, after which Windows' own
-/// use of its keys works again at once.
+/// The live shortcut, unregistered on drop; the saved choice owns the
+/// separate Explorer setting for Windows-key shortcuts.
 pub(crate) struct Registration(ShowShortcut, Kind);
 
 impl Registration {

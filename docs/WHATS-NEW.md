@@ -1,49 +1,38 @@
 # What's new
 
-## Unreleased, after 0.5.0
+## Gozler 0.5.1 — Faster copying and folder synchronization
 
-### 17% less waiting in our mixed SSD copy test
+Likely the fastest copy algorithm on the planet (educated guess—we haven't tested that ranking): 17% less waiting compared with our previous copy algorithm, inspired by AngelCopy and FastCopy.
 
-Large files can get moving while other workers set up folders and copy
-small files. Starting a folder's known large files earlier reduced median
-elapsed time from **14.32 to 11.84 seconds**, including the final flush:
-**17.3% less time than Gozler's previous scheduling** in this test.
+### Copy and move
 
-The test copied 6,000 small files in 1,000 subfolders, with one 1,600 MiB
-file beside those subfolders. Five runs before and five after the change
-copied within one NVMe SSD on NTFS. Small source files were warmed in cache;
-the large file used unbuffered copying. Results vary with the drive, file
-mix and cache conditions.
+- **Faster mixed-file copying.** Our mixed SSD copy test dropped from 14.32 to 11.84 seconds, including the final flush. We haven’t rerun comparisons with other copiers, but our educated guess is that Gozler may now be the fastest file copier on the planet. [See the benchmark](https://github.com/SynoSoftware/goz/blob/main/docs/BENCHMARKS.md#ssd-early-dispatch-before-and-after).
+- **Transfers take turns on busy disks.** Work on independent disks can run together. Transfers that need the same physical disk wait their turn, even across different drive letters. Waiting work does not hold up unrelated transfers.
+- **Choose how to handle existing files once.** Update changed files, Update newer files, Keep both or Skip existing files. Gozler follows your choice without more conflict questions. The default, Update changed files, also replaces newer destination files.
+- **Put urgent work first.** Drag to reorder the queue, or use Run now. Conflicting transfers pause and return afterward. Transfers you paused yourself stay paused.
+- **Set the number of transfers per device.** Choose one, two or three under Settings > File operations. The default is one.
 
-[Benchmark conditions, ranges and raw samples](BENCHMARKS.md#ssd-early-dispatch-before-and-after).
+### Synchronize folders
 
-### Keep transfers beside your files
+- **Compare before you copy.** File > Synchronize folders previews what will be added, updated or left unchanged. Changes go from Source to Destination. In Two panels, the active folder is the source.
+- **Keep extra files, or choose Mirror.** Destination-only files stay by default. Mirror permanently deletes approved extras after additions and updates succeed and the required checks pass.
+- **Pause, cancel and review progress.** Synchronization uses the same queue and reports as Copy and Move. After an interruption, compare again before continuing.
 
-File operations now opens a pane in the main window. See the queue and
-the selected transfer's progress together, pause or resume work, reorder
-transfers and review any failures. Expand the pane when you need more room,
-then return to browsing.
+### File transfers in the main window
 
-### Choose your copy policy once
+- **Progress, the queue and reports stay together.** The File transfers pane replaces the separate operation window. Open it from View > File transfers or click the operation name in the status bar.
+- **Keep browsing while work runs.** Transfers do not open the pane or take focus. Maximize it when you need more room, then restore it to return to your files.
+- **Review failures when convenient.** A failed file does not stop other possible work. Reports show the affected files and what went wrong.
 
-Choose how to handle existing files before the copy or move starts: update
-changed files, update only newer files, keep both or skip existing files.
-The transfer follows that choice without stopping for more conflict questions.
+### A more responsive window
 
-### Compare folders before synchronizing
+- **Large lists and slow reads do less to interrupt your work.** More selection, folder and report processing runs in the background. Slow reads show what Gozler is waiting for, with Cancel where possible.
+- **Exit without waiting for settings writes.** The interface closes while Gozler finishes saving in the background.
+- **See which drives are still indexing.** Progress appears for each drive, and narrow status bars still indicate when results may be incomplete.
 
-Preview what will be added, updated or left unchanged, then synchronize
-from the source folder to the destination. Keep extra destination files,
-or turn on Mirror to include their permanent deletion in the comparison.
-You review the comparison before anything is synchronized.
+### Before upgrading
 
-### Watch each drive's indexing progress
-
-See which drives are being indexed from the status bar, even when your
-search is limited to another drive. NTFS shows an estimated scanning
-percentage when available; otherwise Gozler shows entries found. A
-Preparing message covers the final step, and the entry clears when the
-drive is ready or fails. Settings shows the same progress.
+The installer upgrades Gozler 0.5.0 in place and updates all three programs together. Keep `gozler.exe`, `gozlerd.exe` and `gozler-ui.exe` from the same release.
 
 ## Earlier releases
 

@@ -49,6 +49,12 @@ const SETTLE_POLL: Duration = Duration::from_millis(50);
 pub(crate) fn run() {
     install_panic_hook();
     let arguments = Arguments::read();
+    if arguments.unregister_shortcut {
+        let result =
+            win::work::spawn(|worker| win::shell::set_windows_shortcut_disabled(None, worker))
+                .join();
+        std::process::exit(if matches!(result, Ok(Ok(()))) { 0 } else { 1 });
+    }
     if let Some(file) = &arguments.save_include {
         // The copy that Settings starts as administrator saves and exits.
         std::process::exit(include::save_as_administrator(file));
@@ -215,7 +221,7 @@ fn reset_and_start_again(
 /// (DESIGN.md: Window lifetime), and `--save-include <file>` and
 /// `--rebuild-index`, which Settings passes to the copy it runs as
 /// administrator (DESIGN.md: The Include page, The Drives and service
-/// page).
+/// page). `--unregister-shortcut` restores Explorer's setting for uninstall.
 struct Arguments {
     /// The folder of `ui.json` and `ui-error.log`; without it, `run` uses
     /// `%LOCALAPPDATA%\Gozler`.
@@ -226,6 +232,7 @@ struct Arguments {
     /// before it starts this copy as administrator.
     save_include: Option<PathBuf>,
     rebuild_index: bool,
+    unregister_shortcut: bool,
 }
 
 impl Arguments {
@@ -236,6 +243,7 @@ impl Arguments {
             location: None,
             save_include: None,
             rebuild_index: false,
+            unregister_shortcut: false,
         };
         let mut args = std::env::args_os().skip(1);
         while let Some(arg) = args.next() {
@@ -243,6 +251,8 @@ impl Arguments {
                 arguments.data_dir = args.next().map(PathBuf::from);
             } else if arg == "--sign-in" {
                 arguments.sign_in = true;
+            } else if arg == "--unregister-shortcut" {
+                arguments.unregister_shortcut = true;
             } else if arg == include::SAVE_ARGUMENT {
                 arguments.save_include = args.next().map(PathBuf::from);
             } else if arg == include::REBUILD_ARGUMENT {

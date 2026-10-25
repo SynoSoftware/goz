@@ -238,6 +238,7 @@ impl SettingsBridge {
             }
             window.tray.shortcut.replace(registration);
             window.tray.failure.replace(None);
+            window.tray.update_windows_shortcut(window);
         }
         // The window draws once after every refresh below.
         hwnd.draw_once_after(|| {

@@ -65,6 +65,7 @@ impl Tray {
     /// at sign-in would come before the person looks.
     pub(super) fn register_saved_shortcut(&self, window: &MainWindow, hwnd: Hwnd) {
         let Some(saved) = window.model.borrow().choices().show_shortcut else {
+            self.update_windows_shortcut(window);
             return;
         };
         match shortcut::register(
@@ -75,15 +76,16 @@ impl Tray {
         ) {
             Ok(registration) => {
                 self.starting_shortcut.replace(Some(registration));
-                self.finish_shortcut_start(hwnd);
+                self.finish_shortcut_start(window, hwnd);
             }
             Err(error) => {
                 self.failure.replace(Some(error));
+                self.update_windows_shortcut(window);
             }
         }
     }
 
-    pub(super) fn finish_shortcut_start(&self, hwnd: Hwnd) {
+    pub(super) fn finish_shortcut_start(&self, window: &MainWindow, hwnd: Hwnd) {
         let Some(mut registration) = self.starting_shortcut.take() else {
             return;
         };
@@ -94,9 +96,11 @@ impl Tray {
             Some(Ok(())) => {
                 registration.activate();
                 self.shortcut.replace(Some(registration));
+                self.update_windows_shortcut(window);
             }
             Some(Err(error)) => {
                 self.failure.replace(Some(error));
+                self.update_windows_shortcut(window);
                 hwnd.post(DEFERRED);
             }
         }
@@ -128,6 +132,18 @@ impl Tray {
     /// Gozler use it.
     pub(in crate::app) fn registered_shortcut(&self) -> Option<ShowShortcut> {
         self.shortcut.borrow().as_ref().map(Registration::shortcut)
+    }
+
+    pub(in crate::app) fn update_windows_shortcut(&self, window: &MainWindow) {
+        let key = self
+            .registered_shortcut()
+            .and_then(ShowShortcut::explorer_key);
+        window
+            .created()
+            .work
+            .borrow_mut()
+            .settings
+            .set_windows_shortcut(key, &window.settings_file);
     }
 
     /// Says why the saved shortcut does not work, once the window shows.

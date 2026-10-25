@@ -1105,6 +1105,36 @@ impl<'a> SettingsDialog<'a> {
         if let Some(clear) = self.control(SettingsPage::Keyboard, ControlId::KeyboardClear) {
             clear.set_enabled(shortcut.is_some());
         }
+        if let Some(hint) = self.control(SettingsPage::Keyboard, ControlId::KeyboardShortcutHint) {
+            let text = if let Some(shortcut) = shortcut.filter(|shortcut| shortcut.windows()) {
+                let keys = shortcut.text(&self.strings);
+                let warning = match shortcut.windows_action() {
+                    Some(action) => self.strings.format(
+                        "settings_keyboard.windows_use",
+                        &[&keys, self.strings.text(action)],
+                    ),
+                    None => self
+                        .strings
+                        .format("settings_keyboard.windows_unknown", &[&keys]),
+                };
+                let detail = match shortcut.explorer_key() {
+                    Some(key) => self.strings.format(
+                        "settings_keyboard.windows_registry_hint",
+                        &[&char::from(key).to_string()],
+                    ),
+                    None => self
+                        .strings
+                        .text("settings_keyboard.windows_hook_hint")
+                        .to_owned(),
+                };
+                format!("{warning} {detail}")
+            } else {
+                self.strings
+                    .text("settings_keyboard.shortcut_hint")
+                    .to_owned()
+            };
+            hint.set_text(&text);
+        }
     }
 
     /// Keeps the shortcut to show Gozler, and shows it.

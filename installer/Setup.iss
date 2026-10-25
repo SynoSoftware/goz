@@ -86,6 +86,7 @@ Name: "{autoprograms}\Gozler"; Filename: "{app}\gozler-ui.exe"
 Filename: "{app}\gozler-ui.exe"; Description: "{cm:LaunchProgram,Gozler}"; Flags: postinstall nowait skipifsilent runasoriginaluser
 
 [UninstallRun]
+Filename: "{app}\gozler-ui.exe"; Parameters: "--unregister-shortcut"; Flags: runhidden waituntilterminated; RunOnceId: "RestoreWindowsShortcut"
 Filename: "{app}\gozlerd.exe"; Parameters: "uninstall"; Flags: runhidden waituntilterminated; RunOnceId: "RemoveService"
 
 [UninstallDelete]
