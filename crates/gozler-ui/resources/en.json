@@ -406,12 +406,12 @@
     "tb": "{0} TB"
   },
   "about": {
-    "title": "About Gozler",
+    "title": "About",
     "version": "Gozler {0}",
     "service": "Service {0}",
     "service_unknown": "Service not connected",
-    "description": "Find files instantly. Copy, move and delete them at full speed.",
-    "copyright": "Copyright © 2026 Synapse N.V. Based on goz by Mustafa Ahci. MIT licence."
+    "description": "Find files instantly. Copy, move and delete them blazingly fast.\n\nFree and open source, for Windows 10 and 11.",
+    "copyright": "© 2026 Synapse N.V. and Mustafa Ahci.\nBased on goz. MIT License."
   },
   "service_report": {
     "title": "Service report",

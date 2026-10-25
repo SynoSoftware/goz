@@ -39,17 +39,17 @@ END
 // About Gozler: the icon, the window's version, the service's version, what
 // Gozler is, the copyright and the repository link. The description and the
 // copyright leave room for longer translations.
-IDD_ABOUT DIALOGEX 0, 0, 240, 111
+IDD_ABOUT DIALOGEX 0, 0, 240, 135
 STYLE DS_SHELLFONT | DS_MODALFRAME | DS_CENTER | WS_POPUP | WS_CAPTION | WS_SYSMENU
 FONT 9, "Segoe UI", 400, 0, 0x1
 BEGIN
     ICON            IDI_GOZLER, IDC_ABOUT_ICON, 7, 7, 21, 20
     LTEXT           "", IDC_ABOUT_VERSION, 36, 7, 197, 8, SS_NOPREFIX
     LTEXT           "", IDC_ABOUT_SERVICE, 36, 15, 197, 8, SS_NOPREFIX
-    LTEXT           "", IDC_ABOUT_DESCRIPTION, 36, 23, 197, 16, SS_NOPREFIX
-    LTEXT           "", IDC_ABOUT_COPYRIGHT, 36, 43, 197, 24, SS_NOPREFIX
-    CONTROL         "", IDC_ABOUT_LINK, "SysLink", WS_TABSTOP, 36, 71, 197, 8
-    DEFPUSHBUTTON   "", IDCANCEL, 183, 90, 50, 14
+    LTEXT           "", IDC_ABOUT_DESCRIPTION, 36, 23, 197, 40, SS_NOPREFIX
+    LTEXT           "", IDC_ABOUT_COPYRIGHT, 36, 67, 197, 24, SS_NOPREFIX
+    CONTROL         "", IDC_ABOUT_LINK, "SysLink", WS_TABSTOP, 36, 95, 197, 8
+    DEFPUSHBUTTON   "", IDCANCEL, 183, 114, 50, 14
 END
 
 // Search syntax: the search terms, the search functions and the attribute

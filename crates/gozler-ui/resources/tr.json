@@ -406,12 +406,12 @@
     "tb": "{0} TB"
   },
   "about": {
-    "title": "Gozler hakkında",
+    "title": "Hakkında",
     "version": "Gozler {0}",
     "service": "Hizmet {0}",
     "service_unknown": "Hizmet bağlı değil",
-    "description": "Dosyaları anında bulun. Tam hızda kopyalayın, taşıyın ve silin.",
-    "copyright": "Telif hakkı © 2026 Synapse N.V. Mustafa Ahci'nin goz uygulamasını temel alır. MIT lisansı."
+    "description": "Dosyaları anında bulun. Yıldırım hızıyla kopyalayın, taşıyın ve silin.\n\nWindows 10 ve 11 için ücretsiz ve açık kaynaklıdır.",
+    "copyright": "© 2026 Synapse N.V. ve Mustafa Ahci.\ngoz temel alınmıştır. MIT lisansı."
   },
   "service_report": {
     "title": "Hizmet raporu",
