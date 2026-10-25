@@ -6,7 +6,7 @@
 //! it.
 
 #![forbid(unsafe_code)]
-#![cfg_attr(not(windows), allow(dead_code))]
+#![cfg_attr(not(windows), allow(dead_code, unused_imports))]
 
 pub(crate) mod captions;
 pub(crate) mod clipboard;
