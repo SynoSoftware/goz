@@ -121,10 +121,11 @@ responsibly resolve yourself.
 - **Count allocations.** The index holds millions of entries, so a byte per
   entry or an allocation per hit is a real cost. Borrow instead of cloning on
   hot paths and size buffers up front. Measure with the criterion benches in
-  `crates/gozler-core/benches` before you claim a speed-up: run
-  `pwsh ./build.ps1 -Bench <name filter>` once before your change and once
-  after, because criterion compares each run against the run before it, which
-  may be another agent's. On Windows the benches count the bench thread's CPU
+  `crates/gozler-core/benches` before you claim a speed-up. Compare matched
+  before/after runs of `pwsh ./build.ps1 -Bench <name filter>`, because
+  criterion's previous run may belong to another agent. Reuse a valid baseline;
+  compiling one during development requires the exception in "Before you
+  finish". On Windows the benches count the bench thread's CPU
   cycles, not wall time, because other work on this machine moves wall-clock
   timings by tens of percent.
 - **Use plain code.** Use `std` and the workspace's existing dependencies. Add
@@ -249,26 +250,30 @@ build compiles every dependency. A change only to Markdown or `ci.yml` needs
 no build. A change to `build.ps1` is verified by running it.
 
 **Owner preference: use judgment, not ceremony.** Code larger coherent batches;
-for a staged plan, normally finish the stage, review the implementation that
-will remain, then build. Replace or delete temporary paths before reviewing
-them. Reuse valid review evidence. A focused check earns an earlier run when
-its answer changes the next edit; a small internal slice is not automatically
-a reason for another review and full build.
+finish the agreed change and review its retained implementation before
+compiling. Replace or delete temporary paths before reviewing them. Reuse
+valid review and verification evidence.
 
-Build when the change is reviewed: you have read the final diff as its next
+**Compile at the end.** During development, use source inspection and existing
+binaries. The only early-compilation exception is a concrete development
+blocker that cannot be resolved that way. Before using it, state the exact
+blocking question, why compilation is necessary, and how its result determines
+the next edit. Run the smallest check that answers it, then return to
+development. Reassurance, small edits, harness refinement and a skill's
+prescribed test loop do not by themselves justify early compilation. This gate
+also covers compiling tests, benchmarks, probes and release packages.
+
+Final verification starts when you have read the final diff as its next
 maintainer, traced each changed behavior from its callers, and named the
-failure each new test watches. Build earlier only when your next edit depends
-on the answer, such as `-Test <name filter>` on a test that reproduces a bug
-before you fix it, or the first of two `-Bench` runs. Build only through
-`build.ps1`; it owns the cargo commands and their priority, and says why
-`RUSTFLAGS` stays unset.
+failure each new test watches. Build only through `build.ps1`; it owns the
+cargo commands and their priority, and says why `RUSTFLAGS` stays unset.
 
-1. Run `pwsh ./build.ps1`. You are done when it is green.
-2. Fix every error that run reported before you run it again. To recheck a
-   test fix, run `pwsh ./build.ps1 -Test <name filter>`, then the full script.
-3. Stop and report instead when the same error returns after your fix, or when
-   the error is in a file that holds changes you did not make, because another
-   session may be editing it.
+1. Run `pwsh ./build.ps1` after implementation and review are complete.
+2. During this final verification, fix all reported errors before rerunning.
+   Repeat compilation as needed until the full script is green. A focused
+   `-Test <name filter>` may verify a correction here before the final full run.
+3. If a failure belongs to another session's work outside the authorized task,
+   report it instead of changing those files without authorization.
 
 `build.ps1` runs the Windows half of CI's test job. CI runs on pushes to
 `main` and on pull requests: it also compiles on Ubuntu, where the
