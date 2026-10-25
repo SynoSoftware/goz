@@ -63,9 +63,9 @@ tests of lasting lookup/refresh or work-lifetime contracts; no new wording or
 control-snapshot tests. Reuse Full56 and the clean six-fix recheck where source
 is unchanged. No installation or physical-device check is needed for this round.
 
-Load-bearing source checks: New folder currently scans accepted rows from its
-modal validation callback; unrelated Settings replies rebuild every Include
-row; native creation failures append ui-error.log on UI. Fix each at its
+The prerewrite source checks confirmed New folder scanned accepted rows from
+its modal validation callback, unrelated Settings replies rebuilt every Include
+row, and native creation failures appended ui-error.log on UI. Fix each at its
 existing owner, keeping handles/controls on UI and slow work with Work.
 An independent read-only painting investigation first reconciles the existing
 failed recordings and rejected candidates, with a 20–30 minute discovery bound.
@@ -80,8 +80,29 @@ Root authorized one new attribution check, prepared by painting_cause in
 paint policy, test-owned native subclasses and bounded strip samples joined to
 event indices. No real copy, broad action suite or repeat flag trial. Preparation
 and one focused run add about 20–40 minutes; remove both temporary module hooks
-before final review/build. An inconclusive trace cannot pass painting acceptance
+before final source verification. An inconclusive trace cannot pass painting acceptance
 or justify deleting this plan. Root remains the only builder.
+
+That single check ran through `build.ps1 -Test
+timing_completion_paint_attribution`. Compilation succeeded, but the 6.62-second
+native run reached its image cap and failed as inconclusive: 659 events, 256
+images, 78 dropped images, no dropped events. There was no correction/retry.
+The useful early samples join split pixels to new seven-pixel layout gaps,
+correct child/button geometry and full pending dirty regions before the
+independent child paints. This attributes exposure ordering; it establishes no
+missing invalidation or supported new corrective mechanism. BitBlt/GdiFlush
+perturbs timing, so the observation does not measure normal latency or physical
+scanout. Report and exact evidence: `V:/temp/gozler-completion-paint-cause.md`,
+`V:/temp/gozler-completion-paint-check/run.log` and its
+`run-18616-1792899622162733700/` directory. Both temporary includes are removed,
+the native process ended, and all 311 Full57 source/build hashes match again.
+Retain Full57 verification; no new full build is required for matching bytes.
+
+No further paint flag trial or product edit is currently justified. The open
+decision is whether the owner retains Stage4/8's acquired-frame acceptance in
+this architecture plan or explicitly moves painting acceptance to a separate
+follow-up while closing the architectural implementation. Until that decision,
+the original criterion is binding and this plan is not deleted or completed.
 
 The wait-correction implementation and independent affected-contract review are
 complete: `V:/temp/gozler-completion-waits-review1.md`. Full57 passed formatting,
