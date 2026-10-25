@@ -2097,6 +2097,7 @@ impl Panels {
             || panel.selected.as_ref() != selected.positions.as_ref();
         if changed {
             panel.select_shared(selected);
+            panel.quick.invalidate();
         }
         changed
     }
@@ -2117,17 +2118,13 @@ impl Panels {
         }
     }
 
-    /// Whether the active panel has a selected entry.
-    pub(crate) fn has_selection(&self) -> bool {
-        self.panel(self.active).has_selection()
-    }
-
     /// The list's focused row, as it tells it.
     pub(crate) fn set_focused(&mut self, side: Side, focused: Option<u64>) {
         let panel = self.panel_mut(side);
         if panel.focused != focused {
             panel.focused = focused;
             panel.interaction_revision += 1;
+            panel.quick.invalidate();
             if let Some(old) = panel.awaited_place.take() {
                 let items = old.0.selected.len();
                 panel.retired.push(old, items);
@@ -2256,6 +2253,7 @@ impl Panels {
             origin: Some((Arc::clone(&panel.rows), panel.up_rows())),
         }));
         panel.interaction_revision += 1;
+        panel.quick.invalidate();
         panel.submit(RowChange::Await, &taken);
     }
 
@@ -2272,6 +2270,7 @@ impl Panels {
         panel.gone_focus = None;
         panel.select_shared(selected);
         panel.focused = place.focused;
+        panel.quick.invalidate();
         Some(place)
     }
 
@@ -3035,8 +3034,8 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn late_quick_search_does_not_reopen_after_escape_or_steal_newer_focus() {
-        for escape in [false, true] {
+    fn late_quick_search_does_not_reopen_after_escape_or_steal_newer_interaction() {
+        for (escape, select) in [(false, false), (false, true), (true, false)] {
             let mut panels = showing(
                 r"C:\docs",
                 vec![file("report.pdf", 1, 0), file("tax.pdf", 1, 0)],
@@ -3046,6 +3045,8 @@ pub(crate) mod tests {
             if escape {
                 assert!(panels.close_quick(Side::Left));
                 panels.find_quick(Side::Left, QuickAction::Character('t'));
+            } else if select {
+                panels.set_selected(Side::Left, vec![2..3].into());
             } else {
                 panels.set_focused(Side::Left, Some(2));
             }
@@ -3057,6 +3058,27 @@ pub(crate) mod tests {
                 assert_eq!(panels.panel(Side::Left).quick_text(), Some("t"));
             }
         }
+    }
+
+    #[test]
+    fn a_watch_update_retries_pending_quick_search_instead_of_losing_the_character() {
+        let mut panels = showing(
+            r"C:\docs",
+            vec![file("report.pdf", 1, 0), file("tax.pdf", 1, 0)],
+        );
+        panels.find_quick(Side::Left, QuickAction::Character('r'));
+        let pending = panels.take_quick(Side::Left).unwrap();
+        panels.apply_changes(
+            Side::Left,
+            vec![FolderChange::Added(file("aaa.txt", 1, 0))],
+            None,
+        );
+        assert_eq!(panels.accept_quick(Side::Left, pending.run()), None);
+        let current = panels
+            .take_quick(Side::Left)
+            .expect("a row change retries the pending character");
+        assert_eq!(panels.accept_quick(Side::Left, current.run()), Some(2));
+        assert_eq!(panels.panel(Side::Left).quick_text(), Some("r"));
     }
 
     #[test]

@@ -12,6 +12,7 @@ use std::sync::Arc;
 
 mod capture;
 pub(crate) use capture::{CaptureKey, Capturing, Telling, Told};
+pub(crate) mod changes;
 
 /// Open and Open file location stop here, because File Explorer asks before
 /// it opens more items, and many windows opened by accident are worse

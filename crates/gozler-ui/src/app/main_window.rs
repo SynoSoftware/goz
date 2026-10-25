@@ -403,6 +403,7 @@ pub(crate) struct MainWindow {
     /// The rows each list's notifications told it selects, in the order of
     /// [`List::ALL`] ([`MainWindow::selected_rows`]).
     told: [RefCell<selection::NativeSelection>; 3],
+    selection_timer: Cell<bool>,
     ending: Cell<Ending>,
     /// The tooltip of each toolbar button, by its ID, which a toolbar asks
     /// for when the pointer rests on the button.
@@ -564,6 +565,7 @@ impl MainWindow {
             pending_refresh: Cell::new(Areas::NONE),
             pending_effects: RefCell::new(VecDeque::new()),
             told: Default::default(),
+            selection_timer: Cell::new(false),
             ending: Cell::new(Ending::Running),
             tool_tips: RefCell::new(Vec::new()),
             splitter_drag: Cell::new(None),
@@ -4163,6 +4165,7 @@ impl MainWindow {
                 self.save_settings(true);
             }
             Timer::Work => self.poll_work(hwnd),
+            Timer::NativeSelection => self.continue_native_selections(hwnd),
             Timer::OperationsPoll => self.poll_operations(hwnd),
         }
     }
@@ -4363,10 +4366,6 @@ impl WindowProc for MainWindow {
                 Some(LRESULT(0))
             }
             Message::Deferred => {
-                for side in Side::BOTH {
-                    self.apply_native_place(side);
-                }
-                self.apply_taken_deselections(hwnd);
                 self.controls().search.read_list_selection(self, hwnd);
                 self.controls().panels.read_panel_selection(self);
                 self.resume_selection_actions(hwnd);
@@ -4601,7 +4600,7 @@ impl WindowProc for MainWindow {
                     crate::core::work::INLINE_ITEMS + 1,
                 );
                 self.created().work.borrow_mut().retire(retired);
-                self.retire_native_selections();
+                self.retire_native_selections(hwnd);
                 self.drag_leave();
                 self.created().waker.close();
                 self.drop_target.replace(None);

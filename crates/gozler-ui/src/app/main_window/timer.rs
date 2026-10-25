@@ -16,6 +16,7 @@ pub(super) enum Timer {
     Dates,
     Clipboard,
     Work,
+    NativeSelection,
 }
 
 const IDS: &[(Timer, usize)] = &[
@@ -40,6 +41,7 @@ const IDS: &[(Timer, usize)] = &[
     (Timer::Dates, 21),
     (Timer::Clipboard, 22),
     (Timer::Work, 23),
+    (Timer::NativeSelection, 24),
 ];
 
 impl Timer {

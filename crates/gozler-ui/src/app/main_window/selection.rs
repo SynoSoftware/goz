@@ -2,6 +2,7 @@
 //! candidates consume its indices. The control remains the selection owner.
 
 use super::*;
+use crate::core::selection::changes::{Changes, Write};
 use crate::core::selection::{CaptureKey, Capturing, RowsChange};
 use crate::core::work::INLINE_ITEMS;
 use std::collections::LinkedList;
@@ -28,12 +29,10 @@ struct Unhighlight {
 struct NativeUpdate {
     key: CaptureKey,
     selected: RowSelection,
-    range: usize,
-    row: Option<u64>,
+    shown: Option<Arc<Vec<Range<u64>>>>,
+    changes: Option<Changes>,
     focused: Option<u64>,
     to_focus: bool,
-    initialized: bool,
-    unchanged: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -103,6 +102,48 @@ impl NativeRead {
 }
 
 impl MainWindow {
+    fn schedule_native_selection(&self, hwnd: Hwnd) {
+        if self.shutdown.borrow().is_none() && !self.selection_timer.replace(true) {
+            // Posted continuations outrank input and paint in GetMessage. A
+            // timer gives both a turn before the next bounded native slice.
+            hwnd.set_timer(Timer::NativeSelection.id(), 1);
+        }
+    }
+
+    pub(super) fn continue_native_selections(&self, hwnd: Hwnd) {
+        hwnd.kill_timer(Timer::NativeSelection.id());
+        self.selection_timer.set(false);
+        if !self.update_live() {
+            return;
+        }
+        for side in Side::BOTH {
+            self.apply_native_place(side);
+            if !self.update_live() {
+                return;
+            }
+        }
+        self.apply_taken_deselections(hwnd);
+        for list in List::ALL {
+            if !self.update_live() {
+                return;
+            }
+            if self.native_selection(list).borrow().reading.is_some() {
+                let count = self.list_control(list).count();
+                let key = self.native_key(list);
+                self.read_native_selection(list, count, key);
+            }
+        }
+        if self.update_live() {
+            self.controls().search.read_list_selection(self, hwnd);
+        }
+        if self.update_live() {
+            self.controls().panels.read_panel_selection(self);
+        }
+        if self.update_live() {
+            self.resume_selection_actions(hwnd);
+        }
+    }
+
     pub(super) fn command_context(&self) -> CommandContext {
         let (mode, list) = {
             let model = self.model.borrow();
@@ -317,7 +358,11 @@ impl MainWindow {
     }
 
     pub(super) fn selected_rows(&self, list: List) -> Option<RowSelection> {
-        if self.native_selection(list).borrow().applying {
+        let waiting = {
+            let native = self.native_selection(list).borrow();
+            native.applying || native.reading.is_some()
+        };
+        if waiting {
             return None;
         }
         let control = self.list_control(list);
@@ -432,12 +477,12 @@ impl MainWindow {
             }
         } else if !finished && self.native_key(list) == key {
             self.native_selection(list).borrow_mut().reading = Some(read);
-            control.hwnd().parent().post(DEFERRED);
+            self.schedule_native_selection(control.hwnd().parent());
         } else {
             let mut retired = Retirement::default();
             retired.push(read, INLINE_ITEMS + 1);
             self.created().work.borrow_mut().retire(retired);
-            control.hwnd().parent().post(DEFERRED);
+            self.schedule_native_selection(control.hwnd().parent());
         }
     }
 
@@ -511,7 +556,7 @@ impl MainWindow {
         }
         let control = self.list_control(list);
         control.hwnd().set_enabled(false);
-        control.hwnd().parent().post(DEFERRED);
+        self.schedule_native_selection(control.hwnd().parent());
     }
 
     pub(super) fn apply_taken_deselections(&self, hwnd: Hwnd) {
@@ -581,11 +626,17 @@ impl MainWindow {
                     }
                 }
             }
-            hwnd.post(DEFERRED);
+            if complete {
+                hwnd.post(DEFERRED);
+            } else {
+                self.schedule_native_selection(hwnd);
+            }
         }
     }
 
-    pub(super) fn retire_native_selections(&self) {
+    pub(super) fn retire_native_selections(&self, hwnd: Hwnd) {
+        hwnd.kill_timer(Timer::NativeSelection.id());
+        self.selection_timer.set(false);
         let mut retired = Retirement::default();
         for slot in &self.told {
             retired.push(std::mem::take(&mut *slot.borrow_mut()), INLINE_ITEMS + 1);
@@ -615,6 +666,9 @@ impl MainWindow {
             retired.push(native.reading.take(), INLINE_ITEMS + 1);
             retired.push(native.update.take(), INLINE_ITEMS + 1);
             native.capture.reset();
+            let shown =
+                (!native.applying && native.unhighlight.is_none() && !native.unhighlighting)
+                    .then(|| Arc::clone(&before.selected));
             native.unhighlight = None;
             if keep_action {
                 let key = native.capture.key(count);
@@ -629,12 +683,10 @@ impl MainWindow {
                     positions: Arc::clone(&place.selected),
                     count: selected_count,
                 },
-                range: 0,
-                row: None,
+                shown,
+                changes: None,
                 focused: place.focused,
                 to_focus,
-                initialized: false,
-                unchanged: Arc::ptr_eq(&before.selected, &place.selected),
             });
         }
         self.model
@@ -664,7 +716,7 @@ impl MainWindow {
             native.update.is_some()
         };
         if pending && self.shutdown.borrow().is_none() {
-            self.list_control(list).hwnd().parent().post(DEFERRED);
+            self.schedule_native_selection(self.list_control(list).hwnd().parent());
         }
     }
 
@@ -678,39 +730,27 @@ impl MainWindow {
         let current = || self.native_key(list) == key && self.shutdown.borrow().is_none();
         let control = self.list_control(list);
         let mut remaining = INLINE_ITEMS;
-        if !update.initialized && current() {
-            update.initialized = true;
-            if update.unchanged {
-                update.range = update.selected.positions.len();
-            } else if let [all] = update.selected.positions.as_slice()
-                && all.end == control.count()
-                && all.start < 2
-            {
-                control.select_all();
-                if current() && all.start == 1 {
-                    control.select(0, false);
-                }
-                update.range = update.selected.positions.len();
-                remaining -= 2;
-            } else {
-                control.deselect_all();
-                remaining -= 1;
-            }
+        if update.changes.is_none() {
+            let count = control.count();
+            let selected_count = control.selected_count();
+            update.changes = Some(Changes::new(
+                update.shown.take(),
+                &update.selected,
+                count,
+                selected_count,
+            ));
         }
+        let changes = update.changes.as_mut().expect("the update has a cursor");
         control.hwnd().draw_once_after(|| {
             while remaining > 0 && current() {
-                let Some(range) = update.selected.positions.get(update.range) else {
+                let Some(write) = changes.next(&mut remaining) else {
                     break;
                 };
-                let row = update.row.unwrap_or(range.start);
-                control.select(row, true);
-                if row + 1 == range.end {
-                    update.range += 1;
-                    update.row = None;
-                } else {
-                    update.row = Some(row + 1);
+                match write {
+                    Write::All(true) => control.select_all(),
+                    Write::All(false) => control.deselect_all(),
+                    Write::Row(row, selected) => control.select(row, selected),
                 }
-                remaining -= 1;
             }
         });
         if !current() {
@@ -719,9 +759,8 @@ impl MainWindow {
             self.created().work.borrow_mut().retire(retired);
             return;
         }
-        if update.range < update.selected.positions.len() {
+        if !changes.is_done() {
             self.native_selection(list).borrow_mut().update = Some(update);
-            control.hwnd().parent().post(DEFERRED);
             return;
         }
         if update.to_focus {
@@ -759,6 +798,9 @@ impl MainWindow {
         let select_focus = update.to_focus
             && update.selected.positions.is_empty()
             && focused.is_some_and(|row| self.model.borrow().panels().selectable(side, row));
+        let mut retired = Retirement::default();
+        retired.push(update, INLINE_ITEMS + 1);
+        self.created().work.borrow_mut().retire(retired);
         if select_focus && let Some(row) = focused {
             control.select(row, true);
         }

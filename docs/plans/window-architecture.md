@@ -44,21 +44,58 @@ runtime verification.
 
 ### Execution status
 
-**Plan incomplete.** Stages 1–3 and 5–7 are complete. Stages 4 and 8 have
-reviewed, built source but have not passed their recorded-frame proof.
-Stage 9's permanent documentation is implemented; deletion awaits that proof.
-Retained UI head: `8a7e64c`.
+**Plan incomplete.** All five source findings from the 2026-10-24 independent
+review are corrected, independently reviewed and verified by Full55. Stages 4
+and 8 still have not passed their recorded-frame proof. Stage 9's permanent
+documentation is implemented; deletion awaits that proof. The current working
+tree's 311 source/build inputs match the Full55 manifest.
 
 #### Remaining work and current decision
 
-The open criterion is Stage 4's same-interaction recording, judged frame by
-frame, with no cleared, half-drawn or doubled control. Stage 8 repeats it.
+**Correction batch completed on 2026-10-24.** The lead kept native selection
+and timer routing together; retained implementers corrected independent
+quick-search, command and caption files. One affected-contract review and its
+small cleanup delta are clean:
+`V:/temp/gozler-review-five-fixes-review1.md`. No painting experiment ran.
+
+- Native selection reads, writes and taken-row deselection continue through
+  one low-priority native timer. Pending reads no longer advance on each posted
+  wake. The difference cursor keeps unchanged highlights and budgets skipped
+  range comparisons as well as writes. Unknown native state resets safely;
+  whole-list changes still use native bulk messages. The reported 50,000-row
+  shift now emits exactly two boundary writes in the pure regression; no new
+  native latency measurement is claimed.
+- Quick search retains its own intent revision. Automatic row publication
+  retries a pending character; explicit focus, selection, navigation and Escape
+  still supersede it. Clear selection checks its captured source panel.
+- Independent matching file/folder counts use a conjunction, and indexing
+  counts say entries in all four languages. These corrections preserve the
+  rest of the other session's uncommitted status work. Their source and three
+  adjusted test expectations remain with that dependent feature; the independent
+  selection, quick-search and command fixes are committed separately.
+
+Five lasting regressions watch boundary-only writes, bounded unchanged-range
+traversal, exact selection results, lost quick-search input after a watch update,
+and command-source eligibility. The existing late-answer test now also covers
+explicit selection. Three existing caption expectations were updated for the
+intentional wording corrections; no display test was added.
+
+This used two full runs and one focused recheck, within the 30–60 minute
+estimate. Full54 exposed an orphaned active-panel method, a condition-block
+lint and a stale connector assertion. All were corrected together; the focused
+`-Test status_totals_keep_known_file_bytes_without_folder_bytes_or_unknown_counts`
+passed before Full55. No `-Bench` or `-Timing` run was needed. Original report:
+`V:/temp/gozler-review-561452d-report.md`. Its temporary-hook build failure is
+obsolete; no machine-local hook remains in the product source.
+
+The separate visual criterion is Stage 4's same-interaction recording, judged
+frame by frame, with no cleared, half-drawn or doubled control. Stage 8 repeats it.
 Functional completion, correct native endpoint state and a green build do
 not satisfy this criterion. Do not delete the plan or mark the goal complete.
 
 The owner redirected picture inspection toward layout and usability after
 challenging the broad painting investigation. That batch is complete and
-committed. Broad capture experiments are stopped. The last source-only check
+committed. Broad capture experiments are stopped. The last painting source check
 established no further corrective change: `place_children` already uses
 `SWP_NOCOPYBITS` for every geometry-changing child, including its fallback;
 ordinary placement does not suppress redraw, and structural scopes restore
@@ -86,21 +123,24 @@ and saved evidence: `docs/research/native-window-buffering.md`.
 
 #### Verified retained baseline
 
-- Full53 is green: formatting, clippy, workspace tests and docs; UI
-  **283 passed, 14 ignored**. This usability batch used one full run;
-  cumulative full attempts: 53.
-  `V:/temp/gozler-window-integrated-build53.log`.
-  All 310 recorded source/build inputs stayed unchanged:
-  `V:/temp/gozler-window-full53-inputs.json`.
+- Full55 is green: formatting, clippy, workspace tests and docs; UI
+  **288 passed, 14 ignored**. The five-fix batch used two full runs;
+  cumulative full attempts: 55.
+  `V:/temp/gozler-window-integrated-build55.log`.
+  All 311 recorded source/build inputs match:
+  `V:/temp/gozler-window-full55-inputs.json`.
+  The corrected totals assertion's focused recheck is
+  `V:/temp/gozler-window-five-fixes-totals-test.log`.
 - The six final specialist reviews are
   `V:/temp/gozler-window-final-{spec,paths,flow,architecture,conventions,elegance}-review1.md`.
   The cancellation correction passed all six affected-contract passes:
   `V:/temp/gozler-window-final-cancel-delta-review2.md`.
   Reuse this evidence within its reviewed scope.
 - The numbered completion matrix is
-  `V:/temp/gozler-window-stage-completion-audit.md`. Its non-painting
-  conclusions predate the latest layout batch; that delta has its own clean
-  source review and Full53, rather than a second whole-architecture review.
+  `V:/temp/gozler-window-stage-completion-audit.md`. Its blanket non-painting
+  completion conclusion must be read alongside the later source findings and
+  their verified corrections above. The layout batch has its own source review
+  and Full53.
 - Setter inventory:
   `V:/temp/gozler-window-stage8-remaining-setters.md`.
   Remaining native edit clipboard waiting is tracked in #147; icon work in

@@ -238,7 +238,7 @@ impl CommandId {
                 C::ClearSelection => (
                     "command.clear_selection",
                     &[],
-                    |s| s.model.panels().has_selection(),
+                    |s| matches!(s.list, List::Panel(side) if s.model.panels().panel(side).has_selection()),
                     None,
                 ),
                 C::View => (
@@ -2042,6 +2042,30 @@ mod tests {
         second.panels_mut().set_focused(Side::Left, Some(1));
         assert_eq!(offered(&second), [false; 3]);
         assert!(!enabled(&second, CommandId::NewFolder));
+    }
+
+    #[test]
+    fn clear_selection_follows_its_source_after_another_panel_is_activated() {
+        use crate::core::model::{Instance, tests::model_for};
+        use crate::core::panel::tests::{file, list};
+        let mut model = model_for(Instance::First);
+        model.show_mode(Mode::TwoPanels);
+        list(model.panels_mut(), r"C:\f", vec![file("a.txt", 1, 0)]);
+        model
+            .panels_mut()
+            .set_selected(Side::Left, vec![1..2].into());
+        let can_clear = |model: &Model, side| {
+            MenuItem::Run(CommandId::ClearSelection).enabled(&State {
+                model,
+                operations_ready: true,
+                focus: Focus::Panel,
+                list: List::Panel(side),
+            })
+        };
+        model.panels_mut().activate(Side::Right);
+        assert!(can_clear(&model, Side::Left));
+        model.panels_mut().activate(Side::Left);
+        assert!(!can_clear(&model, Side::Right));
     }
 
     /// A second export would write the same file twice at once.

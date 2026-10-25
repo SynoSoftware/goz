@@ -1,5 +1,5 @@
-//! Quick-search keystrokes run in order against shared rows. Navigation and
-//! newer native interaction invalidate a late focus change.
+//! Quick-search keystrokes run in order against shared rows. Automatic row
+//! changes retry a keystroke; navigation and newer interaction invalidate it.
 
 use super::rows::Folding;
 use super::*;
@@ -29,11 +29,15 @@ impl Quick {
     pub(super) fn close(&mut self, retired: &mut Retirement) -> bool {
         let active = self.active();
         self.text = None;
-        self.revision += 1;
+        self.invalidate();
         let pending = std::mem::take(&mut self.pending);
         let items = pending.len();
         retired.push(pending, items);
         active
+    }
+
+    pub(super) fn invalidate(&mut self) {
+        self.revision += 1;
     }
 }
 
@@ -166,7 +170,6 @@ pub(crate) struct Finding {
     taken: Arc<Taken>,
     epoch: u64,
     revision: u64,
-    interaction: u64,
     text: Option<String>,
     focused: Option<u64>,
     action: QuickAction,
@@ -239,7 +242,6 @@ impl Panels {
             taken,
             epoch: panel.epoch,
             revision: panel.quick.revision,
-            interaction: panel.interaction_revision,
             text: panel.quick.text.clone(),
             focused: panel.focused,
             action,
@@ -252,7 +254,7 @@ impl Panels {
         panel.quick.running = None;
         let current =
             answer.input.epoch == panel.epoch && answer.input.revision == panel.quick.revision;
-        let row = if current && answer.input.interaction == panel.interaction_revision {
+        let row = if current {
             if answer.input.rows.matches(panel) && Arc::ptr_eq(&answer.input.taken, &taken) {
                 panel.quick.text = answer.text.clone();
                 answer.row
