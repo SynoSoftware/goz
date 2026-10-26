@@ -68,8 +68,7 @@ pub(crate) struct Choices {
     pub(crate) size_format: SizeFormat,
     #[serde(default, deserialize_with = "or_default")]
     pub(crate) date_format: DateFormat,
-    /// The open commands; empty does what File Explorer does (DESIGN.md: The
-    /// Context menu page).
+    /// The open commands (DESIGN.md: The Context menu page).
     #[serde(default, deserialize_with = "or_default")]
     pub(crate) open_folders: String,
     #[serde(default, deserialize_with = "or_default")]
@@ -89,14 +88,18 @@ pub(crate) struct Choices {
     pub(crate) select_on_click: bool,
     #[serde(default, deserialize_with = "or_default")]
     pub(crate) select_on_activate: bool,
-    #[serde(default, deserialize_with = "or_default")]
-    pub(crate) result_enter: ResultEnter,
     #[serde(
         default,
         deserialize_with = "or_default",
         skip_serializing_if = "Option::is_none"
     )]
     pub(crate) show_shortcut: Option<ShowShortcut>,
+    #[serde(
+        default,
+        deserialize_with = "or_default",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub(crate) commander_shortcut: Option<ShowShortcut>,
     #[serde(default, deserialize_with = "or_default")]
     pub(crate) shortcuts: CommandShortcuts,
     /// The speed settings that copies, moves and deletes start with
@@ -119,16 +122,10 @@ fn copy_policy<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Policy, D::
 }
 
 impl Choices {
-    pub(crate) fn enter_result(&self, is_folder: bool) -> ResultEnter {
-        let command = if is_folder {
-            &self.open_folders
-        } else {
-            &self.open_files
-        };
-        if command.trim().is_empty() {
-            self.result_enter
-        } else {
-            ResultEnter::Open
+    pub(crate) fn show_shortcut(&self, mode: Mode) -> Option<ShowShortcut> {
+        match mode {
+            Mode::Search => self.show_shortcut,
+            Mode::TwoPanels => self.commander_shortcut,
         }
     }
 }
@@ -152,8 +149,8 @@ impl Default for Choices {
             show_all_when_empty: on(),
             select_on_click: on(),
             select_on_activate: false,
-            result_enter: ResultEnter::default(),
             show_shortcut: None,
+            commander_shortcut: None,
             shortcuts: CommandShortcuts::default(),
             speed: Speed::default(),
             transfers_per_device: TransferLimit::default(),
@@ -269,7 +266,6 @@ impl SettingsValues {
                 choices.show_all_when_empty = defaults.show_all_when_empty;
                 choices.select_on_click = defaults.select_on_click;
                 choices.select_on_activate = defaults.select_on_activate;
-                choices.result_enter = defaults.result_enter;
             }
             SettingsPage::ContextMenu => {
                 choices.open_folders = defaults.open_folders;
@@ -279,6 +275,7 @@ impl SettingsValues {
             }
             SettingsPage::Keyboard => {
                 choices.show_shortcut = defaults.show_shortcut;
+                choices.commander_shortcut = defaults.commander_shortcut;
                 choices.shortcuts = defaults.shortcuts;
             }
             SettingsPage::FileOperations => {
@@ -317,6 +314,7 @@ pub(crate) enum ContextItem {
     OpenFolders,
     OpenFiles,
     OpenFileLocation,
+    ShowInCommander,
     Explore,
     Copy,
     CopyName,
@@ -351,6 +349,7 @@ impl ContextItem {
             CommandId::Open if folder => ContextItem::OpenFolders,
             CommandId::Open => ContextItem::OpenFiles,
             CommandId::OpenFileLocation => ContextItem::OpenFileLocation,
+            CommandId::ShowInCommander => ContextItem::ShowInCommander,
             CommandId::Explore => ContextItem::Explore,
             CommandId::Copy => ContextItem::Copy,
             CommandId::CopyAsPath => ContextItem::CopyAsPath,
@@ -367,6 +366,7 @@ impl ContextItem {
         match self {
             ContextItem::OpenFolders | ContextItem::OpenFiles => CommandId::Open,
             ContextItem::OpenFileLocation => CommandId::OpenFileLocation,
+            ContextItem::ShowInCommander => CommandId::ShowInCommander,
             ContextItem::Explore => CommandId::Explore,
             ContextItem::Copy => CommandId::Copy,
             ContextItem::CopyAsPath => CommandId::CopyAsPath,
@@ -386,19 +386,6 @@ impl ContextItem {
             item => item.command().row().label,
         }
     }
-}
-
-/// What `Enter` and a double-click on a result in Search do, which the
-/// Search page chooses (DESIGN.md: Searching).
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub(crate) enum ResultEnter {
-    /// Two panels shows, its active panel with the result's folder and the
-    /// result focused, as a search panel's `Enter` does.
-    #[default]
-    ShowInPanels,
-    /// Open, with the Context menu page's open commands.
-    Open,
 }
 
 /// When a row's context menu shows an item.
@@ -434,6 +421,8 @@ pub(crate) struct ContextMenu {
     #[serde(default, deserialize_with = "or_default")]
     open_file_location: ItemVisibility,
     #[serde(default, deserialize_with = "or_default")]
+    show_in_commander: ItemVisibility,
+    #[serde(default, deserialize_with = "or_default")]
     explore: ItemVisibility,
     #[serde(default, deserialize_with = "or_default")]
     copy: ItemVisibility,
@@ -459,6 +448,7 @@ impl ContextMenu {
             ContextItem::OpenFolders => &mut self.open_folders,
             ContextItem::OpenFiles => &mut self.open_files,
             ContextItem::OpenFileLocation => &mut self.open_file_location,
+            ContextItem::ShowInCommander => &mut self.show_in_commander,
             ContextItem::Explore => &mut self.explore,
             ContextItem::Copy => &mut self.copy,
             ContextItem::CopyAsPath => &mut self.copy_path,
@@ -975,18 +965,6 @@ mod tests {
         assert_eq!(draft.edited.choices.open_folders, command);
         assert_eq!(draft.edited.choices.open_files, command);
         assert!(!draft.use_total_commander(path));
-    }
-
-    #[test]
-    fn opening_results_uses_configured_commands() {
-        let mut choices = Choices {
-            open_files: total_commander_command(r"C:\totalcmd\TOTALCMD64.EXE"),
-            ..Choices::default()
-        };
-        assert_eq!(choices.enter_result(false), ResultEnter::Open);
-        assert_eq!(choices.enter_result(true), ResultEnter::ShowInPanels);
-        choices.open_folders.clone_from(&choices.open_files);
-        assert_eq!(choices.enter_result(true), ResultEnter::Open);
     }
 
     /// A settings file that breaks a rule of Settings > Keyboard would give

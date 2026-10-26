@@ -522,15 +522,6 @@ pub(crate) struct ReadAccepted {
     pub(crate) search_ended: bool,
 }
 
-/// What `Enter` on a row does.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum EnterAction {
-    Read(ReadAsk),
-    /// Opens the file with Settings' "Open files" command.
-    Open(String),
-    Nothing,
-}
-
 /// How a reading started, which decides what its answer does.
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum ReadKind {
@@ -1802,31 +1793,6 @@ impl Panels {
         }
         let name: Box<[u16]> = last_name(&folder).encode_utf16().collect();
         Some(self.go(side, parent_of(&folder), Some(name)))
-    }
-
-    /// `Enter` on `row` of `side`. A search panel's result goes to its
-    /// folder with it focused, and a folder result into that folder
-    /// (DESIGN.md: Search in a panel).
-    pub(crate) fn enter(&mut self, side: Side, row: u64) -> EnterAction {
-        let panel = self.panel(side);
-        match self.row(side, row) {
-            None => EnterAction::Nothing,
-            Some(Row::Up) => self
-                .go_up(side)
-                .map_or(EnterAction::Nothing, EnterAction::Read),
-            Some(Row::Entry(entry)) => {
-                let path = panel.path_of(&entry.name);
-                if entry.is_folder() {
-                    EnterAction::Read(self.go(side, path, None))
-                } else {
-                    EnterAction::Open(path)
-                }
-            }
-            Some(Row::Result(item)) => {
-                let (path, focus) = result_place(item);
-                EnterAction::Read(self.go(side, path, focus))
-            }
-        }
     }
 
     /// `Ctrl+Left` or `Ctrl+Right` on `row` of `side`, as in Total

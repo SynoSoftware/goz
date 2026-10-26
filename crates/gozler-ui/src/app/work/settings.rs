@@ -15,7 +15,7 @@ use std::time::Instant;
 struct Save {
     path: PathBuf,
     changes: Option<Changes>,
-    windows_shortcut: Option<Option<u8>>,
+    windows_shortcut: Option<Vec<u8>>,
     report_failure: bool,
 }
 
@@ -155,11 +155,11 @@ impl Work {
         Some(answer)
     }
 
-    pub(in crate::app) fn set_windows_shortcut(&mut self, key: Option<u8>, path: &Path) {
+    pub(in crate::app) fn set_windows_shortcut(&mut self, keys: Vec<u8>, path: &Path) {
         self.submit_save(Save {
             path: path.to_owned(),
             changes: None,
-            windows_shortcut: Some(key),
+            windows_shortcut: Some(keys),
             report_failure: false,
         });
     }
@@ -307,8 +307,8 @@ fn registry(input: Registry, worker: &OffThread, _cancel: &CancelToken) -> Regis
     }
 }
 
-fn windows_shortcut(key: Option<u8>, log: &Path, worker: &OffThread) -> io::Result<()> {
-    let result = crate::win::shell::set_windows_shortcut_disabled(key, worker);
+fn windows_shortcut(keys: Vec<u8>, log: &Path, worker: &OffThread) -> io::Result<()> {
+    let result = crate::win::shell::set_windows_shortcut_disabled(&keys, worker);
     if let Err(error) = &result {
         crate::app::write_log(
             log,

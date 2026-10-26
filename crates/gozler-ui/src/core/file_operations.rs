@@ -1820,6 +1820,7 @@ pub(crate) fn status_line(
     strings: &Strings,
     numbers: &dyn Numbers,
     operation: &StatusOperation,
+    speed: Option<Speed>,
 ) -> (String, Option<Bar>) {
     match operation {
         StatusOperation::Summary { completion, .. } => {
@@ -1848,7 +1849,7 @@ pub(crate) fn status_line(
         StatusOperation::Running {
             request, running, ..
         } => {
-            let (text, bar) = running_line(strings, numbers, request, running);
+            let (text, bar) = running_line(strings, numbers, request, running, speed);
             (text, Some(bar))
         }
         StatusOperation::Ended {
@@ -1870,6 +1871,7 @@ fn running_line(
     numbers: &dyn Numbers,
     request: &Request,
     running: &Running,
+    speed: Option<Speed>,
 ) -> (String, Bar) {
     let measure = measure_of(running);
     let progress = match measure {
@@ -1879,6 +1881,9 @@ fn running_line(
         None => items_done(strings, numbers, request, running.items),
     };
     let paused = held(running).map(|key| strings.text(key).to_owned());
+    let rate = speed
+        .filter(|_| running.is_active() && matches!(request, Request::Delete { .. }))
+        .map(|speed| items_per_second(strings, numbers, speed));
     let text = joined_parts(
         strings,
         [
@@ -1894,6 +1899,7 @@ fn running_line(
             progress,
         ]
         .into_iter()
+        .chain(rate)
         .chain(paused),
     );
     (text, measure.map_or(Bar::Moving, Bar::Measured))
@@ -1951,7 +1957,7 @@ pub(crate) fn status_widest(
                 yielded: false,
                 current: None,
             };
-            running_line(strings, numbers, request, &running).0
+            running_line(strings, numbers, request, &running, None).0
         })
     });
     let skipped = Listed {
@@ -2419,7 +2425,7 @@ mod tests {
             numbered: false,
         };
         assert_eq!(
-            status_line(&english(), &English, &ended),
+            status_line(&english(), &English, &ended, None),
             (
                 r"Copied 3,310 items to D:\Backup · 1 failed or skipped".to_owned(),
                 None
@@ -2499,7 +2505,7 @@ mod tests {
             numbered,
         };
         let line = |folder, end, numbered| {
-            status_line(&english(), &English, &ended(folder, end, numbered)).0
+            status_line(&english(), &English, &ended(folder, end, numbered), None).0
         };
         assert_eq!(
             line(r"C:\F\", End::Complete, false),

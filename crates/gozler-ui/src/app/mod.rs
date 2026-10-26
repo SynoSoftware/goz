@@ -51,7 +51,7 @@ pub(crate) fn run() {
     let arguments = Arguments::read();
     if arguments.unregister_shortcut {
         let result =
-            win::work::spawn(|worker| win::shell::set_windows_shortcut_disabled(None, worker))
+            win::work::spawn(|worker| win::shell::set_windows_shortcut_disabled(&[], worker))
                 .join();
         std::process::exit(if matches!(result, Ok(Ok(()))) { 0 } else { 1 });
     }

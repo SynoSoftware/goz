@@ -282,7 +282,7 @@ impl StatusBar {
             if let (Some(caption), Some(layout)) = (transfer_caption, layout) {
                 let layout = self.show_window_end(layout, &right, memory);
                 let transfer_rect =
-                    self.place_center(&layout, job, job_text, &activity, Some(caption));
+                    self.place_activity(&layout, job, job_text, &activity, Some(caption));
                 let only = activity.is_empty()
                     && job_text.is_empty()
                     && job.progress == JobProgress::None
@@ -297,18 +297,18 @@ impl StatusBar {
             let lost = transfer.hide();
             if let Some(layout) = layout {
                 let layout = self.show_window_end(layout, &right, memory);
-                self.place_center(&layout, job, job_text, &activity, None);
+                self.place_activity(&layout, job, job_text, &activity, None);
             }
             return self.show_job(job, job_text) || lost;
         }
         if let Some(layout) = layout {
             self.place(layout);
-            self.place_center(layout, job, job_text, &activity, None);
+            self.place_activity(layout, job, job_text, &activity, None);
         }
         self.show_job(job, job_text)
     }
 
-    fn place_center(
+    fn place_activity(
         &self,
         layout: &StatusLayout,
         job: &JobCaption,
@@ -394,12 +394,19 @@ impl StatusBar {
         } else {
             activity_wanted
         };
-        let widths: Vec<_> = [activity_width, job_width, transfer_width]
+        let widths: Vec<_> = [job_width, transfer_width, activity_width]
             .into_iter()
             .filter(|width| *width > Px(0))
             .collect();
-        let placed = layout.center_entries(&widths, self.bar.hwnd().client_size().width, dpi);
+        let placed = layout.place_entries(&widths, dpi);
         let mut placed = placed.into_iter();
+        let job_rect =
+            (job_width > Px(0)).then(|| placed.next().expect("the visible job has an entry width"));
+        let transfer_rect = (transfer_width > Px(0)).then(|| {
+            placed
+                .next()
+                .expect("the visible transfer has an entry width")
+        });
         let activity_rect = if activity_width > Px(0) {
             placed
                 .next()
@@ -445,8 +452,7 @@ impl StatusBar {
             tips.place_area(JOB_TEXT, Rect::default());
             tips.set_area(JOB_TEXT, "");
         }
-        if job_width > Px(0) {
-            let area = placed.next().expect("the visible job has an entry width");
+        if let Some(area) = job_rect {
             let text_rect = Rect {
                 x: area.x,
                 y: area.y + Px((area.height - meter.height()).0 / 2),
@@ -472,11 +478,7 @@ impl StatusBar {
                 tips.set_area(JOB_TEXT, &job.text);
             }
         }
-        if transfer_width > Px(0) {
-            placed.next()
-        } else {
-            None
-        }
+        transfer_rect
     }
 
     /// Makes a part of the main window's status bar for each item of

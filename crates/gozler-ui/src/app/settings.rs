@@ -8,7 +8,7 @@
 use super::dialogs::ServiceReport;
 use super::include::{Elevated, NotSaved};
 use super::indexed_folders::IndexedFolders;
-use super::main_window::MainWindow;
+use super::main_window::{MainWindow, PreparedShortcuts};
 use super::status_bar::{Entry as StatusEntry, Slot as StatusSlot, StatusBar};
 use crate::core::captions::{
     self, ButtonIcon, DialogCaptions, DialogItem, IndexCaptions, JobCaption, JobProgress,
@@ -25,7 +25,7 @@ use crate::core::model::Model;
 use crate::core::open::browse_command;
 use crate::core::results::Fix;
 use crate::core::settings::{
-    ContextItem, ItemVisibility, ResultEnter, SettingsDraft, SettingsPage, SettingsValues,
+    ContextItem, ItemVisibility, Mode, SettingsDraft, SettingsPage, SettingsValues,
 };
 use crate::core::shortcuts::{
     CommandRow, CommandShortcuts, ShowShortcut, command_place, command_rows,
@@ -39,7 +39,7 @@ use crate::win::controls::{
 };
 use crate::win::dialog::{self, DialogEnd, DialogMessage, DialogProc, Opened};
 use crate::win::gdi::{Font, TextMeter};
-use crate::win::shortcut::{self, Capture, Registration};
+use crate::win::shortcut::{self, Capture};
 use crate::win::{self, Hwnd};
 use gozler_core::include::IndexSettings;
 use gozler_fileops::{DeleteWorkers, Engine, RingBlock, SpeedSettings};
@@ -81,7 +81,7 @@ enum Awaited {
 }
 
 struct Applying {
-    registration: Registration,
+    registration: PreparedShortcuts,
     edited: SettingsValues,
     last: SettingsValues,
     after: AfterSave,
@@ -174,12 +174,25 @@ const VISIBILITY_BUTTONS: [(ControlId, ItemVisibility); 3] = [
     (ControlId::ContextMenuHide, ItemVisibility::Hidden),
 ];
 
-/// The Search page's option buttons and what each makes `Enter` on a
-/// result do.
-const RESULT_ENTER_BUTTONS: [(ControlId, ResultEnter); 2] = [
-    (ControlId::SearchEnterPanels, ResultEnter::ShowInPanels),
-    (ControlId::SearchEnterOpen, ResultEnter::Open),
+const SHOW_SHORTCUTS: [(Mode, ControlId, ControlId); 2] = [
+    (
+        Mode::Search,
+        ControlId::KeyboardShortcut,
+        ControlId::KeyboardClear,
+    ),
+    (
+        Mode::TwoPanels,
+        ControlId::KeyboardCommanderShortcut,
+        ControlId::KeyboardCommanderClear,
+    ),
 ];
+
+fn shortcut_control(mode: Mode) -> ControlId {
+    match mode {
+        Mode::Search => ControlId::KeyboardShortcut,
+        Mode::TwoPanels => ControlId::KeyboardCommanderShortcut,
+    }
+}
 
 /// The Include setting that a check box shows.
 type IncludeField = fn(&mut IndexSettings) -> &mut bool;
@@ -317,7 +330,7 @@ pub(super) struct SettingsDialog<'a> {
     balloon: OnceCell<Balloon>,
     /// The keys pressed while the shortcut box has the focus, which reach
     /// the dialog instead of the box (DESIGN.md: The Keyboard page).
-    capture: Cell<Option<Capture>>,
+    capture: Cell<Option<(Mode, Capture)>>,
     /// Whether the person confirmed Reset all, which the main window carries
     /// out once the dialog has closed.
     resets: Cell<bool>,
@@ -443,10 +456,10 @@ impl<'a> SettingsDialog<'a> {
         CheckBox::of_dialog(self.page(page)?, control.id())
     }
 
-    fn shortcut_box(&self) -> Option<Edit> {
+    fn shortcut_box(&self, mode: Mode) -> Option<Edit> {
         Edit::of_dialog(
             self.page(SettingsPage::Keyboard)?,
-            ControlId::KeyboardShortcut.id(),
+            shortcut_control(mode).id(),
         )
     }
 
@@ -524,12 +537,6 @@ impl<'a> SettingsDialog<'a> {
                     let place = DateFormat::ALL.iter().position(|each| *each == format);
                     if let (Some(list), Some(place)) = (self.date_list(), place) {
                         list.select(place);
-                    }
-                } else {
-                    for (control, enter) in RESULT_ENTER_BUTTONS {
-                        if let Some(button) = self.check_box(page, control) {
-                            button.set_checked(enter == values.choices.result_enter);
-                        }
                     }
                 }
             }
@@ -918,16 +925,11 @@ impl<'a> SettingsDialog<'a> {
                 }
             }
             Err(error) => {
-                let message = self.main.tray.shortcut_message(
-                    self.main,
-                    registration.shortcut(),
-                    &error,
-                    false,
-                );
+                let message = error.message(&self.strings, false);
                 self.refuse(
                     dialog,
                     SettingsPage::Keyboard,
-                    ControlId::KeyboardShortcut,
+                    shortcut_control(error.mode()),
                     &message,
                 );
                 self.update_apply(dialog);
@@ -1010,7 +1012,7 @@ impl<'a> SettingsDialog<'a> {
             command_rows(
                 &self.strings,
                 &draft.edited.choices.shortcuts,
-                self.main.tray.registered_shortcut(),
+                Mode::ALL.map(|mode| self.main.shortcuts.registered(mode)),
                 &filter,
             )
         };
@@ -1032,10 +1034,14 @@ impl<'a> SettingsDialog<'a> {
     /// selected.
     fn fill_keys(&self, selected: usize) {
         let keys: Vec<String> = match self.selected_command() {
-            Some(CommandId::ShowWindow) => self
+            Some(command @ (CommandId::ShowSearch | CommandId::ShowCommander)) => self
                 .main
-                .tray
-                .registered_shortcut()
+                .shortcuts
+                .registered(if command == CommandId::ShowSearch {
+                    Mode::Search
+                } else {
+                    Mode::TwoPanels
+                })
                 .map(|show| show.text(&self.strings))
                 .into_iter()
                 .collect(),
@@ -1077,11 +1083,11 @@ impl<'a> SettingsDialog<'a> {
     }
 
     /// Add… needs a command; Edit… and Remove need one of its shortcuts.
-    /// Show window's one shortcut is set in the box above the list.
+    /// Global shortcuts are set in their boxes above the list.
     fn update_key_buttons(&self) {
-        let command = self
-            .selected_command()
-            .is_some_and(|command| command != CommandId::ShowWindow);
+        let command = self.selected_command().is_some_and(|command| {
+            !matches!(command, CommandId::ShowSearch | CommandId::ShowCommander)
+        });
         let key = self.selected_key().is_some();
         for (control, enabled) in [
             (ControlId::KeyboardAdd, command),
@@ -1094,17 +1100,23 @@ impl<'a> SettingsDialog<'a> {
         }
     }
 
-    /// Shows the shortcut to show Gozler in its box, whose text only this
-    /// sets, and enables Clear while there is one.
+    /// Only captured keystrokes set these boxes; pasted text is discarded.
     fn show_shortcut(&self) {
-        let shortcut = self.draft.borrow().edited.choices.show_shortcut;
-        if let Some(shortcut_box) = self.shortcut_box() {
-            let text = shortcut.map_or_else(String::new, |shortcut| shortcut.text(&self.strings));
-            self.filling(|| shortcut_box.set_text_caret_at_end(&text));
+        for (mode, _, clear) in SHOW_SHORTCUTS {
+            let shortcut = self.draft.borrow().edited.choices.show_shortcut(mode);
+            if let Some(shortcut_box) = self.shortcut_box(mode) {
+                let text =
+                    shortcut.map_or_else(String::new, |shortcut| shortcut.text(&self.strings));
+                self.filling(|| shortcut_box.set_text_caret_at_end(&text));
+            }
+            if let Some(clear) = self.control(SettingsPage::Keyboard, clear) {
+                clear.set_enabled(shortcut.is_some());
+            }
         }
-        if let Some(clear) = self.control(SettingsPage::Keyboard, ControlId::KeyboardClear) {
-            clear.set_enabled(shortcut.is_some());
-        }
+        let capture = self.capture.take();
+        let mode = capture.as_ref().map_or(Mode::Search, |(mode, _)| *mode);
+        self.capture.set(capture);
+        let shortcut = self.draft.borrow().edited.choices.show_shortcut(mode);
         if let Some(hint) = self.control(SettingsPage::Keyboard, ControlId::KeyboardShortcutHint) {
             let text = if let Some(shortcut) = shortcut.filter(|shortcut| shortcut.windows()) {
                 let keys = shortcut.text(&self.strings);
@@ -1137,20 +1149,24 @@ impl<'a> SettingsDialog<'a> {
         }
     }
 
-    /// Keeps the shortcut to show Gozler, and shows it.
-    fn set_shortcut(&self, shortcut: Option<ShowShortcut>) {
-        self.draft.borrow_mut().edited.choices.show_shortcut = shortcut;
+    fn set_shortcut(&self, mode: Mode, shortcut: Option<ShowShortcut>) {
+        let mut draft = self.draft.borrow_mut();
+        match mode {
+            Mode::Search => draft.edited.choices.show_shortcut = shortcut,
+            Mode::TwoPanels => draft.edited.choices.commander_shortcut = shortcut,
+        }
+        drop(draft);
         self.show_shortcut();
     }
 
     /// Takes the keys pressed in the shortcut box: `Backspace` alone
     /// removes the shortcut, as the line under the box says, and keys that
     /// cannot show Gozler, `Win+L`, leave it as it is.
-    fn keys_captured(&self, windows: bool, keystroke: Keystroke) {
+    fn keys_captured(&self, mode: Mode, windows: bool, keystroke: Keystroke) {
         if !windows && keystroke == Keystroke::plain(Key::Backspace) {
-            self.set_shortcut(None);
+            self.set_shortcut(mode, None);
         } else if let Some(shortcut) = ShowShortcut::pressed(windows, keystroke) {
-            self.set_shortcut(Some(shortcut));
+            self.set_shortcut(mode, Some(shortcut));
         }
     }
 
@@ -1537,7 +1553,10 @@ impl<'a> SettingsDialog<'a> {
                 ControlId::ContextMenuTotalCommander,
                 text("settings_context_menu.total_commander_tooltip"),
             )],
-            SettingsPage::Keyboard => &[(ControlId::KeyboardClear, clear.as_str())],
+            SettingsPage::Keyboard => &[
+                (ControlId::KeyboardClear, clear.as_str()),
+                (ControlId::KeyboardCommanderClear, clear.as_str()),
+            ],
             // `refresh_index` gives these their tips, but Rebuild's.
             SettingsPage::Index => &[
                 (
@@ -1876,17 +1895,18 @@ impl<'a> SettingsDialog<'a> {
         if edited == last {
             return true;
         }
-        let registration = match self.main.tray.prepare_shortcut(
+        let registration = match self.main.shortcuts.prepare(
             self.main,
             self.window,
             &edited.choices,
             &last.choices,
         ) {
-            Err(message) => {
+            Err(error) => {
+                let message = error.message(&self.strings, false);
                 self.refuse(
                     dialog,
                     SettingsPage::Keyboard,
-                    ControlId::KeyboardShortcut,
+                    shortcut_control(error.mode()),
                     &message,
                 );
                 return false;
@@ -1908,16 +1928,11 @@ impl<'a> SettingsDialog<'a> {
                     return false;
                 }
                 Some(Err(error)) => {
-                    let message = self.main.tray.shortcut_message(
-                        self.main,
-                        prepared.shortcut(),
-                        &error,
-                        false,
-                    );
+                    let message = error.message(&self.strings, false);
                     self.refuse(
                         dialog,
                         SettingsPage::Keyboard,
-                        ControlId::KeyboardShortcut,
+                        shortcut_control(error.mode()),
                         &message,
                     );
                     return false;
@@ -1937,7 +1952,7 @@ impl<'a> SettingsDialog<'a> {
         edited: SettingsValues,
         last: SettingsValues,
         after: AfterSave,
-        registration: Option<Registration>,
+        registration: Option<PreparedShortcuts>,
     ) -> bool {
         self.main.settings.apply_choices(
             self.main,
@@ -1968,8 +1983,11 @@ impl<'a> SettingsDialog<'a> {
         } else {
             self.save_include(include, after)
         };
-        if edited.choices.show_shortcut != last.choices.show_shortcut {
-            // Show window's row shows what Windows registered.
+        if Mode::ALL
+            .into_iter()
+            .any(|mode| edited.choices.show_shortcut(mode) != last.choices.show_shortcut(mode))
+        {
+            // These rows show what Windows registered.
             self.fill_commands(self.selected_command());
         }
         let icons_changed = edited.choices.show_icons != last.choices.show_icons;
@@ -2166,7 +2184,10 @@ impl<'a> SettingsDialog<'a> {
             if let Some(format) = chosen {
                 self.draft.borrow_mut().edited.choices.date_format = format;
             }
-        } else if is(id, ControlId::KeyboardShortcut) {
+        } else if SHOW_SHORTCUTS
+            .into_iter()
+            .any(|(_, control, _)| is(id, control))
+        {
             // Undoes a paste from the box's context menu: the keys pressed
             // in it arrive as DialogMessage::KeysCaptured.
             self.show_shortcut();
@@ -2255,9 +2276,6 @@ impl<'a> SettingsDialog<'a> {
                 .is_some_and(CheckBox::is_checked);
             *value(&mut self.draft.borrow_mut().edited) = checked;
             self.show_closed_note();
-        } else if let Some((_, enter)) = RESULT_ENTER_BUTTONS.into_iter().find(|(c, _)| is(id, *c))
-        {
-            self.draft.borrow_mut().edited.choices.result_enter = enter;
         } else if let Some((_, shown)) = VISIBILITY_BUTTONS.into_iter().find(|(c, _)| is(id, *c)) {
             if let Some(item) = self.selected_context_item() {
                 *self
@@ -2305,10 +2323,13 @@ impl<'a> SettingsDialog<'a> {
             self.fill(SettingsPage::Performance);
         } else if is(id, ControlId::IncludeModify) {
             self.modify_folders(dialog);
-        } else if is(id, ControlId::KeyboardClear) {
+        } else if let Some((mode, _, _)) = SHOW_SHORTCUTS
+            .into_iter()
+            .find(|(_, _, clear)| is(id, *clear))
+        {
             // As Backspace in the box does.
-            self.set_shortcut(None);
-            if let Some(shortcut_box) = self.shortcut_box() {
+            self.set_shortcut(mode, None);
+            if let Some(shortcut_box) = self.shortcut_box(mode) {
                 shortcut_box.hwnd().focus();
             }
         } else if is(id, ControlId::KeyboardAdd) {
@@ -2450,10 +2471,24 @@ impl DialogProc for SettingsDialog<'_> {
                 return true;
             }
             DialogMessage::Command { id } => self.clicked(dialog, id),
-            DialogMessage::Focus { id, focused } if is(id, ControlId::KeyboardShortcut) => {
+            DialogMessage::Focus { id, focused }
+                if SHOW_SHORTCUTS
+                    .into_iter()
+                    .any(|(_, control, _)| is(id, control)) =>
+            {
                 self.capture.take();
                 if focused {
-                    self.capture.set(shortcut::capture(dialog).ok());
+                    let mode = SHOW_SHORTCUTS
+                        .into_iter()
+                        .find(|(_, control, _)| is(id, *control))
+                        .expect("the focused control is a shortcut box")
+                        .0;
+                    self.capture.set(
+                        shortcut::capture(dialog)
+                            .ok()
+                            .map(|capture| (mode, capture)),
+                    );
+                    self.show_shortcut();
                 }
                 return true;
             }
@@ -2463,12 +2498,13 @@ impl DialogProc for SettingsDialog<'_> {
                 keystroke,
             } => {
                 let capture = self.capture.take();
-                let accepts = capture
+                let mode = capture
                     .as_ref()
-                    .is_some_and(|capture| capture.accepts(token));
+                    .filter(|(_, capture)| capture.accepts(token))
+                    .map(|(mode, _)| *mode);
                 self.capture.set(capture);
-                if accepts {
-                    self.keys_captured(windows, keystroke);
+                if let Some(mode) = mode {
+                    self.keys_captured(mode, windows, keystroke);
                 }
                 true
             }
@@ -2595,9 +2631,12 @@ impl DialogProc for SettingsDialog<'_> {
     }
 
     fn clear_glyph(&self, id: u16) -> Option<Glyph> {
-        (is(id, ControlId::SettingsClearSearch) || is(id, ControlId::KeyboardClear))
-            .then(|| captions::button_glyph("button.clear"))
-            .flatten()
+        (is(id, ControlId::SettingsClearSearch)
+            || SHOW_SHORTCUTS
+                .into_iter()
+                .any(|(_, _, clear)| is(id, clear)))
+        .then(|| captions::button_glyph("button.clear"))
+        .flatten()
     }
 
     fn empty_text(&self, id: u16) -> Option<String> {

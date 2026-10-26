@@ -3,7 +3,7 @@
 use super::{REPOSITORY, Surface};
 use crate::core::clipboard::folder_of;
 use crate::core::fetch::List;
-use crate::core::open::{self, Commands, Entries, EntryAction, Selected};
+use crate::core::open::{Commands, Entries, EntryAction, Selected};
 use crate::core::work::{Id, Replacement, Retirement, Waiting};
 use crate::win::wake::OpenWaker;
 use crate::win::work::{OffThread, Task};
@@ -317,13 +317,7 @@ fn act_on_entries(
     let mut files = Vec::new();
     let mut failure = None;
     for entry in entries.into_iter().take_while(|_| !cancel.is_cancelled()) {
-        let command: &str = match action {
-            EntryAction::Open if entry.is_folder => &commands.folders,
-            EntryAction::Open => &commands.files,
-            EntryAction::OpenFileLocation => &commands.location,
-            EntryAction::Explore | EntryAction::Properties => "",
-        };
-        if let Some(line) = open::expand(command, &String::from_utf16_lossy(&entry.path)) {
+        if let Some(line) = commands.expand(action, &entry) {
             session
                 .run_command(&line.program, &line.parameters)
                 .map_err(|error| OpenFailure {

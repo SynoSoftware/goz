@@ -84,7 +84,9 @@ owner has run it, and file an issue for each item that fails.
 - Apply saves edited settings without losing the current page or focus. Switch
   the language and check the search and panel column headers.
 - Each open command runs for its own case, and emptying a box brings back File
-  Explorer's way.
+  Explorer's way. Enter, double-click and Open follow that rule in Search,
+  folder panels and search panels. Show in Commander navigates to the selected
+  folder, or shows the file's containing folder with the file focused.
 - Total Commander fills
   `"C:\Program Files\totalcmd\TOTALCMD64.EXE" /O /A /P=L /L="%1"` into Open
   folders and Open files. Then Open on a folder and on a file opens it in
@@ -102,10 +104,13 @@ owner has run it, and file an issue for each item that fails.
   names the newer release and its link opens the release page; off, Gozler
   makes no request (Resource Monitor's Network page shows none).
 
-## The shortcut and the tray
+## The shortcuts and the tray
 
 - With `Win+S` set, Windows Search does not open, Start stays closed and
-  Gozler comes forward. The Keyboard page names Windows Search and warns that
+  Gozler comes forward in Search, even after leaving it in Commander. Set a
+  different shortcut for Show Commander and check that it always shows Two
+  panels. Swap the two shortcuts, then clear one: each still shows its named
+  mode, and the cleared shortcut stops working. The Keyboard page names Windows Search and warns that
   related combinations can be disabled and that Windows may need a sign-out.
   Explorer's `DisabledHotkeys` value gains `S` without losing other keys.
   Choose `Win+E`: `S` is restored before `E` is added, and the page names File
@@ -116,8 +121,8 @@ owner has run it, and file an issue for each item that fails.
   saved registry change. Check Explorer's behavior after sign-out as well:
   the registry setting may outlast the live hook until then. Keys outside
   letters and digits keep the hook alone, and the page says so.
-- The tray icon: a click and `Enter` show the window; its menu holds Show
-  window and Exit; it comes back after Explorer restarts; the first hide shows
+- The tray icon: a click and `Enter` show Search; its menu holds Show
+  Search, Show Commander and Exit; it comes back after Explorer restarts; the first hide shows
   the notification once, and later hides show none.
 - With Explorer unresponsive, show or hide the window, change the tray setting
   and Exit. The UI stays usable; tray cleanup does not delay settings writes.

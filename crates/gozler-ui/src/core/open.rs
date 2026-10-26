@@ -1,8 +1,9 @@
 //! The open commands of Settings > Context menu (DESIGN.md: The Context
 //! menu page): Open folders, Open files and Open file location, in which
 //! `%1` is the entry's full path, as in Everything and in Windows' own
-//! commands. An empty command does what File Explorer does, which `app`
-//! runs instead.
+//! commands. Enter, double-click and menu Open share these commands in both
+//! modes; an empty command uses Windows' default. Navigation into Commander
+//! is a separate command.
 
 use super::text::name_of;
 use gozler_core::proto::ResultItem;
@@ -86,6 +87,18 @@ pub(crate) struct Commands {
     pub(crate) location: String,
 }
 
+impl Commands {
+    pub(crate) fn expand(&self, action: EntryAction, entry: &Selected) -> Option<CommandLine> {
+        let command = match action {
+            EntryAction::Open if entry.is_folder => &self.folders,
+            EntryAction::Open => &self.files,
+            EntryAction::OpenFileLocation => &self.location,
+            EntryAction::Explore | EntryAction::Properties => return None,
+        };
+        expand(command, &String::from_utf16_lossy(&entry.path))
+    }
+}
+
 /// The command that Browse… writes for the chosen program: the program in
 /// quotes, so a path with spaces stays one, and the entry's path in quotes.
 pub(crate) fn browse_command(program: &str) -> String {
@@ -129,7 +142,7 @@ pub(crate) struct CommandLine {
 /// `command` for the entry at `path`, or `None` when the command is empty,
 /// which does what File Explorer does. The program is the quoted start of
 /// the command, or its first word.
-pub(crate) fn expand(command: &str, path: &str) -> Option<CommandLine> {
+fn expand(command: &str, path: &str) -> Option<CommandLine> {
     let command = command.trim().replace("%1", path);
     if command.is_empty() {
         return None;

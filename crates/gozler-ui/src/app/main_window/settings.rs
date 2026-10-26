@@ -1,7 +1,7 @@
 use super::{
     Awaited, Cell, Choices, DaemonFailure, DialogId, Elevated, Hwnd, Id, IncludeDrive,
-    IndexCaptions, IndexSettings, Instance, Instant, JobCaption, MainWindow, NotSaved, RefCell,
-    Registration, SettingsDialog, SettingsPage, SettingsValues, ShellTarget, Side, StatusWidest,
+    IndexCaptions, IndexSettings, Instant, JobCaption, MainWindow, NotSaved, PreparedShortcuts,
+    RefCell, SettingsDialog, SettingsPage, SettingsValues, ShellTarget, Side, StatusWidest,
     Strings, SummaryRow, Surface, Waiting, captions, connected_drives, connected_volumes,
     include_drives, io, label_of, preview, summary_rows, win,
 };
@@ -229,16 +229,11 @@ impl SettingsBridge {
         hwnd: Hwnd,
         edited: &Choices,
         last: &Choices,
-        registration: Option<Registration>,
+        registration: Option<PreparedShortcuts>,
     ) {
-        if window.instance() == Instance::First && edited.show_shortcut != last.show_shortcut {
-            window.tray.starting_shortcut.take();
-            if let Some(registration) = &registration {
-                registration.activate();
-            }
-            window.tray.shortcut.replace(registration);
-            window.tray.failure.replace(None);
-            window.tray.update_windows_shortcut(window);
+        if let Some(registration) = registration {
+            window.shortcuts.commit(registration);
+            window.shortcuts.update_windows_shortcut(window);
         }
         // The window draws once after every refresh below.
         hwnd.draw_once_after(|| {

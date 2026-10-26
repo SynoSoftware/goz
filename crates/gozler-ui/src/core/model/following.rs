@@ -361,6 +361,14 @@ impl Model {
         Some(caption)
     }
 
+    pub(crate) fn operation_speed(&self) -> Option<file_operations::Speed> {
+        let shown = self.following.presentation.as_ref()?;
+        if shown.status.as_ref()?.id() != self.operation()?.id() {
+            return None;
+        }
+        shown.speed
+    }
+
     pub(crate) fn operation_backlog(&self) -> &str {
         self.following
             .presentation

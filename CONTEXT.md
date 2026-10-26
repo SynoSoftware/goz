@@ -219,8 +219,8 @@ offers a command runs the same one.
 
 **Shortcut**:
 A key combination that runs a command, such as `Ctrl+F` for Edit > Find.
-The person changes them on Settings > Keyboard, where one more shortcut
-shows gozler from any program, such as `Win+S`.
+Settings > Keyboard also has separate shortcuts to show Search and Commander
+from any program, such as `Win+S` for Search.
 _Avoid_: hotkey (in text the person reads)
 
 **Tray**:
@@ -242,6 +242,14 @@ The other mode is Two panels.
 **Two panels**:
 The mode of the window with two panels, the key bar and Norton Commander's
 keys, which View > Two panels switches on and off.
+
+**Commander**:
+The window's Two panels mode, as named by the Show Commander command.
+
+**Open**:
+Opening an entry with its configured program in either mode. Without one,
+Windows uses its default program. Show in Commander is a separate navigation
+command that shows a folder, or a file's containing folder with the file focused.
 
 **Panel**:
 One of the two lists of Two panels, with its path box and its status line. It

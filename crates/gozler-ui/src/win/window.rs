@@ -181,9 +181,8 @@ pub(crate) enum Message<'a> {
     EndSession {
         ending: bool,
     },
-    /// The shortcut to show Gozler, registered with `RegisterHotKey`, was
-    /// pressed.
-    Hotkey,
+    /// A native hotkey or Windows-key hook delivered its registration ID.
+    Hotkey(i32),
     /// The tray icon was clicked or its menu asked for.
     /// Another process sent `text` with `WM_COPYDATA`, under `tag`.
     CopyData {
@@ -626,9 +625,10 @@ fn run_messages(
             {
                 continue;
             }
-            // Before IsDialogMessageW, whose access keys would take Alt with
-            // a letter, and before the control's own handling.
+            // Quick search handles characters before dialog access keys.
+            // Ctrl+Space belongs to the control's native selection handling.
             if matches!(msg.message, WM_CHAR | WM_SYSCHAR)
+                && !(msg.wParam.0 == ' ' as usize && held(VK_CONTROL))
                 && SendMessageW(
                     main.0,
                     CHAR,
@@ -1064,7 +1064,7 @@ unsafe fn decode<'a>(msg: u32, wparam: WPARAM, lparam: LPARAM) -> Message<'a> {
         WM_ENDSESSION => Message::EndSession {
             ending: wparam.0 != 0,
         },
-        WM_HOTKEY => Message::Hotkey,
+        WM_HOTKEY => Message::Hotkey(wparam.0 as i32),
         WM_COPYDATA => {
             // SAFETY: WM_COPYDATA's lparam points to a COPYDATASTRUCT whose
             // data, `cbData` bytes, lives while the message is sent.

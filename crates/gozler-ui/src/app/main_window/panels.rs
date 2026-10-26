@@ -5,11 +5,9 @@
 //! The selection).
 
 use super::super::dialogs::{NewFolder, TransferMode, TransferStart};
-use super::{EntryAction, MainWindow, Selected, Timer};
+use super::{MainWindow, Selected, Timer};
 use crate::core::captions::{self, PanelCaptions};
-use crate::core::commands::{
-    self, CommandId, Key, Keystroke, Mark, MenuItem, MenuNode, PanelAction, PanelKey,
-};
+use crate::core::commands::{self, CommandId, Mark, MenuItem, MenuNode, PanelAction, PanelKey};
 use crate::core::fetch::{List, Purpose};
 use crate::core::ids::ControlId;
 use crate::core::ids::DialogId;
@@ -17,9 +15,9 @@ use crate::core::layout::column_sizing::{self, ColumnFit};
 use crate::core::layout::{Body, PanelLayout, Px, Rect};
 use crate::core::model::{Accepted, Areas, Column, Effect, TakenShown};
 use crate::core::panel::{
-    self, EnterAction, Entry, FolderChange, LookIn, PanelColumn, PanelFollow, PanelUpdate,
-    Panels as PanelState, Place, QuickAction, ReadAsk, ReadChange, ReadEvent, ReadFailure, Row,
-    Side, TakenRows, UpdatedKind, View,
+    self, Entry, FolderChange, LookIn, PanelColumn, PanelFollow, PanelUpdate, Panels as PanelState,
+    Place, QuickAction, ReadAsk, ReadChange, ReadEvent, ReadFailure, Row, Side, TakenRows,
+    UpdatedKind, View,
 };
 use crate::core::selection::SELECTION_LIMIT;
 use crate::core::settings::Mode;
@@ -1492,7 +1490,6 @@ impl Panels {
         window: &MainWindow,
         hwnd: Hwnd,
         target: Hwnd,
-        keystroke: Keystroke,
         key: PanelKey,
     ) -> bool {
         let Some(side) = (self.panel_list(target))
@@ -1517,9 +1514,7 @@ impl Panels {
                 PanelKey::Back => Some(QuickAction::Back),
                 // A space is a character while the box is open, which the
                 // list must not take as a selection.
-                PanelKey::Toggle if keystroke.key == Key::Space => {
-                    Some(QuickAction::Character(' '))
-                }
+                PanelKey::Space => Some(QuickAction::Character(' ')),
                 _ => None,
             };
             if let Some(action) = action {
@@ -1538,7 +1533,7 @@ impl Panels {
             }
         }
         match key {
-            PanelKey::Enter => self.enter_row(window, side),
+            PanelKey::Enter => self.enter_row(window, hwnd, side),
             PanelKey::Back => {
                 let mut model = window.model.borrow_mut();
                 let panels = model.panels_mut();
@@ -1583,6 +1578,7 @@ impl Panels {
                 self.read(window, side, ask);
             }
             PanelKey::LookInEnter => c.search.hwnd().focus(),
+            PanelKey::Space => return false,
             PanelKey::Toggle => {
                 let focused = c.list.focused();
                 if let Some(row) = focused {
@@ -1630,36 +1626,33 @@ impl Panels {
     }
 
     /// `Enter` or a double-click on the focused row of `side`.
-    pub(super) fn enter_row(&self, window: &MainWindow, side: Side) {
+    pub(super) fn enter_row(&self, window: &MainWindow, hwnd: Hwnd, side: Side) {
         let Some(row) = self.panel(side).list.focused() else {
             return;
         };
-        let action = window.model.borrow_mut().panels_mut().enter(side, row);
-        match action {
-            EnterAction::Read(ask) => self.read(window, side, Some(ask)),
-            EnterAction::Open(path) => {
-                window.act_on_entries(
-                    List::Panel(side),
-                    EntryAction::Open,
-                    vec![Selected {
-                        path: path.encode_utf16().collect(),
-                        is_folder: false,
-                    }],
-                );
-            }
-            EnterAction::Nothing => {}
+        let up = matches!(window.model.borrow().panels().row(side, row), Some(Row::Up));
+        if up {
+            let ask = window.model.borrow_mut().panels_mut().go_up(side);
+            self.read(window, side, ask);
+        } else {
+            window.run(hwnd, MenuItem::Run(CommandId::Open));
         }
     }
 
-    /// Two panels shows Search's result at `row` in the active panel, as a
-    /// search panel's `Enter` shows its result (DESIGN.md: Searching).
-    /// Two panels shows first, because its first reading of each panel
-    /// would replace a newer one.
-    pub(super) fn show_result_in_panels(&self, window: &MainWindow, hwnd: Hwnd, row: u64) {
-        let place =
-            (window.model.borrow().search_list().results().row(row)).map(panel::result_place);
-        let Some((path, focus)) = place else {
-            return;
+    /// Show the mode before navigating: its initial folder reads must not
+    /// replace the requested location.
+    pub(super) fn show_entry_in_commander(&self, window: &MainWindow, hwnd: Hwnd, entry: Selected) {
+        let path = String::from_utf16_lossy(&entry.path);
+        let (path, focus) = if entry.is_folder {
+            (path, None)
+        } else {
+            let name = path
+                .rsplit('\\')
+                .next()
+                .unwrap_or(&path)
+                .encode_utf16()
+                .collect();
+            (parent_of(&path), Some(name))
         };
         let shown = window.model.borrow_mut().show_mode(Mode::TwoPanels);
         window.apply(hwnd, shown);
@@ -1682,7 +1675,9 @@ impl Panels {
         };
         // Control characters, such as Ctrl with a letter, are keys, and
         // Alt+Space opens the window menu.
-        if character.is_control() || alt && character == ' ' {
+        if character.is_control()
+            || character == ' ' && (alt || !window.model.borrow().panels().quick_active(side))
+        {
             return false;
         }
         if !matches!(
@@ -1868,7 +1863,7 @@ impl Panels {
                 None
             }
             ListNotify::Activated => {
-                self.enter_row(window, side);
+                self.enter_row(window, hwnd, side);
                 None
             }
             ListNotify::Focused => {
@@ -2056,26 +2051,6 @@ impl Panels {
             false => (commands::panel_menu(), None),
         };
         window.context_menu(hwnd, &groups, point, default, context);
-    }
-
-    /// Open in Two panels: one folder shows in the panel, as `Enter` shows
-    /// it; files open as Search opens them.
-    pub(super) fn open_panel_entries(&self, window: &MainWindow, side: Side) {
-        let folder = {
-            let model = window.model.borrow();
-            let panels = model.panels();
-            match panels.chosen_source(side).and_then(|source| source.one()) {
-                Some(entry) if entry.is_folder => Some(String::from_utf16_lossy(&entry.path)),
-                _ => None,
-            }
-        };
-        match folder {
-            Some(path) => {
-                let ask = window.model.borrow_mut().panels_mut().go(side, path, None);
-                self.read(window, side, Some(ask));
-            }
-            None => window.act_on_selected(List::Panel(side), EntryAction::Open),
-        }
     }
 
     /// `F5` and `F6`: the destination as text, then the operation

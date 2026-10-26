@@ -2,8 +2,8 @@ use super::{
     Button, ButtonIcon, Cell, Column, ColumnFit, ColumnSizing, CommandId, ControlId, CustomDraw,
     DEFERRED, DispInfo, Dpi, DrawAnswer, DrawStage, DropDownList, Edit, Hwnd, LRESULT, Label,
     Layout, List, ListButton, ListCaption, ListNotify, ListView, MainWindow, MatchMode, Matching,
-    MenuItem, Px, Range, Rect, RefCell, ResultEnter, SELECTION_LIMIT, SortDir, TextMeter, Tool,
-    Toolbar, Tooltip, captions, clear_glyph, layout, matched_width, win,
+    MenuItem, Px, Range, Rect, RefCell, SELECTION_LIMIT, SortDir, TextMeter, Tool, Toolbar,
+    Tooltip, captions, clear_glyph, layout, matched_width, win,
 };
 
 pub(super) struct Search {
@@ -633,30 +633,9 @@ impl Search {
         self.enter_result(window, hwnd);
     }
 
-    /// `Enter` or a double-click on Search's focused result: as Settings
-    /// chooses, Two panels shows it, or Open opens the selection (DESIGN.md:
-    /// Searching).
+    /// Enter and double-click run the same Open command as the menus.
     pub(super) fn enter_result(&self, window: &MainWindow, hwnd: Hwnd) {
-        let row = self.list.focused_or_first_selected();
-        let choice = {
-            let model = window.model.borrow();
-            let Some(result) = row.and_then(|row| model.search_list().results().row(row)) else {
-                return;
-            };
-            model.choices().enter_result(result.is_dir)
-        };
-        match choice {
-            ResultEnter::ShowInPanels => {
-                let row = self.list.focused_or_first_selected();
-                if let Some(row) = row {
-                    window
-                        .controls()
-                        .panels
-                        .show_result_in_panels(window, hwnd, row);
-                }
-            }
-            ResultEnter::Open => window.run(hwnd, MenuItem::Run(CommandId::Open)),
-        }
+        window.run(hwnd, MenuItem::Run(CommandId::Open));
     }
 }
 

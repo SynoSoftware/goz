@@ -70,7 +70,7 @@ use crate::core::query::{
 use crate::core::results::{Fix, ListButton};
 use crate::core::search_list::Deselect;
 use crate::core::selection::{DRAG_LIMIT, RowSelection, SELECTION_LIMIT, Selection, wide_path};
-use crate::core::settings::{Choices, Mode, ResultEnter, SettingsPage, SettingsValues};
+use crate::core::settings::{Choices, Mode, SettingsPage, SettingsValues};
 use crate::core::shortcuts::{CommandShortcuts, ShowShortcut};
 use crate::core::text::{LanguageChoice, Numbers, Strings, without_access_key};
 use crate::core::work::{Id, Retirement, Waiting};
@@ -121,6 +121,7 @@ mod panels;
 mod search;
 mod selection;
 mod settings;
+mod shortcuts;
 mod synchronize;
 mod tray;
 
@@ -134,6 +135,8 @@ use key_bar::{KEY_TIPS, KeyBar};
 use panels::{PanelControls, Panels};
 use search::{Search, SearchRow};
 use settings::SettingsBridge;
+pub(in crate::app) use shortcuts::Prepared as PreparedShortcuts;
+use shortcuts::Shortcuts;
 use tray::Tray;
 
 mod timer;
@@ -431,6 +434,7 @@ pub(crate) struct MainWindow {
     /// ([`super::EXIT_MESSAGE`]).
     exit_message: u32,
     pub(super) tray: Tray,
+    pub(super) shortcuts: Shortcuts,
     pub(super) settings: SettingsBridge,
     /// A Paste whose thread reads the clipboard.
     pasting: RefCell<HashMap<OperationId, PathBuf>>,
@@ -584,6 +588,7 @@ impl MainWindow {
             taskbar_button_created: win::instance::register_message("TaskbarButtonCreated"),
             exit_message: win::instance::register_message(super::EXIT_MESSAGE),
             tray: Tray::new(),
+            shortcuts: Shortcuts::new(),
             settings: SettingsBridge::new(),
             pasting: RefCell::new(HashMap::new()),
             shutdown: RefCell::new(None),
@@ -608,7 +613,7 @@ impl MainWindow {
             window.apply(hwnd, accepted);
         }
         if instance == Instance::First {
-            window.tray.register_saved_shortcut(&window, hwnd);
+            window.shortcuts.start(&window, hwnd);
             window.check_for_updates();
             window.open_file_operations(hwnd);
             let registration =
@@ -1748,10 +1753,17 @@ impl MainWindow {
                     self.open_dialog(hwnd, DialogId::About, &about);
                     return;
                 }
-                CommandId::Open if mode == Mode::TwoPanels => {
-                    return self.controls().panels.open_panel_entries(self, active);
-                }
                 CommandId::Open => return self.act_on_selected(list, EntryAction::Open),
+                CommandId::ShowInCommander => {
+                    if let Some(entry) =
+                        self.selected_source(list).and_then(|entries| entries.one())
+                    {
+                        self.controls()
+                            .panels
+                            .show_entry_in_commander(self, hwnd, entry);
+                    }
+                    return;
+                }
                 CommandId::OpenFileLocation => {
                     return self.act_on_selected(list, EntryAction::OpenFileLocation);
                 }
@@ -1839,7 +1851,8 @@ impl MainWindow {
                 CommandId::Inspector => self.model.borrow_mut().toggle_inspector(),
                 CommandId::ClearFilters => self.model.borrow_mut().clear_filters(),
                 CommandId::Settings => return self.settings.open_settings(self, hwnd),
-                CommandId::ShowWindow => return self.show_window(hwnd),
+                CommandId::ShowSearch => return self.show_mode(hwnd, Mode::Search),
+                CommandId::ShowCommander => return self.show_mode(hwnd, Mode::TwoPanels),
                 CommandId::CopyToFolder | CommandId::MoveToFolder if mode == Mode::TwoPanels => {
                     return self.controls().panels.transfer(
                         self,
@@ -2360,7 +2373,7 @@ impl MainWindow {
         if !self.update_live() {
             return;
         }
-        self.tray.finish_shortcut_start(self, hwnd);
+        self.shortcuts.poll_start(self, hwnd);
         self.settings.post_settings_reply();
         {
             let mut work = self.created().work.borrow_mut();
@@ -2897,10 +2910,7 @@ impl MainWindow {
                 }
             }
             KeyAction::Panel(key) => {
-                return self
-                    .controls()
-                    .panels
-                    .on_panel_key(self, hwnd, target, keystroke, key);
+                return self.controls().panels.on_panel_key(self, hwnd, target, key);
             }
         }
         true
@@ -2974,10 +2984,6 @@ impl MainWindow {
             return;
         };
         self.open_entries(list, action, entries);
-    }
-
-    fn act_on_entries(&self, list: List, action: EntryAction, entries: Vec<Selected>) {
-        self.open_entries(list, action, Entries::Ready(entries));
     }
 
     fn open_entries(&self, list: List, action: EntryAction, entries: Entries) {
@@ -4022,9 +4028,17 @@ impl MainWindow {
         win::dialog::error_box(Some(hwnd), text, &title);
     }
 
+    fn show_mode(&self, hwnd: Hwnd, mode: Mode) {
+        if hwnd.is_enabled() {
+            let accepted = self.model.borrow_mut().show_mode(mode);
+            self.apply(hwnd, accepted);
+        }
+        self.show_window(hwnd);
+    }
+
     /// Brings the window forward with the search box focused and its text
     /// selected, so the person types the next search at once (DESIGN.md: Window
-    /// lifetime, C24), or in Two panels with the left panel's list focused
+    /// lifetime, C24), or in Two panels with the active panel's list focused
     /// (DESIGN.md: Two panels' window). While a dialog is open, the dialog
     /// keeps the focus.
     fn show_window(&self, hwnd: Hwnd) {
@@ -4368,7 +4382,7 @@ impl WindowProc for MainWindow {
                         .unwrap_or(self.home())
                         .focus();
                 }
-                if self.tray.failure.borrow().is_some() {
+                if self.shortcuts.has_failures() {
                     hwnd.post(DEFERRED);
                 }
                 Some(LRESULT(0))
@@ -4460,7 +4474,7 @@ impl WindowProc for MainWindow {
                     self.controls().filters.range_list.set(RangeList::Idle);
                     self.controls().filters.choose_custom(self, hwnd, range);
                 }
-                self.tray.show_shortcut_failure(self, hwnd);
+                self.shortcuts.show_failures(self, hwnd);
                 self.run_modal_steps(hwnd);
                 Some(LRESULT(0))
             }
@@ -4699,8 +4713,7 @@ impl WindowProc for MainWindow {
                 });
                 let (settings_finished, cleanup) = self.created().work.borrow_mut().close();
                 let cleanup = win::work::spawn(cleanup);
-                self.tray.shortcut.replace(None);
-                self.tray.starting_shortcut.replace(None);
+                self.shortcuts.close();
                 // No Viewer outlives the message loop.
                 self.viewers.close_all();
                 let error_log = self.settings_file.with_file_name("ui-error.log");
@@ -4716,10 +4729,10 @@ impl WindowProc for MainWindow {
                 self.shutdown.replace(Some(shutdown));
                 Some(LRESULT(0))
             }
-            Message::Hotkey => {
-                let accepted = self.model.borrow_mut().show_mode(Mode::Search);
-                self.apply(hwnd, accepted);
-                self.show_window(hwnd);
+            Message::Hotkey(id) => {
+                if let Some(mode) = self.shortcuts.mode(id) {
+                    self.show_mode(hwnd, mode);
+                }
                 Some(LRESULT(0))
             }
             // A second start with `--location`, such as from Total Commander
@@ -4735,7 +4748,7 @@ impl WindowProc for MainWindow {
             }
             Message::CopyData { .. } => None,
             Message::Other(msg) if msg == self.show_message => {
-                self.show_window(hwnd);
+                self.show_mode(hwnd, Mode::Search);
                 Some(LRESULT(0))
             }
             // A start of another program (DESIGN.md: Window lifetime).

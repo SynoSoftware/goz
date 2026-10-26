@@ -48,10 +48,10 @@ use windows::core::{HSTRING, IUnknown, Interface, PCWSTR, w};
 mod windows_shortcut;
 
 pub(crate) fn set_windows_shortcut_disabled(
-    key: Option<u8>,
+    keys: &[u8],
     worker: &super::work::OffThread,
 ) -> io::Result<()> {
-    windows_shortcut::set_disabled(key, worker)
+    windows_shortcut::set_disabled(keys, worker)
 }
 
 /// Starts COM on this thread in the apartment model, which the shell's

@@ -513,7 +513,8 @@ fn operation_status(model: &Model, numbers: &dyn Numbers) -> (String, JobProgres
     if operation.is_transfer() {
         return (String::new(), JobProgress::None);
     }
-    let (mut text, bar) = file_operations::status_line(model.strings(), numbers, operation);
+    let (mut text, bar) =
+        file_operations::status_line(model.strings(), numbers, operation, model.operation_speed());
     let backlog = model.operation_backlog();
     if !backlog.is_empty() {
         if matches!(

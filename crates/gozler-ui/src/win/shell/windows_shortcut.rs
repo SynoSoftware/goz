@@ -18,8 +18,24 @@ struct Setting {
 
 #[derive(Serialize, Deserialize)]
 struct Backup {
-    key: u8,
+    keys: Vec<u8>,
     previous: Option<Setting>,
+}
+
+fn backup(text: &str) -> io::Result<Backup> {
+    #[derive(Deserialize)]
+    struct LegacyBackup {
+        key: u8,
+        previous: Option<Setting>,
+    }
+    serde_json::from_str(text)
+        .or_else(|_| {
+            serde_json::from_str::<LegacyBackup>(text).map(|saved| Backup {
+                keys: vec![saved.key],
+                previous: saved.previous,
+            })
+        })
+        .map_err(io::Error::other)
 }
 
 fn read(
@@ -79,48 +95,50 @@ fn write(value: Option<&Setting>, _worker: &super::super::work::OffThread) -> io
     })
 }
 
-fn disabled(previous: Option<&Setting>, key: u8) -> Setting {
+fn disabled(previous: Option<&Setting>, keys: &[u8]) -> Setting {
     let mut value = previous.cloned().unwrap_or(Setting {
         kind: REG_SZ.0,
         text: String::new(),
     });
-    if !value
-        .text
-        .bytes()
-        .any(|letter| letter.eq_ignore_ascii_case(&key))
-    {
-        value.text.push(char::from(key));
+    for &key in keys {
+        if !value
+            .text
+            .bytes()
+            .any(|letter| letter.eq_ignore_ascii_case(&key))
+        {
+            value.text.push(char::from(key));
+        }
     }
     value
 }
 
 fn restored(current: Option<Setting>, saved: Backup) -> Option<Setting> {
-    if current.as_ref() == Some(&disabled(saved.previous.as_ref(), saved.key)) {
+    if current.as_ref() == Some(&disabled(saved.previous.as_ref(), &saved.keys)) {
         saved.previous
     } else {
         current.map(|mut value| {
-            value
-                .text
-                .retain(|letter| !letter.eq_ignore_ascii_case(&char::from(saved.key)));
+            value.text.retain(|letter| {
+                !saved
+                    .keys
+                    .iter()
+                    .any(|key| letter.eq_ignore_ascii_case(&char::from(*key)))
+            });
             value
         })
     }
 }
 
-pub(super) fn set_disabled(
-    key: Option<u8>,
-    worker: &super::super::work::OffThread,
-) -> io::Result<()> {
+pub(super) fn set_disabled(keys: &[u8], worker: &super::super::work::OffThread) -> io::Result<()> {
     let saved = read(SETTINGS, BACKUP, worker)?
-        .map(|value| serde_json::from_str::<Backup>(&value.text).map_err(io::Error::other))
+        .map(|value| backup(&value.text))
         .transpose()?;
-    if key.is_none() && saved.is_none() {
+    if keys.is_empty() && saved.is_none() {
         return Ok(());
     }
     let mut current = read(EXPLORER, DISABLED, worker)?;
     let mut owned = false;
     if let Some(saved) = saved {
-        if !saved.key.is_ascii_alphanumeric()
+        if saved.keys.iter().any(|key| !key.is_ascii_alphanumeric())
             || saved
                 .previous
                 .as_ref()
@@ -128,7 +146,7 @@ pub(super) fn set_disabled(
         {
             return Err(io::ErrorKind::InvalidData.into());
         }
-        if key == Some(saved.key) {
+        if keys == saved.keys {
             owned = true;
         } else {
             current = restored(current, saved);
@@ -136,12 +154,23 @@ pub(super) fn set_disabled(
             delete_value(SETTINGS, BACKUP)?;
         }
     }
-    if let Some(key) = key {
-        let changed = disabled(current.as_ref(), key);
+    if !keys.is_empty() {
+        let changed = disabled(current.as_ref(), keys);
         if current.as_ref() != Some(&changed) {
             if !owned {
                 let saved = serde_json::to_string(&Backup {
-                    key,
+                    keys: keys
+                        .iter()
+                        .copied()
+                        .filter(|key| {
+                            current.as_ref().is_none_or(|value| {
+                                !value
+                                    .text
+                                    .bytes()
+                                    .any(|letter| letter.eq_ignore_ascii_case(key))
+                            })
+                        })
+                        .collect(),
                     previous: current,
                 })
                 .map_err(io::Error::other)?;
@@ -169,7 +198,7 @@ mod tests {
 
     #[test]
     fn windows_shortcut_restoration_preserves_prior_and_external_settings() {
-        assert_eq!(disabled(Some(&text("Rs")), b'S'), text("Rs"));
+        assert_eq!(disabled(Some(&text("Rs")), b"S"), text("Rs"));
         for (previous, current, expected) in [
             (None, Some(text("S")), None),
             (Some(text("")), Some(text("S")), Some(text(""))),
@@ -181,7 +210,7 @@ mod tests {
                 restored(
                     current,
                     Backup {
-                        key: b'S',
+                        keys: vec![b'S'],
                         previous
                     }
                 ),

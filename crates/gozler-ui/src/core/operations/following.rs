@@ -19,6 +19,7 @@ pub(crate) enum FollowChange {
 
 pub(crate) struct Presentation {
     pub(crate) status: Option<StatusOperation>,
+    pub(crate) speed: Option<Speed>,
     pub(crate) progress: OperationProgress,
     pub(crate) view: Arc<View>,
     pub(crate) caption: Option<crate::core::status_transfer::Caption>,
@@ -286,6 +287,7 @@ impl Following {
         let caption = self.operations.transfer_caption(&self.strings, numbers);
         let presentation = Arc::new(Presentation {
             status,
+            speed,
             progress,
             view,
             caption,

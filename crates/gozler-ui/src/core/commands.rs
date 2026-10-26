@@ -23,6 +23,7 @@ use serde::{Deserialize, Serialize};
 pub(crate) enum CommandId {
     Open,
     OpenFileLocation,
+    ShowInCommander,
     Explore,
     Properties,
     ExportResults,
@@ -49,7 +50,9 @@ pub(crate) enum CommandId {
     ClearFilters,
     SearchSyntax,
     About,
-    ShowWindow,
+    #[serde(alias = "show_window")]
+    ShowSearch,
+    ShowCommander,
     CopyToFolder,
     MoveToFolder,
     Delete,
@@ -65,9 +68,10 @@ pub(crate) enum CommandId {
 }
 
 impl CommandId {
-    pub(crate) const ALL: [CommandId; 38] = [
+    pub(crate) const ALL: [CommandId; 40] = [
         CommandId::Open,
         CommandId::OpenFileLocation,
+        CommandId::ShowInCommander,
         CommandId::Explore,
         CommandId::Properties,
         CommandId::ExportResults,
@@ -91,7 +95,8 @@ impl CommandId {
         CommandId::ClearFilters,
         CommandId::SearchSyntax,
         CommandId::About,
-        CommandId::ShowWindow,
+        CommandId::ShowSearch,
+        CommandId::ShowCommander,
         CommandId::CopyToFolder,
         CommandId::MoveToFolder,
         CommandId::Delete,
@@ -112,6 +117,7 @@ impl CommandId {
         let (label, shortcuts, enabled, checked): (_, &'static [Keystroke], Enabled, Checked) =
             match self {
                 C::Open => ("command.open", &[], open, None),
+                C::ShowInCommander => ("command.show_in_commander", &[], one_file, None),
                 C::OpenFileLocation => (
                     "command.open_file_location",
                     const { &[Keystroke::ctrl(Key::Enter)] },
@@ -214,12 +220,8 @@ impl CommandId {
                     None,
                 ),
                 C::About => ("command.about", &[], always, None),
-                C::ShowWindow => (
-                    "command.show_window",
-                    &[],
-                    |s| s.model.choices().keep_running,
-                    None,
-                ),
+                C::ShowSearch => ("command.show_search", &[], always, None),
+                C::ShowCommander => ("command.show_commander", &[], always, None),
                 // Delete, Cut and Paste are keys of the list (control_key).
                 C::CopyToFolder => ("command.copy_to_folder", &[], transfer, None),
                 C::MoveToFolder => ("command.move_to_folder", &[], transfer, None),
@@ -276,6 +278,7 @@ impl CommandId {
         use CommandId as C;
         Some(match self {
             C::Open => Glyph::OpenFile,
+            C::ShowInCommander => Glyph::Folder,
             C::OpenFileLocation => Glyph::FolderOpen,
             C::Explore => Glyph::FileExplorer,
             C::Properties => Glyph::Info,
@@ -291,7 +294,7 @@ impl CommandId {
             C::Refresh => Glyph::Refresh,
             C::SearchSyntax => Glyph::Help,
             C::About => Glyph::Info,
-            C::ShowWindow => Glyph::BackToWindow,
+            C::ShowSearch | C::ShowCommander => Glyph::BackToWindow,
             C::CopyToFolder => Glyph::CopyTo,
             C::MoveToFolder => Glyph::MoveToFolder,
             C::Synchronize => Glyph::Refresh,
@@ -326,7 +329,8 @@ impl CommandId {
             | C::Language
             | C::SearchSyntax
             | C::About
-            | C::ShowWindow
+            | C::ShowSearch
+            | C::ShowCommander
             | C::FileOperations
             | C::TwoPanels
             | C::Synchronize
@@ -338,6 +342,7 @@ impl CommandId {
             C::Open | C::Properties | C::CopyToFolder | C::MoveToFolder | C::Delete => true,
             C::ClearSelection | C::View | C::Edit | C::NewFolder => mode == Mode::TwoPanels,
             C::OpenFileLocation
+            | C::ShowInCommander
             | C::Explore
             | C::ExportResults
             | C::Copy
@@ -785,9 +790,10 @@ pub(crate) enum PanelKey {
     /// `Esc` in the list: the quick search box closes, else the selection
     /// is cleared.
     Escape,
-    /// `Insert` and `Space`: the focused row is selected or cleared, and
-    /// the focus moves down.
+    /// `Insert` toggles the focused row and moves the focus down.
     Toggle,
+    /// Space types into quick search; otherwise Windows handles selection.
+    Space,
     /// `Up` and `Down`: the previous or the next match while the quick
     /// search box is open; otherwise the list's own keys, which move the
     /// selection with the focus, as in Search.
@@ -936,7 +942,7 @@ const PANEL_KEYS: &[(Keystroke, KeyAction)] = {
         ),
         (Keystroke::plain(Key::Escape), P(PanelKey::Escape)),
         (Keystroke::plain(Key::Insert), P(PanelKey::Toggle)),
-        (Keystroke::plain(Key::Space), P(PanelKey::Toggle)),
+        (Keystroke::plain(Key::Space), P(PanelKey::Space)),
         // As in Search's list.
         (
             Keystroke::plain(Key::Delete),
@@ -1108,6 +1114,7 @@ impl MenuItem {
             }
             Self::Run(
                 C::Open
+                | C::ShowInCommander
                 | C::OpenFileLocation
                 | C::Explore
                 | C::Properties
@@ -1364,6 +1371,7 @@ fn every_menu() -> Vec<Menu> {
                 run(&[
                     C::Open,
                     C::OpenFileLocation,
+                    C::ShowInCommander,
                     C::View,
                     C::Edit,
                     C::Properties,
@@ -1470,7 +1478,7 @@ pub(crate) fn row_menu() -> Vec<Vec<MenuItem>> {
     use CommandId as C;
     let run = |commands: &[CommandId]| commands.iter().map(|c| MenuItem::Run(*c)).collect();
     vec![
-        run(&[C::Open, C::OpenFileLocation, C::Explore]),
+        run(&[C::Open, C::OpenFileLocation, C::ShowInCommander, C::Explore]),
         run(&[
             C::Cut,
             C::Copy,
@@ -1529,11 +1537,13 @@ pub(crate) fn panel_menu() -> Vec<Vec<MenuItem>> {
     ]
 }
 
-/// The tray icon's menu (DESIGN.md: Window lifetime). Its first item, Show
-/// window, is the default, which a click on the icon also runs.
+/// A click on the tray icon runs its default command, Show Search.
 pub(crate) fn tray_menu() -> Vec<Vec<MenuItem>> {
     vec![
-        vec![MenuItem::Run(CommandId::ShowWindow)],
+        vec![
+            MenuItem::Run(CommandId::ShowSearch),
+            MenuItem::Run(CommandId::ShowCommander),
+        ],
         vec![MenuItem::Run(CommandId::Exit)],
     ]
 }

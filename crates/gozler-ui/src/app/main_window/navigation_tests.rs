@@ -5,14 +5,14 @@ use crate::core::fetch::{Chunk, Fetched, Outcome};
 use crate::core::settings::Settings;
 use crate::core::text::tests::english;
 use std::time::Duration;
-use windows::Win32::UI::Input::KeyboardAndMouse::{VK_DOWN, VK_HOME, VK_RETURN};
+use windows::Win32::UI::Input::KeyboardAndMouse::{VK_DOWN, VK_HOME};
 
 #[test]
-fn search_enter_gives_the_destination_panel_keyboard_focus() {
+fn show_in_commander_gives_the_destination_panel_keyboard_focus() {
     win::shell::initialize_com();
     win::shell::initialize_ole();
     win::controls::initialize();
-    let class = "gozler.test.search-enter-focus";
+    let class = "gozler.test.show-in-commander-focus";
     win::window::register_class::<MainWindow>(
         class,
         crate::core::ids::IconId::Gozler.id(),
@@ -95,7 +95,8 @@ fn search_enter_gives_the_destination_panel_keyboard_focus() {
             "the native navigation state must finish within the test budget"
         );
     };
-    win::window::post_key(search, VK_RETURN);
+    window.controls().search.list.select_only(Some(0));
+    window.run(hwnd, MenuItem::Run(CommandId::ShowInCommander));
     until(&|| window.model.borrow().mode() == Mode::TwoPanels);
     assert!(window.model.borrow().mode() == Mode::TwoPanels);
     let side = window.model.borrow().panels().active();
@@ -105,13 +106,10 @@ fn search_enter_gives_the_destination_panel_keyboard_focus() {
     assert_eq!(
         Hwnd::focused(),
         Some(window.home()),
-        "Enter must give the panel its keyboard navigation, rather than leave focus in Search"
+        "Show in Commander must give the destination panel its keyboard focus"
     );
     until(&|| list.focused() == Some(0));
     win::window::post_key(list.hwnd(), VK_DOWN);
     until(&|| list.focused() == Some(1));
-    win::window::post_key(list.hwnd(), VK_RETURN);
-    let child = fixture.join("child");
-    until(&|| Path::new(window.model.borrow().panels().panel(side).folder()) == child.as_path());
     hwnd.kill_timer(0x7fff);
 }

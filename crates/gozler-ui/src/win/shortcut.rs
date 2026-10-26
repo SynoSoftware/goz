@@ -1,10 +1,11 @@
-//! The shortcut that shows Gozler from any program (DESIGN.md: The Keyboard
+//! The shortcuts that show Search and Commander (DESIGN.md: The Keyboard
 //! page). A shortcut with `Ctrl`, `Alt` and `Shift` only is a `RegisterHotKey`
 //! on the main window, which then receives `WM_HOTKEY`. A shortcut with the
-//! Windows key is a low-level keyboard hook on a thread of its own, because
+//! Windows key uses one shared keyboard hook on its own thread, because
 //! Explorer registers most Windows-key combinations, and Windows removes a
 //! low-level hook whose callback waits for a busy window thread. The hook posts
-//! the show message to the window. While Settings' shortcut box has the focus,
+//! `WM_HOTKEY` with the registration's ID to the window, just as RegisterHotKey
+//! does. While a Settings shortcut box has the focus,
 //! a hook of the same kind gives it the keys pressed, the Windows key
 //! included, which no Windows control can enter.
 
@@ -13,9 +14,10 @@ use super::keys::{key_of, virtual_key};
 use super::wake::OpenWaker;
 use crate::core::commands::Keystroke;
 use crate::core::shortcuts::ShowShortcut;
-use std::cell::{Cell, RefCell};
+use std::cell::RefCell;
+use std::rc::{Rc, Weak};
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicUsize, Ordering};
-use std::sync::{Arc, mpsc};
+use std::sync::{Arc, Mutex, mpsc};
 use windows::Win32::Foundation::{
     CloseHandle, E_FAIL, E_OUTOFMEMORY, ERROR_HOTKEY_ALREADY_REGISTERED, HANDLE, HWND, LPARAM,
     LRESULT, WAIT_OBJECT_0, WPARAM,
@@ -43,19 +45,29 @@ const UNASSIGNED: VIRTUAL_KEY = VIRTUAL_KEY(0xE8);
 
 /// The live shortcut, unregistered on drop; the saved choice owns the
 /// separate Explorer setting for Windows-key shortcuts.
-pub(crate) struct Registration(ShowShortcut, Kind);
+pub(crate) struct Registration {
+    shortcut: ShowShortcut,
+    id: i32,
+    kind: Kind,
+}
 
 impl Registration {
     /// The shortcut that Windows gives Gozler.
     pub(crate) fn shortcut(&self) -> ShowShortcut {
-        self.0
+        self.shortcut
+    }
+
+    pub(crate) fn id(&self) -> i32 {
+        self.id
     }
 
     /// Polls native installation without waiting; a prepared hook is inactive.
     pub(crate) fn poll(&mut self) -> Option<Result<(), RegisterError>> {
-        match &mut self.1 {
+        match &mut self.kind {
             Kind::Hotkey { .. } => Some(Ok(())),
             Kind::Hook { hook, .. } => hook
+                .thread
+                .borrow_mut()
                 .poll()
                 .map(|answer| answer.map_err(RegisterError::Failed)),
         }
@@ -63,7 +75,7 @@ impl Registration {
 
     /// Call after [`Self::poll`] succeeds to accept the prepared hook's choice.
     pub(crate) fn activate(&self) {
-        if let Kind::Hook { enabled, .. } = &self.1 {
+        if let Kind::Hook { enabled, .. } = &self.kind {
             enabled.store(true, Ordering::Release);
         }
     }
@@ -72,12 +84,21 @@ impl Registration {
 enum Kind {
     Hotkey {
         window: Hwnd,
-        id: i32,
     },
     Hook {
-        hook: HookThread,
+        hook: Rc<GlobalHook>,
         enabled: Arc<AtomicBool>,
     },
+}
+
+#[derive(Default)]
+pub(crate) struct Registry {
+    hook: Weak<GlobalHook>,
+}
+
+struct GlobalHook {
+    thread: RefCell<HookThread>,
+    targets: Arc<Mutex<Vec<Target>>>,
 }
 
 /// Deactivates delivery before asking its native hook loop to stop.
@@ -131,61 +152,98 @@ pub(crate) enum RegisterError {
 static NEXT_HOTKEY: AtomicI32 = AtomicI32::new(1);
 static NEXT_CAPTURE: AtomicUsize = AtomicUsize::new(1);
 
-/// Prepares `shortcut`, which sends `WM_HOTKEY` or `show_message` when active.
-/// Native hotkeys are ready immediately; poll and activate a Windows-key hook.
-pub(crate) fn register(
-    window: Hwnd,
-    shortcut: ShowShortcut,
-    show_message: u32,
-    answered: OpenWaker,
-) -> Result<Registration, RegisterError> {
-    let keystroke = shortcut.keystroke();
-    if !shortcut.windows() {
-        let mut modifiers = MOD_NOREPEAT;
-        for (held, modifier) in [
-            (keystroke.ctrl, MOD_CONTROL),
-            (keystroke.alt, MOD_ALT),
-            (keystroke.shift, MOD_SHIFT),
-        ] {
-            if held {
-                modifiers |= modifier;
-            }
-        }
+impl Registry {
+    /// Prepares `shortcut`, which sends `WM_HOTKEY` with its registration ID.
+    /// Native hotkeys are ready immediately; poll and activate a Windows-key hook.
+    pub(crate) fn register(
+        &mut self,
+        window: Hwnd,
+        shortcut: ShowShortcut,
+        answered: OpenWaker,
+    ) -> Result<Registration, RegisterError> {
         let id = NEXT_HOTKEY.fetch_add(1, Ordering::Relaxed);
-        let vk = u32::from(virtual_key(keystroke.key));
-        // SAFETY: plain values.
-        return match unsafe { RegisterHotKey(Some(window.0), id, modifiers, vk) } {
-            Ok(()) => Ok(Registration(shortcut, Kind::Hotkey { window, id })),
-            Err(error) if error.code() == ERROR_HOTKEY_ALREADY_REGISTERED.to_hresult() => {
-                Err(RegisterError::Taken)
+        let keystroke = shortcut.keystroke();
+        if !shortcut.windows() {
+            let mut modifiers = MOD_NOREPEAT;
+            for (held, modifier) in [
+                (keystroke.ctrl, MOD_CONTROL),
+                (keystroke.alt, MOD_ALT),
+                (keystroke.shift, MOD_SHIFT),
+            ] {
+                if held {
+                    modifiers |= modifier;
+                }
             }
-            Err(error) => Err(RegisterError::Failed(error)),
+            let vk = u32::from(virtual_key(keystroke.key));
+            // SAFETY: plain values.
+            return match unsafe { RegisterHotKey(Some(window.0), id, modifiers, vk) } {
+                Ok(()) => Ok(Registration {
+                    shortcut,
+                    id,
+                    kind: Kind::Hotkey { window },
+                }),
+                Err(error) if error.code() == ERROR_HOTKEY_ALREADY_REGISTERED.to_hresult() => {
+                    Err(RegisterError::Taken)
+                }
+                Err(error) => Err(RegisterError::Failed(error)),
+            };
+        }
+        let hook = match self.hook.upgrade() {
+            Some(hook) => hook,
+            None => {
+                let live =
+                    OpenWaker::posting(window, windows::Win32::UI::WindowsAndMessaging::WM_HOTKEY);
+                let targets = Arc::new(Mutex::new(Vec::new()));
+                let shared = Arc::clone(&targets);
+                let thread = HookThread::start(
+                    live,
+                    Some(answered),
+                    move || TARGETS.set(Some(shared)),
+                    Some(keyboard_hook),
+                )
+                .map_err(RegisterError::Failed)?;
+                let hook = Rc::new(GlobalHook {
+                    thread: RefCell::new(thread),
+                    targets,
+                });
+                self.hook = Rc::downgrade(&hook);
+                hook
+            }
         };
+        let enabled = Arc::new(AtomicBool::new(false));
+        let target = Target {
+            window: window.0.0 as isize,
+            id,
+            keystroke,
+            live: hook.thread.borrow().live.clone(),
+            enabled: Arc::clone(&enabled),
+        };
+        hook.targets
+            .lock()
+            .expect("shortcut targets are only copied or replaced")
+            .push(target);
+        Ok(Registration {
+            shortcut,
+            id,
+            kind: Kind::Hook { hook, enabled },
+        })
     }
-    let live = OpenWaker::posting(window, show_message);
-    let enabled = Arc::new(AtomicBool::new(false));
-    let target = Target {
-        window: window.0.0 as isize,
-        message: show_message,
-        keystroke,
-        live: live.clone(),
-        enabled: Arc::clone(&enabled),
-    };
-    HookThread::start(
-        live,
-        Some(answered),
-        move || TARGET.set(Some(target)),
-        Some(keyboard_hook),
-    )
-    .map(|hook| Registration(shortcut, Kind::Hook { hook, enabled }))
-    .map_err(RegisterError::Failed)
 }
 
 impl Drop for Registration {
     fn drop(&mut self) {
-        if let Kind::Hotkey { window, id } = self.1 {
-            // SAFETY: plain values.
-            let _ = unsafe { UnregisterHotKey(Some(window.0), id) };
+        match &self.kind {
+            Kind::Hotkey { window } => {
+                // SAFETY: plain values.
+                let _ = unsafe { UnregisterHotKey(Some(window.0), self.id) };
+            }
+            Kind::Hook { hook, enabled } => {
+                enabled.store(false, Ordering::Release);
+                hook.targets
+                    .lock()
+                    .expect("shortcut targets are only copied or replaced")
+                    .retain(|target| target.id != self.id);
+            }
         }
     }
 }
@@ -310,7 +368,7 @@ pub(crate) fn captured(wparam: WPARAM, lparam: LPARAM) -> Option<(usize, bool, K
 struct Target {
     /// The main window's handle, as a number, so the thread may hold it.
     window: isize,
-    message: u32,
+    id: i32,
     /// The keys besides the Windows key.
     keystroke: Keystroke,
     live: OpenWaker,
@@ -325,11 +383,10 @@ struct CaptureTarget {
 }
 
 thread_local! {
-    /// The hook thread's target, which the callback reads.
-    static TARGET: RefCell<Option<Target>> = const { RefCell::new(None) };
-    /// Whether the shortcut's key went down, so its repeats and its
-    /// release are swallowed too.
-    static SWALLOWING: Cell<bool> = const { Cell::new(false) };
+    static TARGETS: RefCell<Option<Arc<Mutex<Vec<Target>>>>> = const { RefCell::new(None) };
+    /// A physical key stays swallowed through repeats and release, even
+    /// when modifiers change or its binding is replaced while it is held.
+    static SWALLOWED: RefCell<Vec<u32>> = const { RefCell::new(Vec::new()) };
     /// A capture thread's dialog and its independent delivery lifetime.
     static CAPTURE: RefCell<Option<CaptureTarget>> = const { RefCell::new(None) };
 }
@@ -396,60 +453,73 @@ unsafe extern "system" fn keyboard_hook(code: i32, wparam: WPARAM, lparam: LPARA
         // SAFETY: the parameters are the ones Windows passed.
         unsafe { CallNextHookEx(None, code, wparam, lparam) }
     };
-    let Some(target) = TARGET.with(|target| target.borrow().clone()) else {
-        return next();
-    };
     if code != HC_ACTION as i32 {
         return next();
     }
     // SAFETY: a low-level keyboard hook's lparam points to a
     // KBDLLHOOKSTRUCT for the length of the call.
     let event = unsafe { &*(lparam.0 as *const KBDLLHOOKSTRUCT) };
-    let keystroke = target.keystroke;
-    if event.vkCode != u32::from(virtual_key(keystroke.key)) {
-        return next();
-    }
     let message = wparam.0 as u32;
     let pressed = message == WM_KEYDOWN || message == WM_SYSKEYDOWN;
     let released = message == WM_KEYUP || message == WM_SYSKEYUP;
-    let held = pressed
-        && (down(VK_LWIN) || down(VK_RWIN))
-        && down(VK_CONTROL) == keystroke.ctrl
-        && down(VK_MENU) == keystroke.alt
-        && down(VK_SHIFT) == keystroke.shift;
+    let swallowed = SWALLOWED.with(|keys| {
+        let mut keys = keys.borrow_mut();
+        let Some(index) = keys.iter().position(|key| *key == event.vkCode) else {
+            return false;
+        };
+        if released {
+            keys.remove(index);
+        }
+        true
+    });
+    if swallowed {
+        return LRESULT(1);
+    }
+    if !pressed || !(down(VK_LWIN) || down(VK_RWIN)) {
+        return next();
+    }
+    let (ctrl, alt, shift) = (down(VK_CONTROL), down(VK_MENU), down(VK_SHIFT));
+    let target = TARGETS.with(|targets| {
+        let targets = targets.borrow();
+        let targets = targets
+            .as_ref()?
+            .lock()
+            .expect("shortcut targets are only copied or replaced");
+        targets
+            .iter()
+            .find(|target| {
+                let key = target.keystroke;
+                target.enabled.load(Ordering::Acquire)
+                    && event.vkCode == u32::from(virtual_key(key.key))
+                    && (ctrl, alt, shift) == (key.ctrl, key.alt, key.shift)
+            })
+            .cloned()
+    });
+    let Some(target) = target else { return next() };
     let mut swallow = false;
-    let mut first = false;
     target.live.while_open(|| {
         if !target.enabled.load(Ordering::Acquire) {
             return;
         }
-        if released && SWALLOWING.replace(false) {
-            swallow = true;
-        } else if held {
-            swallow = true;
-            first = !SWALLOWING.replace(true);
-            if first {
-                // SAFETY: Drop closes this gate before the target can be
-                // destroyed. Posting carries no pointers and never waits.
-                let _ = unsafe {
-                    PostMessageW(
-                        Some(HWND(target.window as *mut _)),
-                        target.message,
-                        WPARAM(0),
-                        LPARAM(0),
-                    )
-                };
-            }
-        }
+        swallow = true;
+        SWALLOWED.with(|keys| keys.borrow_mut().push(event.vkCode));
+        // SAFETY: Drop closes this gate before the window can be
+        // destroyed. Posting carries no pointers and never waits.
+        let _ = unsafe {
+            PostMessageW(
+                Some(HWND(target.window as *mut _)),
+                windows::Win32::UI::WindowsAndMessaging::WM_HOTKEY,
+                WPARAM(target.id as usize),
+                LPARAM(0),
+            )
+        };
     });
     if !swallow {
         return next();
     }
-    if first {
-        // Input injection and the external hook chain run outside the gate;
-        // only a key already admitted while live reaches this point.
-        press_unassigned_key();
-    }
+    // Input injection and the external hook chain run outside the gate;
+    // only a key already admitted while live reaches this point.
+    press_unassigned_key();
     LRESULT(1)
 }
 

@@ -1911,13 +1911,9 @@ impl StatusLayout {
         wanted.min((self.middle.width - controls - indexing - gap).max(Px(0)))
     }
 
-    pub(crate) fn center_entries(&self, widths: &[Px], width: Px, dpi: Dpi) -> Vec<Rect> {
+    pub(crate) fn place_entries(&self, widths: &[Px], dpi: Dpi) -> Vec<Rect> {
         let gap = Dip(6).to_px(dpi);
-        let total = widths.iter().fold(Px(0), |sum, width| sum + *width)
-            + Px(gap.0 * widths.len().saturating_sub(1) as i32);
-        let mut x = Px((width.0 - total.0) / 2)
-            .max(self.middle.x)
-            .min((self.middle.right() - total).max(self.middle.x));
+        let mut x = self.middle.x;
         widths
             .iter()
             .map(|&width| {
@@ -2191,22 +2187,6 @@ mod tests {
     }
 
     #[test]
-    fn multiple_center_entries_are_one_centered_group() {
-        let dpi = Dpi::new(96).unwrap();
-        let (mut layout, _) = right_room();
-        layout.middle = Rect {
-            x: Px(0),
-            y: Px(3),
-            width: Px(1000),
-            height: Px(21),
-        };
-        let placed = layout.center_entries(&[Px(200), Px(300)], Px(1250), dpi);
-        assert_eq!(placed[0].x, Px(372));
-        assert_eq!(placed[1].x, Px(578));
-        assert_eq!(placed[1].right(), Px(878));
-    }
-
-    #[test]
     fn indexing_stays_readable_beside_a_cancellable_job_at_minimum_width() {
         let dpi = Dpi::new(96).unwrap();
         let captions = captions(dpi, 5.0, false);
@@ -2232,9 +2212,9 @@ mod tests {
         let wanted = layout.running_text + Px(4);
         let text = layout.job_text_width(wanted, controls, indexing, dpi);
         assert_eq!(text, Px(12));
-        let placed = layout.center_entries(&[indexing, text + controls], width, dpi);
-        assert!(placed[0].width >= captions.status.indexing);
-        assert!(placed[1].width > controls);
+        let placed = layout.place_entries(&[text + controls, indexing], dpi);
+        assert!(placed[0].width > controls);
+        assert!(placed[1].width >= captions.status.indexing);
         assert_eq!(placed[1].right(), layout.middle.right());
         assert_eq!(layout.job_text_width(wanted, controls, Px(0), dpi), wanted);
     }

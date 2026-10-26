@@ -417,18 +417,13 @@ impl CaptionTable {
                         Control(C::SearchSelectOnActivate),
                         "settings_search.select_on_activate",
                     ),
-                    (
-                        Control(C::SearchEnterPanels),
-                        "settings_search.enter_panels",
-                    ),
-                    (Control(C::SearchEnterOpen), "settings_search.enter_open"),
                     (Control(C::SearchRestore), "settings.reset"),
                 ],
                 plain: &[
                     (Control(C::SearchHeading), "settings.search"),
                     (Control(C::SearchBoxGroup), "settings_search.search_box"),
                     (Control(C::SearchResultsGroup), "settings_search.results"),
-                    (Control(C::SearchEnterLabel), "settings_search.enter_label"),
+                    (Control(C::SearchOpenNote), "settings_search.open_note"),
                 ],
             },
             DialogId::SettingsKeyboard => CaptionTable {
@@ -437,6 +432,10 @@ impl CaptionTable {
                     (
                         Control(C::KeyboardShortcutLabel),
                         "settings_keyboard.shortcut",
+                    ),
+                    (
+                        Control(C::KeyboardCommanderLabel),
+                        "settings_keyboard.commander_shortcut",
                     ),
                     (Control(C::KeyboardFilterLabel), "settings_keyboard.filter"),
                     (Control(C::KeyboardKeysLabel), "settings_keyboard.keys"),
@@ -448,9 +447,10 @@ impl CaptionTable {
                 plain: &[
                     (Control(C::KeyboardHeading), "settings.keyboard"),
                     (Control(C::KeyboardClear), "button.clear"),
+                    (Control(C::KeyboardCommanderClear), "button.clear"),
                     (
                         Control(C::KeyboardShowGroup),
-                        "settings_keyboard.show_gozler",
+                        "settings_keyboard.global_shortcuts",
                     ),
                     (
                         Control(C::KeyboardShortcutHint),

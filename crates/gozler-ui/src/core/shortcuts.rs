@@ -1,7 +1,7 @@
 //! The person's shortcuts (DESIGN.md: The Keyboard page): the shortcuts of the
 //! window's commands, which the menus and the accelerator table read, and
-//! the one shortcut that shows Gozler from any program. Both are saved in
-//! `ui.json` by the names of [`Keystroke::name`], which are the same in
+//! the shortcuts that show Search and Commander from any program. They are
+//! saved in `ui.json` by the names of [`Keystroke::name`], which are the same in
 //! every language.
 
 use super::commands::{CommandId, Entry, Key, Keystroke, MenuItem, menu_bar, row_menu};
@@ -16,7 +16,7 @@ use std::collections::BTreeMap;
 /// menu that holds it: each command of either mode's menu bar, and the
 /// context menu's commands that no menu of a bar holds (DESIGN.md: The
 /// Keyboard page). A submenu of choices, the match controls, Clear filters
-/// and the tray's Show window take none.
+/// and the tray's show commands take none.
 pub(crate) fn listed_commands() -> Vec<(CommandId, &'static str)> {
     let mut listed: Vec<(CommandId, &'static str)> = Vec::new();
     for menu in Mode::ALL.into_iter().flat_map(menu_bar) {
@@ -41,9 +41,7 @@ pub(crate) fn listed_commands() -> Vec<(CommandId, &'static str)> {
 /// Where `command` is, as the Keyboard page lists it and its messages name
 /// it, such as "Edit > Find".
 pub(crate) fn command_place(strings: &Strings, command: CommandId) -> String {
-    // Show window is the notification area menu's, which the menu bar and
-    // the context menu lack.
-    let menu = if command == CommandId::ShowWindow {
+    let menu = if matches!(command, CommandId::ShowSearch | CommandId::ShowCommander) {
         "settings_keyboard.notification_area"
     } else {
         listed_commands()
@@ -68,22 +66,27 @@ pub(crate) struct CommandRow {
     pub(crate) keys: String,
 }
 
-/// Show window with `show`, the shortcut that shows Gozler from any
-/// program, then the listed commands, each kept when its place or
-/// shortcuts contain `filter`, ignoring case, so `ctrl+e` finds the command
+/// The registered shortcuts for Search and Commander, then the listed
+/// commands, each kept when its place or shortcuts contain `filter`, ignoring
+/// case, so `ctrl+e` finds the command
 /// that has it (DESIGN.md: The Keyboard page).
 pub(crate) fn command_rows(
     strings: &Strings,
     shortcuts: &CommandShortcuts,
-    show: Option<ShowShortcut>,
+    show: [Option<ShowShortcut>; 2],
     filter: &str,
 ) -> Vec<CommandRow> {
     let filter = filter.trim().to_lowercase();
-    let show = CommandRow {
-        command: CommandId::ShowWindow,
-        place: command_place(strings, CommandId::ShowWindow),
-        keys: show.map(|show| show.text(strings)).unwrap_or_default(),
-    };
+    let show = [CommandId::ShowSearch, CommandId::ShowCommander]
+        .into_iter()
+        .zip(show)
+        .map(|(command, shortcut)| CommandRow {
+            command,
+            place: command_place(strings, command),
+            keys: shortcut
+                .map(|shortcut| shortcut.text(strings))
+                .unwrap_or_default(),
+        });
     let listed = listed_commands()
         .into_iter()
         .map(|(command, _)| CommandRow {
@@ -96,8 +99,7 @@ pub(crate) fn command_rows(
                 .collect::<Vec<_>>()
                 .join(", "),
         });
-    std::iter::once(show)
-        .chain(listed)
+    show.chain(listed)
         .filter(|row| {
             row.place.to_lowercase().contains(&filter) || row.keys.to_lowercase().contains(&filter)
         })
@@ -489,7 +491,7 @@ mod tests {
         assert_eq!(table.check(CommandId::Copy, key("F3")), Ok(()));
         assert_eq!(table.check(CommandId::Copy, key("Alt+Down")), Ok(()));
         // The list finds a command by its new key.
-        let found: Vec<CommandId> = command_rows(&strings, &table, None, " ctrl+k")
+        let found: Vec<CommandId> = command_rows(&strings, &table, [None, None], " ctrl+k")
             .into_iter()
             .map(|row| row.command)
             .collect();
