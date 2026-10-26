@@ -13,6 +13,7 @@
 //! lazily repaired: a stale singly-linked chain can cycle through reused slots,
 //! and an exact chain needs no per-candidate staleness guard at query time.
 
+use super::descriptors::DescriptorId;
 use crate::attributes::PackedAttributes;
 use crate::types::{EntryIdx, Frn, NIL};
 use core::num::NonZeroU32;
@@ -551,17 +552,12 @@ impl NameStore {
     /// Per-name table bytes (pairs + refcounts + chain heads + ranks + intern
     /// table).
     pub(crate) fn tables_mem(&self) -> ComponentBytes {
-        let intern_per = (size_of::<NameId>() + 1) as u64;
-        let intern_buckets = ((self.by_bytes.capacity() as u64 * 8) / 7).next_power_of_two();
         ComponentBytes::of_vec(&self.pairs)
             + ComponentBytes::of_vec(&self.refcount)
             + ComponentBytes::of_vec(&self.head)
             + ComponentBytes::of_vec(&self.ranks.rank)
             + ComponentBytes::of_vec(&self.ranks.by_rank)
-            + ComponentBytes {
-                used: self.by_bytes.len() as u64 * intern_per,
-                allocated: intern_buckets * intern_per,
-            }
+            + ComponentBytes::of_hash_table::<NameId>(self.by_bytes.len(), self.by_bytes.capacity())
     }
 
     /// Rewrites every chain head through an entry compaction's `remap`
@@ -612,6 +608,20 @@ impl ComponentBytes {
         ComponentBytes {
             used: v.len() as u64 * w,
             allocated: v.capacity() as u64 * w,
+        }
+    }
+
+    /// Estimates a hashbrown table of `len` buckets of `T` and the usable
+    /// `capacity` it reports. hashbrown allocates power-of-two bucket arrays
+    /// at 7/8 max load, and each bucket holds a `T`, padded, plus 1 control
+    /// byte. An estimate, but within ~2x of truth is enough to rank the table
+    /// against the other components.
+    pub(crate) fn of_hash_table<T>(len: usize, capacity: usize) -> Self {
+        let buckets = ((capacity as u64 * 8) / 7).next_power_of_two();
+        let per_bucket = (size_of::<T>() + 1) as u64;
+        ComponentBytes {
+            used: len as u64 * per_bucket,
+            allocated: buckets * per_bucket,
         }
     }
 }
@@ -797,6 +807,10 @@ pub(crate) struct EntryTable {
     /// Doubly-linked sibling chain, kept exact like `next_same`.
     next_child: Vec<EntryIdx>,
     prev_child: Vec<EntryIdx>,
+    /// Each folder's security descriptor; `None` for a file and for a folder
+    /// whose descriptor is not read. A slot's value never outlives its
+    /// entry, because it decides who sees the names in the folder.
+    descriptor: Vec<Option<DescriptorId>>,
     free: Vec<EntryIdx>,
     live: usize,
     reused: ReusedSlots,
@@ -869,6 +883,7 @@ impl EntryTable {
             self.first_child[i] = NIL;
             self.next_child[i] = NIL;
             self.prev_child[i] = NIL;
+            self.descriptor[i] = None;
             idx
         } else {
             let idx = self.frn.len() as EntryIdx;
@@ -888,6 +903,7 @@ impl EntryTable {
             push_eighth(&mut self.first_child, NIL);
             push_eighth(&mut self.next_child, NIL);
             push_eighth(&mut self.prev_child, NIL);
+            push_eighth(&mut self.descriptor, None);
             idx
         }
     }
@@ -914,6 +930,7 @@ impl EntryTable {
         self.first_child[i] = NIL;
         self.next_child[i] = NIL;
         self.prev_child[i] = NIL;
+        self.descriptor[i] = None;
         self.free.push(idx);
         self.live -= 1;
     }
@@ -1011,6 +1028,11 @@ impl EntryTable {
     }
 
     #[inline]
+    pub(crate) fn descriptor(&self, idx: EntryIdx) -> Option<DescriptorId> {
+        self.descriptor[idx as usize]
+    }
+
+    #[inline]
     pub(crate) fn set_parent(&mut self, idx: EntryIdx, parent: EntryIdx) {
         self.parent[idx as usize] = parent;
     }
@@ -1080,6 +1102,14 @@ impl EntryTable {
     pub(crate) fn set_prev_child(&mut self, idx: EntryIdx, prev: EntryIdx) {
         self.prev_child[idx as usize] = prev;
     }
+    #[inline]
+    pub(crate) fn set_descriptor(&mut self, idx: EntryIdx, descriptor: Option<DescriptorId>) {
+        self.descriptor[idx as usize] = descriptor;
+    }
+    /// Every slot's descriptor, for a rewrite of all of them at once.
+    pub(crate) fn descriptors_mut(&mut self) -> &mut [Option<DescriptorId>] {
+        &mut self.descriptor
+    }
 
     /// Whether a removed entry left a slot that [`Self::compact`] would
     /// return.
@@ -1117,6 +1147,7 @@ impl EntryTable {
         compact_column(&mut self.first_child, &remap, live, link);
         compact_column(&mut self.next_child, &remap, live, link);
         compact_column(&mut self.prev_child, &remap, live, link);
+        compact_column(&mut self.descriptor, &remap, live, |id| id);
         self.free.clear();
         // The kept slots name slots that moved; no mark from before outlives
         // the compaction, because it gives the index a new instance.
@@ -1146,6 +1177,7 @@ impl EntryTable {
             + ComponentBytes::of_vec(&self.first_child)
             + ComponentBytes::of_vec(&self.next_child)
             + ComponentBytes::of_vec(&self.prev_child)
+            + ComponentBytes::of_vec(&self.descriptor)
             + ComponentBytes::of_vec(&self.free)
     }
 
@@ -1169,6 +1201,7 @@ impl EntryTable {
         shrink_vec(&mut self.first_child);
         shrink_vec(&mut self.next_child);
         shrink_vec(&mut self.prev_child);
+        shrink_vec(&mut self.descriptor);
         shrink_vec(&mut self.free);
     }
 }
@@ -1331,16 +1364,6 @@ impl FrnMap {
     }
 }
 
-/// Estimates a hash map's bytes. hashbrown allocates power-of-two bucket
-/// arrays at 7/8 max load; estimate from the usable capacity it reports. Each
-/// bucket holds a (key, value) pair, padded, plus 1 control byte. An estimate,
-/// but within ~2x of truth is enough to rank the map against the other
-/// components.
 fn hash_map_memory<K>(m: &FxHashMap<K, EntryIdx>) -> ComponentBytes {
-    let buckets = ((m.capacity() as u64 * 8) / 7).next_power_of_two();
-    let per_bucket = (size_of::<(K, EntryIdx)>() + 1) as u64;
-    ComponentBytes {
-        used: m.len() as u64 * per_bucket,
-        allocated: buckets * per_bucket,
-    }
+    ComponentBytes::of_hash_table::<(K, EntryIdx)>(m.len(), m.capacity())
 }

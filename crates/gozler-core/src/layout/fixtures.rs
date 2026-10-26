@@ -12,8 +12,8 @@ use super::{FILE_LAYOUT_NAME_ENTRY_DOS, FILE_LAYOUT_NAME_ENTRY_PRIMARY, LayoutFi
 use crate::types::Frn;
 use crate::wtf8;
 
-/// Size of the `FILE_LAYOUT_INFO_ENTRY` block the builder emits (the legacy
-/// "all fields up to Usn" length; the parser only reads the first 24 bytes).
+/// Size of the `FILE_LAYOUT_INFO_ENTRY` block the builder emits: the legacy
+/// "all fields up to Usn" length.
 const INFO_ENTRY_LEN: usize = 56;
 
 /// One hard-link name in a fixture file.
@@ -62,7 +62,8 @@ impl LayoutNameFixture {
     }
 }
 
-/// Extra-info entry carrying the creation and last-write times.
+/// Extra-info entry carrying the creation and last-write times, the
+/// `SecurityId` and the `Usn`.
 #[derive(Clone, Debug)]
 pub struct LayoutInfoFixture {
     /// `LastWriteTime` as a Windows FILETIME.
@@ -70,6 +71,10 @@ pub struct LayoutInfoFixture {
     /// `CreationTime`, one tick before `mtime`, so a parser that swaps the
     /// two fails.
     pub created: i64,
+    /// `SecurityId`, written at offset 44.
+    pub security_id: u32,
+    /// `Usn`, written at offset 48.
+    pub usn: i64,
 }
 
 impl LayoutInfoFixture {
@@ -77,6 +82,8 @@ impl LayoutInfoFixture {
         Self {
             mtime,
             created: mtime.wrapping_sub(1),
+            security_id: 0x0102,
+            usn: 0x0000_0012_3456_7890,
         }
     }
 }
@@ -162,6 +169,8 @@ impl LayoutFileFixture {
             size,
             mtime_ft,
             created_ft: self.info.as_ref().map(|i| i.created),
+            security_id: self.info.as_ref().map(|i| i.security_id),
+            usn: self.info.as_ref().map(|i| i.usn),
             names,
         }
     }
@@ -257,14 +266,16 @@ fn append_file(buf: &mut Vec<u8>, entry_off: usize, file: &LayoutFileFixture) {
         let rel = (buf.len() - entry_off) as u32;
         patch_u32(buf, extra_info_pos, rel);
         patch_u32(buf, extra_info_len_pos, INFO_ENTRY_LEN as u32);
-        // FILE_LAYOUT_INFO_ENTRY.BasicInformation: the parser reads the first
-        // 24 bytes (CreationTime, LastAccessTime, LastWriteTime).
+        // FILE_LAYOUT_INFO_ENTRY.BasicInformation (40 bytes), then OwnerId.
         push_i64(buf, info.created); // CreationTime
         push_i64(buf, 0); // LastAccessTime
         push_i64(buf, info.mtime); // LastWriteTime
-        // Remainder up to INFO_ENTRY_LEN (ChangeTime, attrs, ids, Usn): the
-        // parser never reads these; zeros keep offsets honest.
-        buf.resize(buf.len() + (INFO_ENTRY_LEN - 24), 0);
+        push_i64(buf, 0); // ChangeTime
+        push_u32(buf, 0); // FileAttributes
+        push_u32(buf, 0); // padding
+        push_u32(buf, 0); // OwnerId
+        push_u32(buf, info.security_id); // SecurityId
+        push_i64(buf, info.usn); // Usn
     }
 
     // Stream chain.

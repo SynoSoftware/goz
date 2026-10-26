@@ -183,6 +183,7 @@ mod tests {
             delete_of_unknown: 0,
             stale_slots: 0,
             link_reconciles_dropped: 0,
+            descriptor_reads_failed: 0,
             memory: None,
         }
     }

@@ -19,7 +19,7 @@ use gozler_core::usn::record::{
     USN_REASON_BASIC_INFO_CHANGE, USN_REASON_CLOSE, USN_REASON_DATA_EXTEND,
     USN_REASON_DATA_OVERWRITE, USN_REASON_DATA_TRUNCATION, USN_REASON_FILE_CREATE,
     USN_REASON_FILE_DELETE, USN_REASON_HARD_LINK_CHANGE, USN_REASON_RENAME_NEW_NAME,
-    USN_REASON_RENAME_OLD_NAME,
+    USN_REASON_RENAME_OLD_NAME, USN_REASON_SECURITY_CHANGE,
 };
 use gozler_core::usn::walk_journal_buffer;
 use gozler_winfs::{
@@ -32,7 +32,7 @@ use crate::pulse::TailPulse;
 use crate::volume_state::{Owed, VolumeState};
 
 /// Reason bits we ask the kernel to report: everything that changes a name,
-/// a hard link, or a file's size/timestamps.
+/// a hard link, a file's size/timestamps, or its permissions.
 const REASON_MASK: u32 = USN_REASON_FILE_CREATE
     | USN_REASON_FILE_DELETE
     | USN_REASON_RENAME_OLD_NAME
@@ -42,6 +42,7 @@ const REASON_MASK: u32 = USN_REASON_FILE_CREATE
     | USN_REASON_DATA_OVERWRITE
     | USN_REASON_DATA_EXTEND
     | USN_REASON_DATA_TRUNCATION
+    | USN_REASON_SECURITY_CHANGE
     | USN_REASON_CLOSE;
 
 /// Why the tail rebuilds its volume's index. The log names it, and a volume
@@ -567,6 +568,8 @@ fn rescan(
     };
 
     let entries = built.index.len();
+    let descriptor_reads = built.descriptor_reads;
+    let descriptor_reads_failed = built.index.stats().descriptor_reads_failed;
     building.finish(built, &journal);
     // The entries the rules removed left their names behind.
     state.compact_index();
@@ -576,6 +579,8 @@ fn rescan(
             tracing::info!(
                 volume = %state.mount_prefix(),
                 entries,
+                descriptor_reads,
+                descriptor_reads_failed,
                 "index built; tailing the journal"
             );
             Some(ReadPosition::at(c, state.filesystem, handle))

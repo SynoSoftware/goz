@@ -18,5 +18,6 @@ pub mod fixtures;
 
 pub use ops::{UsnOp, ops_for};
 pub use record::{
-    EnumWalk, JournalWalk, ParsedUsnRecord, WalkError, walk_enum_buffer, walk_journal_buffer,
+    EnumWalk, JournalWalk, ParsedUsnRecord, WalkError, record_usn, walk_enum_buffer,
+    walk_journal_buffer,
 };

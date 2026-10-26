@@ -81,6 +81,8 @@ pub fn walk_listing_buffer(folder: Frn, buf: &[u8]) -> Result<Vec<LayoutFile>, L
                     .then(|| raw.end_of_file.get().max(0) as u64),
                 mtime_ft: Some(raw.last_write_time.get()),
                 created_ft: Some(raw.creation_time.get()),
+                security_id: None,
+                usn: None,
                 names: vec![LayoutName {
                     parent_frn: folder,
                     name,
@@ -362,6 +364,8 @@ mod tests {
                     size: None,
                     mtime_ft: Some(133_800_000_000_000_000),
                     created_ft: Some(133_799_999_999_999_999),
+                    security_id: None,
+                    usn: None,
                     names: vec![name("src")],
                 },
                 LayoutFile {
@@ -370,6 +374,8 @@ mod tests {
                     size: Some(4096),
                     mtime_ft: Some(133_800_000_000_000_000),
                     created_ft: Some(133_799_999_999_999_999),
+                    security_id: None,
+                    usn: None,
                     names: vec![name("a.txt")],
                 },
             ]

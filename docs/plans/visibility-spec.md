@@ -302,7 +302,7 @@ allow. Two things follow for the window:
   would otherwise let any user count hidden entries, one pattern at a time,
   until the counts spell their names. Any other user's preview line shows
   the refusal, as it shows the service's other refusals.
-- Settings > Drives and service shows "Users and groups who see every file"
+- Settings > Visibility shows "Users and groups who see every file"
   as a list with Add and Remove, where Add opens Windows' "Select Users or
   Groups" dialog, the one Windows' own permission editors use. Above the
   list, a check box "Every user sees every file" is checked when the list

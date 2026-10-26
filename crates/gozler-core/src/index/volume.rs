@@ -19,7 +19,12 @@
 //!   a folder's size slot holds the sum of the known sizes of the files below
 //!   it, and every change adds its difference to each folder above it, so a
 //!   folder's size costs no memory and no walk of its contents.
+//! - A folder's descriptor is its own. A slot that a new entry reuses, or
+//!   that compaction moves, never carries another folder's descriptor, and a
+//!   folder whose permissions changed has none until it is read again, so no
+//!   user sees its entries by another folder's rights.
 
+use super::descriptors::DescriptorTable;
 use super::store::{
     CompactedNames, ComponentBytes, EntryFlags, EntryTable, FrnMap, IdWidth, MTIME_UNKNOWN, NameId,
     NamePair, NameRanks, NameStore, SIZE_UNKNOWN, hash_bytes, moved,
@@ -128,6 +133,12 @@ pub struct IndexStats {
     /// until the next rescan. A file that is gone is not counted, because its
     /// delete record removes it.
     pub link_reconciles_dropped: u64,
+    /// Folder descriptor reads that failed since the index was built, for a
+    /// folder the index keeps. Such a folder has no descriptor, so its
+    /// entries are hidden from every user
+    /// who does not see every file, until the journal records a change to
+    /// the folder itself or a rescan reads it again.
+    pub descriptor_reads_failed: u64,
 }
 
 /// Where one volume index's heap bytes live, component by component.
@@ -150,6 +161,8 @@ pub struct IndexMemory {
     /// The `(parent, folded name) → dir` scope index (bucket estimate + exact
     /// key-heap bytes).
     pub dir_children: ComponentBytes,
+    /// Each distinct folder descriptor's bytes and their lookup table.
+    pub descriptors: ComponentBytes,
     /// "dense" / "sparse" / "wide" (which `FrnMap` backing is in use).
     pub frn_map_kind: &'static str,
 }
@@ -162,6 +175,7 @@ impl IndexMemory {
             + self.frn_map
             + self.name_tables
             + self.dir_children
+            + self.descriptors
     }
 }
 
@@ -189,6 +203,12 @@ pub struct ApplyOutcome {
     /// these folders and inserts what it lists with
     /// [`VolumeIndex::insert_listed`].
     pub needs_walk: Vec<Frn>,
+    /// Folders whose descriptor must be read, each once: a folder whose
+    /// permissions changed, and one that has no descriptor yet, such as a new
+    /// folder or one whose last read failed.
+    /// [`settle_batch`](crate::index::settle::settle_batch) reads each and
+    /// applies it with [`VolumeIndex::set_folder_descriptor`].
+    pub needs_descriptor: Vec<Frn>,
     /// Irregularities worth logging.
     pub anomalies: Vec<Anomaly>,
     /// The name arenas are dirty enough to be worth compacting, or the name
@@ -258,6 +278,8 @@ pub struct VolumeIndex {
     /// The file IDs of the folders the rules left out, so a journal record
     /// inside one is dropped.
     left_out: FxHashSet<Frn>,
+    /// The bytes behind every folder's [`DescriptorId`](super::DescriptorId).
+    descriptors: DescriptorTable,
 }
 
 impl VolumeIndex {
@@ -324,6 +346,7 @@ impl VolumeIndex {
             dir_children: FxHashMap::default(),
             include: None,
             left_out: FxHashSet::default(),
+            descriptors: DescriptorTable::default(),
         };
         this.link_same_name(root_idx, root_name);
         this.link_same_name(lost_found, lf_name);
@@ -347,9 +370,12 @@ impl VolumeIndex {
     }
 
     /// A number that no other index of the process has had, and that changes
-    /// when the entries get new indexes. While it stays the same, an entry
-    /// index names the same slot, though the slot may have died or been
-    /// reused since.
+    /// when the entries get new indexes or the descriptors get new IDs. While
+    /// it stays the same, an entry index names the same slot, though the slot
+    /// may have died or been reused since, and a [`DescriptorId`] names the
+    /// same bytes.
+    ///
+    /// [`DescriptorId`]: super::DescriptorId
     pub(crate) fn instance(&self) -> u64 {
         self.instance
     }
@@ -479,6 +505,7 @@ impl VolumeIndex {
         for rec in records {
             let frn = rec.frn;
             let mut ops = ops_for(rec);
+            let mut security_changed = false;
             let screen = match &mut screening {
                 Some(screening) => self.screen(screening, rec),
                 None => Screen::Apply,
@@ -535,7 +562,18 @@ impl VolumeIndex {
                     }
                     UsnOp::LinkDirty => outcome.needs_link_reconcile.push(frn),
                     UsnOp::StatDirty => outcome.needs_stat.push(frn),
+                    UsnOp::SecurityDirty => security_changed = true,
                 }
+            }
+            if let Some(head) = self.head_of(frn)
+                && self.entries.flags(head).contains(EntryFlags::DIR)
+                && (security_changed || self.entries.descriptor(head).is_none())
+            {
+                // Until the new descriptor is read, the folder's entries are
+                // hidden; the old one would show a user who lost the right
+                // to list it the names added after the change.
+                self.entries.set_descriptor(head, None);
+                outcome.needs_descriptor.push(frn);
             }
             // Every record carries the file's attributes as of the record, so
             // the last record of a batch leaves the current ones, whatever its
@@ -549,6 +587,8 @@ impl VolumeIndex {
         outcome.needs_link_reconcile.dedup();
         outcome.needs_walk.sort_unstable();
         outcome.needs_walk.dedup();
+        outcome.needs_descriptor.sort_unstable();
+        outcome.needs_descriptor.dedup();
         self.generation += 1;
         // Compaction is NOT performed here: it is reported so the caller can do
         // the expensive part off the write lock, where it would block queries.
@@ -561,6 +601,55 @@ impl VolumeIndex {
     /// successful walks are applied by [`Self::reconcile_links`].
     pub fn note_link_reconciles_dropped(&mut self, n: u64) {
         self.stats.link_reconciles_dropped += n;
+    }
+
+    /// Counts the folders of `folders`, whose descriptor read failed, that
+    /// the index still holds without a descriptor, so `Status` shows that
+    /// their entries are hidden. A folder that is gone, or that the Include
+    /// rules removed, hides nothing, so call this after the rules have
+    /// checked what the reads added.
+    pub fn note_descriptor_reads_failed(&mut self, folders: &[Frn]) {
+        let hiding = folders
+            .iter()
+            .filter_map(|&frn| self.head_of(frn))
+            .filter(|&head| self.entries.descriptor(head).is_none())
+            .count();
+        self.stats.descriptor_reads_failed += hiding as u64;
+    }
+
+    /// Sets the security descriptor of folder `frn`, or takes it away with
+    /// `None`. This is the one way a folder gets a descriptor; a journal
+    /// record only takes one away until it is read again. A `frn` that is not
+    /// a folder, or not in the index, is ignored.
+    pub fn set_folder_descriptor(&mut self, frn: Frn, descriptor: Option<&[u8]>) {
+        let Some(head) = self.head_of(frn) else {
+            return;
+        };
+        if self.entries.flags(head).contains(EntryFlags::DIR) {
+            let id = descriptor.map(|d| self.descriptors.id_of(d));
+            self.entries.set_descriptor(head, id);
+            if self.descriptors.wants_collection() {
+                self.collect_descriptors();
+            }
+        }
+    }
+
+    /// Drops the descriptors that no folder uses any more. Each permission
+    /// change can add one, so without this a user who may change a folder's
+    /// permissions could grow the daemon's memory without bound by changing
+    /// them in a loop. The kept descriptors get new IDs, so the index takes
+    /// a new instance, which tells a request that what it learned of the old
+    /// IDs no longer holds.
+    fn collect_descriptors(&mut self) {
+        self.descriptors.collect(self.entries.descriptors_mut());
+        self.instance = next_instance();
+    }
+
+    /// The descriptor bytes of folder `frn`, or `None` when it has none.
+    #[cfg(test)]
+    pub(crate) fn folder_descriptor(&self, frn: Frn) -> Option<&[u8]> {
+        let id = self.entries.descriptor(self.head_of(frn)?)?;
+        Some(self.descriptors.bytes(id))
     }
 
     /// Reconciles the hard-link set of `frn` to exactly `actual` (the daemon's
@@ -1247,6 +1336,8 @@ impl VolumeIndex {
             // unknown size leaves the sums above it as they are; a file that
             // becomes a folder takes its size from them and needs its own sum.
             self.entries.set_size(idx, SIZE_UNKNOWN);
+            // A file has no descriptor, and a new folder's is read.
+            self.entries.set_descriptor(idx, None);
             if is_dir && self.folder_sizes != FolderSizes::Unknown {
                 self.compute_folder_sizes();
             }
@@ -1500,16 +1591,12 @@ impl VolumeIndex {
     /// exact `dir_children` key bytes; everything else is O(1) reads of
     /// len/capacity. Called on `Status`, not on any hot path.
     pub fn memory(&self) -> IndexMemory {
-        let dir_children = {
-            // Spilled SmallVecs (hash collisions) are so rare their heap is
-            // ignored; the bucket estimate mirrors `FrnMap::memory`.
-            let buckets = ((self.dir_children.capacity() as u64 * 8) / 7).next_power_of_two();
-            let per_bucket = (size_of::<((EntryIdx, u64), SmallVec<[EntryIdx; 1]>)>() + 1) as u64;
-            ComponentBytes {
-                used: self.dir_children.len() as u64 * per_bucket,
-                allocated: buckets * per_bucket,
-            }
-        };
+        // Spilled SmallVecs (hash collisions) are so rare their heap is
+        // ignored.
+        let dir_children = ComponentBytes::of_hash_table::<(
+            (EntryIdx, u64),
+            SmallVec<[EntryIdx; 1]>,
+        )>(self.dir_children.len(), self.dir_children.capacity());
         IndexMemory {
             entries: self.entries.memory(),
             arena_raw: self.names.raw_mem(),
@@ -1517,6 +1604,7 @@ impl VolumeIndex {
             frn_map: self.by_frn.memory(),
             name_tables: self.names.tables_mem(),
             dir_children,
+            descriptors: self.descriptors.memory(),
             frn_map_kind: self.by_frn.kind(),
         }
     }

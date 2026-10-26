@@ -41,6 +41,8 @@ pub(crate) const FSCTL_CREATE_USN_JOURNAL: u32 =
     ctl_code(FILE_DEVICE_FILE_SYSTEM, 57, METHOD_NEITHER, FILE_ANY_ACCESS);
 pub(crate) const FSCTL_READ_USN_JOURNAL: u32 =
     ctl_code(FILE_DEVICE_FILE_SYSTEM, 46, METHOD_NEITHER, FILE_ANY_ACCESS);
+pub(crate) const FSCTL_READ_FILE_USN_DATA: u32 =
+    ctl_code(FILE_DEVICE_FILE_SYSTEM, 58, METHOD_NEITHER, FILE_ANY_ACCESS);
 pub(crate) const FSCTL_QUERY_FILE_LAYOUT: u32 = ctl_code(
     FILE_DEVICE_FILE_SYSTEM,
     157,
@@ -82,6 +84,15 @@ pub(crate) struct ReadUsnJournalDataV0 {
 #[allow(dead_code)]
 pub(crate) struct ReadUsnJournalDataV1 {
     pub v0: ReadUsnJournalDataV0,
+    pub min_major_version: u16,
+    pub max_major_version: u16,
+}
+
+/// Win32 `READ_FILE_USN_DATA`, input to `FSCTL_READ_FILE_USN_DATA`: the range
+/// of record versions the caller accepts.
+#[repr(C)]
+#[allow(dead_code)]
+pub(crate) struct ReadFileUsnData {
     pub min_major_version: u16,
     pub max_major_version: u16,
 }
@@ -236,6 +247,7 @@ mod tests {
         assert_eq!(FSCTL_QUERY_USN_JOURNAL, 0x0009_00F4);
         assert_eq!(FSCTL_CREATE_USN_JOURNAL, 0x0009_00E7);
         assert_eq!(FSCTL_READ_USN_JOURNAL, 0x0009_00BB);
+        assert_eq!(FSCTL_READ_FILE_USN_DATA, 0x0009_00EB);
         assert_eq!(FSCTL_QUERY_FILE_LAYOUT, 0x0009_0277);
     }
 }

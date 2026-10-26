@@ -13,18 +13,16 @@ use std::time::Instant;
 
 use anyhow::{Context, Result, anyhow, bail};
 use gozler_core::include::VolumeRules;
-use gozler_core::index::settle::{self, FileLink, FileStat, VolumeReads};
+use gozler_core::index::settle::{self, FileLink, FileStat, Listed, VolumeReads};
 use gozler_core::index::{IdWidth, VolumeIndex};
-use gozler_core::layout::{
-    LayoutFile, RECOMMENDED_LAYOUT_FLAGS, walk_layout_buffer, walk_listing_buffer,
-};
+use gozler_core::layout::{RECOMMENDED_LAYOUT_FLAGS, walk_layout_buffer, walk_listing_buffer};
 use gozler_core::types::{Frn, IndexProgress};
 use gozler_core::usn::walk_enum_buffer;
 use gozler_winfs::{
     ERROR_ACCESS_DENIED, JournalInfo, JournalQuery, JournalRecords, VolumeHandle, VolumeInfo,
     WinError, create_usn_journal, enum_usn_data, enumerate_volumes, file_links, mft_records,
-    open_folder, query_file_layout, query_usn_journal, root_folder_id, stat_file,
-    volume_total_bytes,
+    open_folder, query_file_layout, query_usn_journal, read_folder_descriptor, root_folder_id,
+    stat_file, volume_total_bytes,
 };
 
 /// Floor for the USN journal: large enough that routine churn does not wrap it
@@ -259,6 +257,9 @@ pub(crate) struct BuiltIndex {
     /// How long the enumeration took, or `None` when it did not run because
     /// the first pass completed.
     pub enum_secs: Option<f64>,
+    /// How many folder descriptors the build read. The index's stats count
+    /// those that failed.
+    pub descriptor_reads: u64,
 }
 
 impl BuiltIndex {
@@ -353,24 +354,30 @@ pub(crate) fn build_index(
     index.keep_created(rules.dates_created);
 
     let read_start = Instant::now();
+    let mut descriptor_reads = 0;
+    let mut descriptor_reads_failed = Vec::new();
     let (read_secs, enum_secs) = match filesystem {
         Filesystem::Refs => {
             report(IndexProgress::Scanning {
                 entries: 0,
                 percent: None,
             });
+            // The walk reads each folder's descriptor from the handle it
+            // lists the folder with, also for a folder the rules then
+            // remove, because that read is nearly free.
             let walked = settle::walk_folders(
                 &mut Disk::new(handle, guid_path),
                 &[root],
                 cancelled,
-                |files| {
-                    for f in &files {
-                        index.insert_listed(f);
+                |listed| {
+                    descriptor_reads_failed.extend(listed.apply(&mut index));
+                    match listed {
+                        Listed::Folder { .. } => descriptor_reads += 1,
+                        Listed::Page(_) => report(IndexProgress::Scanning {
+                            entries: index.len() as u64,
+                            percent: None,
+                        }),
                     }
-                    report(IndexProgress::Scanning {
-                        entries: index.len() as u64,
-                        percent: None,
-                    });
                 },
             )?;
             if walked == settle::Walk::Cancelled {
@@ -420,6 +427,7 @@ pub(crate) fn build_index(
         entries: index.len() as u64,
     });
     finish_index(&mut index, rules);
+    index.note_descriptor_reads_failed(&descriptor_reads_failed);
     if enum_secs.is_some() {
         index.record_size_pass_stopped();
     }
@@ -427,6 +435,7 @@ pub(crate) fn build_index(
         index,
         read_secs,
         enum_secs,
+        descriptor_reads,
     }))
 }
 
@@ -485,19 +494,27 @@ impl<'a> Disk<'a> {
         }
     }
 
-    fn list(&mut self, folder: Frn, page: &mut dyn FnMut(Vec<LayoutFile>)) -> Result<bool> {
+    fn list(&mut self, folder: Frn, listed: &mut dyn FnMut(Listed<anyhow::Error>)) -> Result<bool> {
         let Some(listing) =
             open_folder(self.handle, folder.0).map_err(|e| anyhow!("opening it: {e}"))?
         else {
             return Ok(false);
         };
+        let descriptor = listing.descriptor().map_err(|e| {
+            tracing::debug!(volume = %self.volume, ?folder, error = %e, "folder descriptor read failed");
+            anyhow::Error::new(e)
+        });
+        listed(Listed::Folder {
+            frn: folder,
+            descriptor,
+        });
         while let Some(bytes) = listing
             .read_listing(&mut self.buf)
             .map_err(|e| anyhow!("reading its listing: {e}"))?
         {
             let files = walk_listing_buffer(folder, bytes)
                 .map_err(|e| anyhow!("parsing its listing: {e}"))?;
-            page(files);
+            listed(Listed::Page(files));
         }
         Ok(true)
     }
@@ -506,12 +523,23 @@ impl<'a> Disk<'a> {
 impl VolumeReads for Disk<'_> {
     type Error = anyhow::Error;
 
-    fn list_folder(&mut self, folder: Frn, page: &mut dyn FnMut(Vec<LayoutFile>)) -> Result<bool> {
-        let listed = self.list(folder, page);
-        if let Err(e) = &listed {
+    fn list_folder(
+        &mut self,
+        folder: Frn,
+        listed: &mut dyn FnMut(Listed<anyhow::Error>),
+    ) -> Result<bool> {
+        let result = self.list(folder, listed);
+        if let Err(e) = &result {
             tracing::debug!(volume = %self.volume, ?folder, error = %e, "folder listing failed");
         }
-        listed
+        result
+    }
+
+    fn folder_descriptor(&mut self, frn: Frn) -> Result<Option<Vec<u8>>> {
+        read_folder_descriptor(self.handle, frn.0).map_err(|e| {
+            tracing::debug!(volume = %self.volume, ?frn, error = %e, "folder descriptor read failed");
+            e.into()
+        })
     }
 
     fn stat(&mut self, frn: Frn) -> Result<Option<FileStat>> {

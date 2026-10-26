@@ -19,7 +19,7 @@ use crate::types::{IndexProgress, SortSpec, VolumePhase};
 /// refuses any other with [`ProtoError::Unsupported`], rather than agreeing on
 /// a version one side cannot actually speak. The client asks for this version
 /// alone, so a daemon of another build refuses it.
-pub const PROTO_VERSION: u16 = 14;
+pub const PROTO_VERSION: u16 = 15;
 
 /// The oldest protocol version a daemon of this build serves. **Owner
 /// ruling:** gozler serves no older protocol, of gozler or of goz, because
@@ -418,6 +418,8 @@ pub struct VolumeMemory {
     /// Per-unique-name tables (pairs, refcounts, chain heads, intern table).
     pub name_tables: MemPair,
     pub dir_children: MemPair,
+    /// The folder security descriptors, each distinct one once.
+    pub descriptors: MemPair,
     /// Which FRN-map backing is in use ("dense" / "sparse").
     pub frn_map_kind: String,
 }
@@ -432,6 +434,7 @@ impl VolumeMemory {
             self.frn_map,
             self.name_tables,
             self.dir_children,
+            self.descriptors,
         ];
         MemPair {
             used: parts.iter().map(|p| p.used).sum(),
@@ -477,6 +480,10 @@ pub struct VolumeStatus {
     /// volume may be stale until the next rescan.
     #[serde(default)]
     pub link_reconciles_dropped: u64,
+    /// Folder descriptor reads that failed since the volume was last
+    /// scanned. Each such folder's entries are hidden from every user who
+    /// does not see every file.
+    pub descriptor_reads_failed: u64,
     /// Per-component index memory breakdown. `None` from daemons predating it.
     #[serde(default)]
     pub memory: Option<VolumeMemory>,
@@ -650,6 +657,7 @@ mod tests {
                 delete_of_unknown: 2 * i as u64,
                 stale_slots: 3 * i as u64,
                 link_reconciles_dropped: 4 * i as u64,
+                descriptor_reads_failed: 5 * i as u64,
                 memory: Some(VolumeMemory {
                     entries: MemPair {
                         used: 10 * i as u64,

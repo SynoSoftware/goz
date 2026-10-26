@@ -640,6 +640,7 @@ mod tests {
             index,
             read_secs: 0.0,
             enum_secs: metadata_pending.then_some(0.0),
+            descriptor_reads: 0,
         }
     }
 

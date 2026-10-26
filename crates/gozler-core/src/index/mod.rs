@@ -15,8 +15,11 @@
 pub(crate) mod store;
 pub mod volume;
 
+mod descriptors;
+
 pub mod settle;
 
+pub use descriptors::DescriptorId;
 pub use store::{ComponentBytes, IdWidth};
 pub use volume::{
     Anomaly, ApplyOutcome, EntryView, IndexMemory, IndexStats, LinkTarget, NTFS_ROOT_FRN,

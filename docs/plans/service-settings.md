@@ -1,11 +1,15 @@
 # Service settings
 
-This plan adds the service setting that the window does not have yet, on
-the Drives and service page: Users and groups who see every file, a list,
-which the [visibility plan](visibility-plan.md) stores.
+This plan adds the service setting that the window does not have yet:
+Users and groups who see every file, a list, which the
+[visibility plan](visibility-plan.md) stores. It gets a Settings page of its
+own, Visibility, right after Include, because the Drives and service page
+has no room: the list would make the Settings dialog about 35 DLU taller,
+and its bottom edge would then go under the taskbar on a 1080p screen at
+125 % scaling.
 
-Rebuild index and Dates created, the page's others, are built:
-`docs/DESIGN.md` describes them in "Include settings" and "The Drives and
+Rebuild index and Dates created, the Drives and service page's settings,
+are built: `docs/DESIGN.md` describes them in "Include settings" and "The Drives and
 service page".
 
 **Stages.** The list is its own stage, the visibility plan's stage 3. It
@@ -26,7 +30,7 @@ The approved prototype of these screens, with their English words, is in git
 history: `git show b43f935:docs/plans/ui-prototype.html`, a page that opens in
 a browser. Its Settings dialog shows the Index page, now Drives and service.
 
-## The Drives and service page
+## The Visibility page
 
 - **Users and groups who see every file** is a list with Add… and Remove and
   an "Every user sees every file" check box above it, as the

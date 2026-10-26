@@ -593,6 +593,7 @@ fn build_status(volumes: &VolumeSet, include: &Include) -> DaemonStatus {
                 delete_of_unknown: stats.delete_of_unknown,
                 stale_slots: stats.stale_slots,
                 link_reconciles_dropped: stats.link_reconciles_dropped,
+                descriptor_reads_failed: stats.descriptor_reads_failed,
                 memory: Some(VolumeMemory {
                     entries: pair(mem.entries),
                     arena_raw: pair(mem.arena_raw),
@@ -600,6 +601,7 @@ fn build_status(volumes: &VolumeSet, include: &Include) -> DaemonStatus {
                     frn_map: pair(mem.frn_map),
                     name_tables: pair(mem.name_tables),
                     dir_children: pair(mem.dir_children),
+                    descriptors: pair(mem.descriptors),
                     frn_map_kind: mem.frn_map_kind.to_string(),
                 }),
             }
@@ -982,6 +984,8 @@ mod tests {
                 size: Some(size),
                 mtime_ft: Some(5),
                 created_ft: None,
+                security_id: None,
+                usn: None,
                 names: vec![LayoutName {
                     parent_frn: NTFS_ROOT_FRN,
                     name: format!("{frn}.bin").into_bytes(),
@@ -1010,6 +1014,8 @@ mod tests {
             size: Some(5),
             mtime_ft: Some(5),
             created_ft: None,
+            security_id: None,
+            usn: None,
             names: vec![LayoutName {
                 parent_frn: Frn(101),
                 name: b"kernel32.dll".to_vec(),
@@ -1506,6 +1512,8 @@ mod tests {
                 size: Some(size),
                 mtime_ft: Some(5),
                 created_ft: None,
+                security_id: None,
+                usn: None,
                 names: links
                     .iter()
                     .map(|&(parent, name)| LayoutName {

@@ -146,6 +146,13 @@ pub struct LayoutFile {
     pub mtime_ft: Option<i64>,
     /// `CreationTime`, from the same place as [`Self::mtime_ft`].
     pub created_ft: Option<i64>,
+    /// `FILE_LAYOUT_INFO_ENTRY.SecurityId`: NTFS gives one ID to every file
+    /// with the same security descriptor; 0 means the file keeps its own.
+    /// `None` when the info entry ends before `Usn`, and for a listing.
+    pub security_id: Option<u32>,
+    /// `FILE_LAYOUT_INFO_ENTRY.Usn`, the USN of the file's last journal
+    /// record. `None` exactly when [`Self::security_id`] is.
+    pub usn: Option<i64>,
     /// Every hard-link name of this file, in chain order (including DOS-only
     /// aliases, marked via [`LayoutName::dos_only`]).
     pub names: Vec<LayoutName>,
@@ -301,7 +308,7 @@ struct RawNameEntry {
 }
 
 /// Prefix of `FILE_LAYOUT_INFO_ENTRY.BasicInformation` through
-/// `LastWriteTime` (24 bytes): all this parser needs from the info entry.
+/// `LastWriteTime` (24 bytes): the dates this parser reads.
 #[derive(FromBytes, KnownLayout, Immutable, Unaligned)]
 #[repr(C)]
 struct RawInfoPrefix {
@@ -311,6 +318,19 @@ struct RawInfoPrefix {
     last_access_time: I64,
     last_write_time: I64,
 }
+
+/// `FILE_LAYOUT_INFO_ENTRY.SecurityId` and `Usn` (12 bytes), at
+/// [`INFO_SECURITY_OFFSET`].
+#[derive(FromBytes, KnownLayout, Immutable, Unaligned)]
+#[repr(C)]
+struct RawInfoSecurity {
+    security_id: U32,
+    usn: I64,
+}
+
+/// Offset of `SecurityId` in `FILE_LAYOUT_INFO_ENTRY`: after the 40-byte
+/// `BasicInformation` and the 4-byte `OwnerId`.
+const INFO_SECURITY_OFFSET: usize = 44;
 
 /// `STREAM_LAYOUT_ENTRY` fixed part (48 bytes); `StreamIdentifier` (UTF-16LE,
 /// `StreamIdentifierLength` bytes) follows.
@@ -446,9 +466,11 @@ fn parse_file(
         }
     }
 
-    // --- extra info (mtime and date created) ------------------------------
+    // --- extra info (dates, security ID and USN) ---------------------------
     let mut mtime_ft = None;
     let mut created_ft = None;
+    let mut security_id = None;
+    let mut usn = None;
     if entry.extra_info_offset.get() != 0 {
         let info_off = follow_offset(
             buf,
@@ -470,6 +492,15 @@ fn parse_file(
             let info: RawInfoPrefix = read_struct(buf, info_off, "FILE_LAYOUT_INFO_ENTRY")?;
             mtime_ft = Some(info.last_write_time.get());
             created_ft = Some(info.creation_time.get());
+        }
+        if available >= INFO_ENTRY_LEGACY_LEN {
+            let ids: RawInfoSecurity = read_struct(
+                buf,
+                info_off + INFO_SECURITY_OFFSET,
+                "FILE_LAYOUT_INFO_ENTRY.SecurityId",
+            )?;
+            security_id = Some(ids.security_id.get());
+            usn = Some(ids.usn.get());
         }
     }
 
@@ -524,6 +555,8 @@ fn parse_file(
         size,
         mtime_ft,
         created_ft,
+        security_id,
+        usn,
         names,
     })
 }
@@ -688,6 +721,11 @@ mod tests {
         assert_eq!(size_of::<RawFileEntry>(), 40);
         assert_eq!(size_of::<RawNameEntry>(), 24);
         assert_eq!(size_of::<RawInfoPrefix>(), 24);
+        assert_eq!(size_of::<RawInfoSecurity>(), 12);
+        assert_eq!(
+            INFO_SECURITY_OFFSET + size_of::<RawInfoSecurity>(),
+            INFO_ENTRY_LEGACY_LEN
+        );
         assert_eq!(size_of::<RawStreamEntry>(), 48);
     }
 
@@ -1052,6 +1090,20 @@ mod tests {
         patch_u32(&mut buf, ENTRY_EXTRA_INFO_LENGTH, 0);
         let parsed = walk_layout_buffer(&buf).expect("legacy info entry parses");
         assert_eq!(parsed[0].mtime_ft, Some(133_800_000_000_000_000));
+        assert_eq!(parsed[0].security_id, one_file().expected().security_id);
+        assert_eq!(parsed[0].usn, one_file().expected().usn);
+    }
+
+    #[test]
+    fn info_entry_that_ends_before_usn_yields_no_security_id() {
+        // One byte short of the legacy length: the dates are there, the end
+        // of Usn is not, so neither SecurityId nor Usn is read.
+        let mut buf = build_layout_buffer(std::slice::from_ref(&one_file()));
+        patch_u32(&mut buf, ENTRY_EXTRA_INFO_LENGTH, 55);
+        let parsed = walk_layout_buffer(&buf).expect("short info entry parses");
+        assert_eq!(parsed[0].mtime_ft, Some(133_800_000_000_000_000));
+        assert_eq!(parsed[0].security_id, None);
+        assert_eq!(parsed[0].usn, None);
     }
 
     #[test]
@@ -1082,7 +1134,13 @@ mod tests {
     }
 
     fn arb_info() -> impl Strategy<Value = LayoutInfoFixture> {
-        any::<i64>().prop_map(LayoutInfoFixture::with_mtime)
+        (any::<i64>(), any::<u32>(), any::<i64>()).prop_map(|(mtime, security_id, usn)| {
+            LayoutInfoFixture {
+                security_id,
+                usn,
+                ..LayoutInfoFixture::with_mtime(mtime)
+            }
+        })
     }
 
     fn arb_stream() -> impl Strategy<Value = LayoutStreamFixture> {

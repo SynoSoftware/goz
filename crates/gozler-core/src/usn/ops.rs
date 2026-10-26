@@ -13,6 +13,7 @@ use super::record::{
     ParsedUsnRecord, USN_REASON_BASIC_INFO_CHANGE, USN_REASON_DATA_EXTEND,
     USN_REASON_DATA_OVERWRITE, USN_REASON_DATA_TRUNCATION, USN_REASON_FILE_CREATE,
     USN_REASON_FILE_DELETE, USN_REASON_HARD_LINK_CHANGE, USN_REASON_RENAME_NEW_NAME,
+    USN_REASON_SECURITY_CHANGE,
 };
 
 /// One normalized index operation derived from a USN record. It applies to
@@ -37,11 +38,15 @@ pub enum UsnOp {
     /// Size and/or timestamps may have changed; USN records carry neither,
     /// so the entry needs an external re-stat.
     StatDirty,
+    /// The security descriptor changed. A folder's descriptor decides who
+    /// sees its entries, so the index reads it again; a file's descriptor
+    /// decides nothing the index keeps.
+    SecurityDirty,
 }
 
 /// Normalizes one record's accumulated reason bitmask into index ops.
 ///
-/// Decision table (rows evaluated top to bottom; rows 2-4 are cumulative,
+/// Decision table (rows evaluated top to bottom; rows 2-5 are cumulative,
 /// each `&`-test independently appends its op):
 ///
 /// | # | Condition (bitwise `&`)                                              | Effect                              |
@@ -50,8 +55,9 @@ pub enum UsnOp {
 /// | 2 | `RENAME_NEW_NAME` or `FILE_CREATE`                                   | push `Upsert` (record name/parent are current state; no OLD/NEW pairing state machine exists by design) |
 /// | 3 | `HARD_LINK_CHANGE`                                                   | push `LinkDirty` (never upsert: the named link may be dead) |
 /// | 4 | `FILE_CREATE`/`DATA_OVERWRITE`/`DATA_EXTEND`/`DATA_TRUNCATION`/`BASIC_INFO_CHANGE` | push `StatDirty` (a USN record carries no size/mtime, so a create needs one too) |
-/// | 5 | none of the above (e.g. CLOSE-only, security-only, `RENAME_OLD_NAME` alone: the NEW record carries the committed state) | empty |
-pub fn ops_for(rec: &ParsedUsnRecord) -> SmallVec<[UsnOp; 3]> {
+/// | 5 | `SECURITY_CHANGE`                                                    | push `SecurityDirty`                |
+/// | 6 | none of the above (e.g. CLOSE-only, `RENAME_OLD_NAME` alone: the NEW record carries the committed state) | empty |
+pub fn ops_for(rec: &ParsedUsnRecord) -> SmallVec<[UsnOp; 4]> {
     let mut ops = SmallVec::new();
     let reason = rec.reason;
 
@@ -88,6 +94,11 @@ pub fn ops_for(rec: &ParsedUsnRecord) -> SmallVec<[UsnOp; 3]> {
         ops.push(UsnOp::StatDirty);
     }
 
+    // Row 5.
+    if reason & USN_REASON_SECURITY_CHANGE != 0 {
+        ops.push(UsnOp::SecurityDirty);
+    }
+
     ops
 }
 
@@ -96,10 +107,6 @@ mod tests {
     use super::*;
     use crate::types::Frn;
     use crate::usn::record::{USN_REASON_CLOSE, USN_REASON_RENAME_OLD_NAME};
-
-    /// Reason bit not in any of our decision-table sets
-    /// (`USN_REASON_SECURITY_CHANGE`).
-    const SECURITY_ONLY: u32 = 0x0000_0800;
 
     fn rec(reason: u32) -> ParsedUsnRecord {
         ParsedUsnRecord {
@@ -202,19 +209,23 @@ mod tests {
         assert!(ops_for(&r).is_empty());
     }
 
+    /// Without it a permission change never reaches the index, and a folder
+    /// keeps showing its entries to a user who lost the right to list it.
     #[test]
-    fn security_only_emits_nothing() {
-        let r = rec(SECURITY_ONLY);
-        assert!(ops_for(&r).is_empty());
+    fn security_change_marks_the_descriptor_dirty() {
+        let r = rec(USN_REASON_SECURITY_CHANGE | USN_REASON_CLOSE);
+        assert_eq!(ops_for(&r).into_vec(), vec![UsnOp::SecurityDirty]);
+        let deleted = rec(USN_REASON_FILE_DELETE | USN_REASON_SECURITY_CHANGE);
+        assert_eq!(ops_for(&deleted).into_vec(), vec![UsnOp::Delete]);
     }
 
     #[test]
     fn unrelated_bits_do_not_mask_matches() {
         // & semantics: extra accumulated bits never turn a match off.
-        let r = rec(USN_REASON_FILE_CREATE | SECURITY_ONLY | USN_REASON_CLOSE);
+        let r = rec(USN_REASON_FILE_CREATE | USN_REASON_SECURITY_CHANGE | USN_REASON_CLOSE);
         assert_eq!(
             ops_for(&r).into_vec(),
-            vec![UsnOp::Upsert, UsnOp::StatDirty]
+            vec![UsnOp::Upsert, UsnOp::StatDirty, UsnOp::SecurityDirty]
         );
     }
 

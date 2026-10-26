@@ -71,11 +71,12 @@ pub fn write_status(s: &DaemonStatus, out: &mut impl Write) -> io::Result<()> {
                     out,
                     "",
                     &format!(
-                        "{} ({}), {}, {}",
+                        "{} ({}), {}, {}, {}",
                         part("file IDs", &m.frn_map),
                         m.frn_map_kind,
                         part("name tables", &m.name_tables),
-                        part("folders", &m.dir_children)
+                        part("folders", &m.dir_children),
+                        part("permissions", &m.descriptors)
                     ),
                 )?;
             }
@@ -89,6 +90,20 @@ pub fn write_status(s: &DaemonStatus, out: &mut impl Write) -> io::Result<()> {
                 &format!(
                     "{} not reconciled; some names may be stale",
                     plural(v.link_reconciles_dropped, "change", "changes")
+                ),
+            )?;
+        }
+        if v.descriptor_reads_failed > 0 {
+            detail(
+                out,
+                "Permissions",
+                &format!(
+                    "{} failed since the last scan; such a folder's contents stay hidden from most users until the folder changes",
+                    plural(
+                        v.descriptor_reads_failed,
+                        "folder permission read",
+                        "folder permission reads"
+                    )
                 ),
             )?;
         }

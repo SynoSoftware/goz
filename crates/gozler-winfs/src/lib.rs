@@ -20,6 +20,8 @@ mod util;
 #[cfg(windows)]
 mod cache;
 #[cfg(windows)]
+mod caller;
+#[cfg(windows)]
 mod cancel_io;
 #[cfg(windows)]
 mod clock;
@@ -68,6 +70,8 @@ pub use error::WinError;
 #[cfg(windows)]
 pub use cache::empty_standby_list;
 #[cfg(windows)]
+pub use caller::{ClientToken, Sid, account_name, account_sid, pipe_client_token};
+#[cfg(windows)]
 pub use cancel_io::{ThreadIoHandle, cancel_synchronous_io, current_thread_io_handle};
 #[cfg(windows)]
 pub use clock::{
@@ -113,7 +117,10 @@ pub use storage::{StorageDevice, VolumeStorage, volume_storage, windows_build};
 pub use entry::{Access, AttributeTag, Entry, EntryStat, FileIdentity, Reparse, open_entry};
 
 #[cfg(windows)]
-pub use file_id::{Folder, open_folder, root_folder_id};
+pub use file_id::{
+    Folder, RawFolderSecurity, open_folder, read_folder_descriptor, read_folder_security,
+    root_folder_id,
+};
 
 #[cfg(windows)]
 pub use watch::{FolderWatch, Signal, WatchEvent, WatchRelease, watch_folder};
@@ -137,7 +144,7 @@ pub use pipe_sd::{PipeSecurity, build_pipe_security};
 pub use pipe_trust::{pipe_bytes_available, pipe_server_is_trusted};
 
 #[cfg(windows)]
-pub use registry::machine_string;
+pub use registry::{machine_string, machine_strings, set_machine_strings};
 
 #[cfg(windows)]
 pub use service::{ServiceState, service_program, service_state};

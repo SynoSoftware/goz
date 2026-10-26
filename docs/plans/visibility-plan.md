@@ -7,8 +7,63 @@ changes.
 
 ## Schedule
 
-**Scheduled:** in the queue, not started. Stage 0 item 5 passed on
-2026-10-18.
+**Scheduled:** started 2026-10-26. Stage 0 item 5 passed on 2026-10-18.
+Item 3 passed on 2026-10-26 as test W1. Item 4 on 2026-10-26: 1.88 µs per
+check, 10,000 checks over the 114 distinct descriptors of 20,000 folders
+under Program Files, ProgramData, Windows and Users (`build.ps1 -Timing
+may_list_cost`). Items 1 and 2 wait for the owner's script, which needs
+`target\release\examples\visibility_stage0.exe` from `cargo build --release
+--workspace --examples`.
+
+**Stage 1 review of 1a** (2026-10-26): pass after one fix round. Fixed: the
+descriptor table grew without bound when a user changed a folder's
+permissions in a loop (now rebuilt from the column, with a new instance,
+when it holds over twice what the last rebuild kept plus 1 MiB); a missed
+folder's descriptor was read and counted twice; failed reads were counted
+for folders the Include rules remove; a refused `READ_CONTROL` failed the
+whole walk; two doc comments. Accepted risk: each rebuild gives the volume a
+new instance, so a user who changes their own folder's permissions
+thousands of times can make other users' running searches and result
+snapshots on that volume start again; a separate descriptor generation
+would add a check on every path that now checks the instance. Left for the
+2a round: a new subfolder of a walked folder is read and counted twice when
+its read keeps failing; one comment's wrapping.
+
+**Execution** (the lead keeps this current; agents read it and report to the
+lead):
+
+| Piece | Owner | Files it alone edits | State |
+|---|---|---|---|
+| Windows layer: "The caller", "Reading descriptors" (`read_folder_descriptor`, `Folder::descriptor`, `read_folder_security`, the owner-and-group rule), the stored list's reader and writer, W1 to W3, T10, stage 0 item 4 as an ignored timing test; the layout's `security_id` and `usn` with T1; the owner's stage 0 script and its example program | implementer W (Opus) | `gozler-winfs`, `gozler-core/src/layout/` (`parse.rs`, `listing.rs`, `fixtures.rs`), the stage 0 example, `target\probe\visibility-stage0.ps1` | started |
+| Stage 1a and 2a in core and daemon: descriptor IDs, the journal, status and memory, the filter, the answers, who sees what, the refusals, the client's identification level; `record_usn` with T9 first, because the stage 0 program needs it; later 1b's `read_build_descriptors` and T3 | implementer C (Opus) | `gozler-core` except `layout/parse.rs`, `gozler-daemon`, `gozler-client`, `gozler-cli`, the `VolumeMemory` literals in `gozler-fileops/src/totals.rs` and `gozler-ui/src/core/model.rs` | started |
+| Stage 2a's empty Size cell (T11) and stage 3, the Visibility page with the list | implementer U (Opus) | `gozler-ui` except the `model.rs` literal | started |
+| Stage 2b: `gozlerd see-every-file`, `install --see-every-file`, the setup's page; the owner's after-install script | implementer W, after C hands over `gozler-daemon/src/main.rs` and `service.rs` | those two files, `installer/Setup.iss`, `target\probe\visibility-check.ps1` | waiting |
+| Stage 2c, "Text" | a Sonnet writer, after 2a and 2b settle | the documents "Text" names, `escompat/help.rs` `NOTES` | waiting |
+
+- **Builds.** The lead alone runs `build.ps1`, when every implementer has
+  reported a consistent point, because the build compiles the whole
+  workspace and one half-edited file fails every other piece's check.
+- **Reviews.** The stage 1 code review reads 1a when it is built, and 1b's
+  change later, because 1b waits for the owner's script. The security review
+  runs when 2a and 2b are built. Stage reviewers do not run the code-review
+  skill; it runs once, as the final deep review.
+- **Skills.** `rust-unsafe-ffi` for every `unsafe` Win32 or COM call;
+  `rust-api-design` for new public types; `codebase-design` for the types and
+  seams of core and daemon; `rust-win32-ui`
+  (`C:\Users\user\.agents\skills\rust-win32-ui\SKILL.md`) for the window;
+  `domain-modeling` for names and `CONTEXT.md`.
+- **Decisions made during the work.** `pipe_client_token` takes a
+  `BorrowedHandle`, as `pipe_client_user` does. The owner-and-group rule is
+  `check_descriptor`, built on `RtlValidRelativeSecurityDescriptor`, which
+  also checks that every part lies inside the bytes; `may_list` calls it
+  too. `Listed::Page` owns its `Vec<LayoutFile>`. One owned `SeenBy {
+  Everything, Caller(Listable) }` is passed by reference, and the searches
+  take a `Viewer` (everything, or the `may_list` closure). A refused caller
+  also gets no `ResultSnapshotRows` and no `SortResultSnapshot`. The list
+  has its own Settings page, Visibility (service settings plan).
+- **Commits.** Each stage is committed on `main` after its review passes,
+  in the order 1a, 1b, then 2a and 2b together, then 2c and 3. Nothing is
+  pushed.
 
 - **Stage 0** has two parts. An agent runs items 3 and 4 without elevation
   as soon as the plan leaves the queue. The owner runs one elevated script,
@@ -397,7 +452,7 @@ the client still checks the pipe's owner before it sends anything.
 - `pub struct ClientToken` owns an identification-level token handle with
   `TOKEN_QUERY`. It is `Send` and `Sync`: `AccessCheck` and
   `GetTokenInformation` only read the token.
-- `pub fn pipe_client_token(pipe: RawHandle) -> Result<Option<ClientToken>,
+- `pub fn pipe_client_token(pipe: BorrowedHandle<'_>) -> Result<Option<ClientToken>,
   WinError>` calls `ImpersonateNamedPipeClient`, then `OpenThreadToken` with
   `TOKEN_QUERY | TOKEN_DUPLICATE` and `OpenAsSelf`, then `RevertToSelf`, in
   one function that never yields. `RevertToSelf` runs on every path after a
@@ -699,7 +754,7 @@ Spec `V17`. Two parts, each with one job.
   PC`, and the text: `Gozler shows each user only the files in folders they
   can open. Checked, <name> sees every file name, also without running as
   administrator. This does not let them open any file they cannot open now.
-  To change who sees every file later, open Settings > Drives and service.`
+  To change who sees every file later, open Settings > Visibility.`
   The texts are `[CustomMessages]` entries, and `docs/WRITING.md` governs
   their final wording.
 - In `CurStepChanged(ssPostInstall)`, the `gozlerd install` call gains
@@ -811,7 +866,7 @@ and each design point that an answer changes is changed here.
 | 2a | "The caller" without the account names, "Who sees what", "The filter", "Folder sizes" with the window's empty Size cell, "Logging", the client's identification level, the stored list's reader | about 850 lines | at once | `build.ps1` passes with T5 to T8, T11 and W1 to W3; agent check A4 |
 | 2b | `gozlerd see-every-file`, `install --see-every-file`, the account names, the writer, the setup's page, the help note | about 300 lines | at once | `build.ps1` passes with T10 and the help tests |
 | 2c | "Text" | about 150 lines of prose | at once | the text is changed |
-| 3 | the list on Settings > Drives and service ([service settings plan](service-settings.md)) | about 400 lines | at once | as that plan says |
+| 3 | the list on its own page, Settings > Visibility ([service settings plan](service-settings.md)) | about 400 lines | at once | as that plan says |
 
 Stage 1 alone changes no answer: nothing reads the column yet.
 

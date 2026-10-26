@@ -312,6 +312,8 @@ fn layout_pass_never_leaks_a_retenanted_record() {
         size: Some(10),
         mtime_ft: Some(555),
         created_ft: None,
+        security_id: None,
+        usn: None,
         names: vec![crate::layout::LayoutName {
             parent_frn: root_frn(),
             name: b"tenant.txt".to_vec(),
@@ -514,6 +516,101 @@ fn a_renamed_folder_the_index_lacks_is_reported_for_a_walk() {
     );
     let file = moved_in(&mut idx, frn(400), false, USN_REASON_RENAME_NEW_NAME);
     assert_eq!((file.needs_walk, file.needs_stat), (vec![], vec![frn(400)]));
+}
+
+/// A folder's descriptor decides who sees its entries, so it must be read
+/// for every folder that has none, read again after a permission change,
+/// and never be taken over by another folder. Otherwise a new folder stays
+/// hidden until a rescan, a folder that loses a user's right shows that user
+/// the names added in the same batch, and a folder in a reused or compacted
+/// slot shows its names to every user who could list another one.
+#[test]
+fn the_descriptor_column_follows_each_folder() {
+    use crate::usn::record::USN_REASON_SECURITY_CHANGE;
+    let root = root_frn();
+    let security = |f: Frn, is_dir: bool| record(f, root, "", is_dir, USN_REASON_SECURITY_CHANGE);
+
+    let mut idx = new_index();
+    let (changed, file, becomes_dir, new) = (frn(100), frn(101), frn(102), frn(103));
+    idx.apply_batch(&[
+        create(changed, root, "changed", true),
+        create(file, root, "f.txt", false),
+        create(becomes_dir, root, "x", false),
+    ]);
+    idx.set_folder_descriptor(changed, Some(b"changed"));
+    let outcome = idx.apply_batch(&[
+        create(new, root, "new", true),
+        security(changed, true),
+        security(file, false),
+        rename(becomes_dir, root, "x", true),
+        security(changed, true),
+    ]);
+    assert_eq!(outcome.needs_descriptor, vec![changed, becomes_dir, new]);
+    assert_eq!(idx.folder_descriptor(changed), None);
+
+    let mut idx = new_index();
+    let (gone, reborn) = (frn(200), frn(201));
+    idx.apply_batch(&[create(gone, root, "gone", true)]);
+    idx.set_folder_descriptor(gone, Some(b"gone"));
+    let slot = idx.head_of(gone);
+    let outcome = idx.apply_batch(&[delete(gone), create(reborn, root, "reborn", true)]);
+    assert_eq!(
+        idx.head_of(reborn),
+        slot,
+        "the new folder takes the freed slot"
+    );
+    assert_eq!(outcome.needs_descriptor, vec![reborn]);
+    assert_eq!(idx.folder_descriptor(reborn), None);
+
+    let mut idx = new_index();
+    let (a, b, c) = (frn(300), frn(301), frn(302));
+    idx.apply_batch(&[
+        create(a, root, "a", true),
+        create(b, root, "b", true),
+        create(c, root, "c", true),
+    ]);
+    let own = |f: Frn| f.0.to_le_bytes();
+    for f in [a, b, c] {
+        idx.set_folder_descriptor(f, Some(&own(f)));
+    }
+    idx.apply_batch(&[delete(b)]);
+    idx.optimize_storage();
+    assert_eq!(idx.folder_descriptor(a), Some(&own(a)[..]));
+    assert_eq!(idx.folder_descriptor(c), Some(&own(c)[..]));
+}
+
+/// A user who may change a folder's permissions can change them in a loop,
+/// and gozlerd reads and keeps each new descriptor. Without dropping the
+/// ones no folder uses, the daemon's memory grows with every change until a
+/// rescan; and the descriptors the folders still use must keep their bytes
+/// under the new IDs.
+#[test]
+fn changed_descriptors_keep_the_table_bounded() {
+    let root = root_frn();
+    let mut idx = new_index();
+    let (changing, steady) = (frn(100), frn(101));
+    idx.apply_batch(&[
+        create(changing, root, "changing", true),
+        create(steady, root, "steady", true),
+    ]);
+    idx.set_folder_descriptor(steady, Some(b"steady"));
+    let instance = idx.instance();
+    let changed = |n: u32| {
+        let mut descriptor = vec![0u8; 8 * 1024];
+        descriptor[..4].copy_from_slice(&n.to_le_bytes());
+        descriptor
+    };
+
+    // 8 MiB of descriptors, each used only until the next change.
+    for n in 0..1_000 {
+        idx.set_folder_descriptor(changing, Some(&changed(n)));
+    }
+
+    let held = idx.memory().descriptors.used;
+    assert!(held < 2 << 20, "the table holds {held} bytes");
+    assert_ne!(idx.instance(), instance, "the kept descriptors got new IDs");
+    assert_eq!(idx.folder_descriptor(changing), Some(&changed(999)[..]));
+    assert_eq!(idx.folder_descriptor(steady), Some(&b"steady"[..]));
 }
 
 // -- hard links ----------------------------------------------------------
@@ -954,6 +1051,8 @@ fn listed(f: Frn, folder: Frn, name: &str, is_dir: bool) -> LayoutFile {
         size: (!is_dir).then_some(0),
         mtime_ft: Some(0),
         created_ft: None,
+        security_id: None,
+        usn: None,
         names: vec![crate::layout::LayoutName {
             parent_frn: folder,
             name: name.as_bytes().to_vec(),
@@ -992,7 +1091,7 @@ impl settle::VolumeReads for ModelReads<'_> {
     fn list_folder(
         &mut self,
         folder: Frn,
-        page: &mut dyn FnMut(Vec<LayoutFile>),
+        listed: &mut dyn FnMut(settle::Listed<Self::Error>),
     ) -> Result<bool, Self::Error> {
         self.assert_unlocked();
         if let Some(changes) = &mut self.listing_changes {
@@ -1000,12 +1099,24 @@ impl settle::VolumeReads for ModelReads<'_> {
             self.now = (self.now + changes.next().expect("cycled")).min(last);
         }
         let model = &self.states[self.now];
-        let folder = self.ids.model(folder);
-        if !model.exists(folder) {
+        let node = self.ids.model(folder);
+        if !model.exists(node) {
             return Ok(false);
         }
-        page(model.listing(self.ids, folder));
+        listed(settle::Listed::Folder {
+            frn: folder,
+            descriptor: Ok(model_descriptor(node)),
+        });
+        listed(settle::Listed::Page(model.listing(self.ids, node)));
         Ok(true)
+    }
+
+    fn folder_descriptor(&mut self, frn: Frn) -> Result<Option<Vec<u8>>, Self::Error> {
+        self.assert_unlocked();
+        let node = self.ids.model(frn);
+        Ok(self.states[self.now]
+            .exists(node)
+            .then(|| model_descriptor(node)))
     }
 
     fn stat(&mut self, _: Frn) -> Result<Option<settle::FileStat>, Self::Error> {
@@ -1028,6 +1139,12 @@ impl settle::VolumeReads for ModelReads<'_> {
             }]
         }))
     }
+}
+
+/// The descriptor a model folder has: its own, so a folder that ends with
+/// another folder's descriptor shows.
+fn model_descriptor(node: u64) -> Vec<u8> {
+    node.to_le_bytes().to_vec()
 }
 
 /// A raw action carrying selection seeds; the interpreter resolves them
@@ -1235,6 +1352,8 @@ proptest! {
                 size: None,
                 mtime_ft: None,
                 created_ft: None,
+                security_id: None,
+                usn: None,
                 names: vec![crate::layout::LayoutName {
                     parent_frn: r.parent_frn,
                     name: r.name.clone(),
@@ -1300,8 +1419,8 @@ proptest! {
             now: start,
             listing_changes: Some(changes_per_listing.iter().cycle()),
         };
-        let walked = settle::walk_folders(&mut reads, &[ids.root()], || false, |files| {
-            files.iter().for_each(|f| index.borrow_mut().insert_listed(f));
+        let walked = settle::walk_folders(&mut reads, &[ids.root()], || false, |listed| {
+            assert_eq!(listed.apply(&mut index.borrow_mut()), None, "model descriptors read");
         });
         prop_assert!(matches!(walked, Ok(settle::Walk::Complete)));
         reads.listing_changes = None;
@@ -1334,6 +1453,16 @@ proptest! {
         prop_assert!(idx.dir_index_matches_rebuild(), "dir index drifted after walk race");
         prop_assert!(idx.name_chains_match_rebuild(), "name chains drifted after walk race");
         prop_assert!(idx.child_chains_match_rebuild(), "child chains drifted after walk race");
+        // A folder created or moved during the walk, or listed by the
+        // missed-folder walk, ends with its own descriptor; without one its
+        // entries stay hidden from every filtered user until a rescan.
+        for e in idx.live_entries() {
+            if idx.entry(e).is_dir() && (e == idx.root() || !idx.is_synthetic(e)) {
+                let frn = idx.entry(e).frn();
+                let want = model_descriptor(ids.model(frn));
+                prop_assert_eq!(idx.folder_descriptor(frn), Some(&want[..]));
+            }
+        }
     }
 }
 
@@ -1386,6 +1515,8 @@ fn enrich_with_renamed_directory_never_orphans_children() {
         size: None,
         mtime_ft: Some(555),
         created_ft: None,
+        security_id: None,
+        usn: None,
         names: vec![crate::layout::LayoutName {
             parent_frn: root_frn(),
             name: b"docs".to_vec(),

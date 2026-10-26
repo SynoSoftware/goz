@@ -35,6 +35,8 @@ pub const USN_REASON_FILE_CREATE: u32 = 0x0000_0100;
 /// is gone. A single-link removal of a multi-link file arrives as
 /// [`USN_REASON_HARD_LINK_CHANGE`] instead.
 pub const USN_REASON_FILE_DELETE: u32 = 0x0000_0200;
+/// `USN_REASON_SECURITY_CHANGE`: the file's security descriptor changed.
+pub const USN_REASON_SECURITY_CHANGE: u32 = 0x0000_0800;
 /// `USN_REASON_RENAME_OLD_NAME`: rename/move; this record carries the OLD
 /// name and parent.
 pub const USN_REASON_RENAME_OLD_NAME: u32 = 0x0000_1000;
@@ -110,6 +112,11 @@ pub enum WalkError {
     /// any NTFS name (255 code units).
     #[error("USN record at offset {offset} has a malformed file-name span")]
     MalformedName { offset: usize },
+    /// A single record whose `MajorVersion` is neither 2 nor 3, where the
+    /// caller needs a field only those versions carry. A buffer walk skips
+    /// such records instead.
+    #[error("USN record at offset {offset} has version {version}, not 2 or 3")]
+    UnsupportedVersion { offset: usize, version: u16 },
 }
 
 /// Result of walking one `FSCTL_ENUM_USN_DATA` output buffer.
@@ -186,7 +193,7 @@ struct RawV2 {
     _minor_version: U16,
     frn: U64,
     parent_frn: U64,
-    _usn: I64,
+    usn: I64,
     _timestamp: I64,
     reason: U32,
     _source_info: U32,
@@ -206,7 +213,7 @@ struct RawV3 {
     _minor_version: U16,
     frn: U128,
     parent_frn: U128,
-    _usn: I64,
+    usn: I64,
     _timestamp: I64,
     reason: U32,
     _source_info: U32,
@@ -214,6 +221,37 @@ struct RawV3 {
     file_attributes: U32,
     file_name_length: U16,
     file_name_offset: U16,
+}
+
+/// Reads the `Usn` of one record that `FSCTL_READ_FILE_USN_DATA` returns,
+/// which is the file's last journal record: a V2 or V3 record alone, with no
+/// leading value. Error offsets are therefore 0.
+///
+/// # Errors
+///
+/// [`WalkError::TruncatedHeader`] when the record, cut to its
+/// `RecordLength`, is too short for its version's fixed header;
+/// [`WalkError::RecordOverrun`] when `RecordLength` runs past `rec`;
+/// [`WalkError::UnsupportedVersion`] for any version but 2 and 3.
+pub fn record_usn(rec: &[u8]) -> Result<i64, WalkError> {
+    const TRUNCATED: WalkError = WalkError::TruncatedHeader { offset: 0 };
+    let (common, _) = RawCommonHeader::ref_from_prefix(rec).map_err(|_| TRUNCATED)?;
+    let rec = rec
+        .get(..common.record_length.get() as usize)
+        .ok_or(WalkError::RecordOverrun { offset: 0 })?;
+    match common.major_version.get() {
+        2 => Ok(RawV2::ref_from_prefix(rec)
+            .map_err(|_| TRUNCATED)?
+            .0
+            .usn
+            .get()),
+        3 => Ok(RawV3::ref_from_prefix(rec)
+            .map_err(|_| TRUNCATED)?
+            .0
+            .usn
+            .get()),
+        version => Err(WalkError::UnsupportedVersion { offset: 0, version }),
+    }
 }
 
 /// Walks the packed records after the leading 8-byte value.
@@ -660,6 +698,29 @@ mod tests {
         assert_eq!(wtf8::to_utf16(&walk.records[0].name), units("ā"));
     }
 
+    /// `record_usn` reads the field at the V2 and V3 offsets; a wrong offset
+    /// would make every folder's USN differ from the layout pass's, which
+    /// silently stops a build from sharing descriptors.
+    #[test]
+    fn record_usn_reads_v2_and_v3_records() {
+        let usn = 0x0123_4567_89AB_CDEF;
+        for version in [2u16, 3] {
+            let rec = record_bytes(
+                &RecordFixture::dir(7, 5, "d")
+                    .with_version(version)
+                    .with_usn(usn),
+            );
+            assert_eq!(record_usn(&rec), Ok(usn), "version {version}");
+        }
+        assert_eq!(
+            record_usn(&build_v4_record_bytes()),
+            Err(WalkError::UnsupportedVersion {
+                offset: 0,
+                version: 4
+            })
+        );
+    }
+
     mod prop {
         use super::*;
         use proptest::prelude::*;
@@ -724,6 +785,13 @@ mod tests {
                 let walk = walk_journal_buffer(&buf).expect("fixture buffers must walk");
                 prop_assert_eq!(walk.next_usn, lead);
                 prop_assert_eq!(walk.records.len(), recs.len());
+            }
+
+            /// A record from the disk can be any bytes; reading its USN must
+            /// return an error, never panic a build.
+            #[test]
+            fn record_usn_never_panics(rec in proptest::collection::vec(any::<u8>(), 0..160)) {
+                let _ = record_usn(&rec);
             }
 
             /// Journal and enum buffers come from the disk, so any bytes can

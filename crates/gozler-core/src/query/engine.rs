@@ -1973,6 +1973,8 @@ mod tests {
             size: Some(size),
             mtime_ft: Some(1000),
             created_ft: None,
+            security_id: None,
+            usn: None,
             names: vec![LayoutName {
                 parent_frn,
                 name,
@@ -2829,6 +2831,8 @@ mod tests {
             size,
             mtime_ft: mtime,
             created_ft: None,
+            security_id: None,
+            usn: None,
             names: links
                 .iter()
                 .map(|&(parent_frn, name)| LayoutName {
