@@ -473,7 +473,8 @@
     "index": "Sürücüler ve hizmet",
     "include": "Dahil et",
     "visibility": "Görünürlük",
-    "not_saved": "Bu bilgisayardaki herkes için ayarlar kaydedilemedi. {0}"
+    "not_saved": "Bu bilgisayardaki herkes için ayarlar kaydedilemedi. {0}",
+    "admin_note": "Bu ayarlar bu bilgisayardaki herkes için geçerlidir. Değiştirmek için yönetici izniniz olmalıdır."
   },
   "settings_general": {
     "language": "&Dil:",
@@ -642,7 +643,6 @@
     "not_rebuilt": "Dizin yeniden oluşturulamadı. {0}"
   },
   "settings_include": {
-    "admin_note": "Bu ayarlar bu bilgisayardaki herkes için geçerlidir. Değiştirmek için yönetici izniniz olmalıdır.",
     "preview": "Şu an dizinde: {0} girdi. Tamam'dan sonra: yaklaşık {1}{2}.",
     "preview_added": ", artı yeniden işaretlediğiniz klasörler, dizinlendiklerinde",
     "folders": "Klasörler",

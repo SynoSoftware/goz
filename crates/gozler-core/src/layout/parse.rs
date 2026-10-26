@@ -146,13 +146,8 @@ pub struct LayoutFile {
     pub mtime_ft: Option<i64>,
     /// `CreationTime`, from the same place as [`Self::mtime_ft`].
     pub created_ft: Option<i64>,
-    /// `FILE_LAYOUT_INFO_ENTRY.SecurityId`: NTFS gives one ID to every file
-    /// with the same security descriptor; 0 means the file keeps its own.
     /// `None` when the info entry ends before `Usn`, and for a listing.
-    pub security_id: Option<u32>,
-    /// `FILE_LAYOUT_INFO_ENTRY.Usn`, the USN of the file's last journal
-    /// record. `None` exactly when [`Self::security_id`] is.
-    pub usn: Option<i64>,
+    pub security: Option<LayoutSecurity>,
     /// Every hard-link name of this file, in chain order (including DOS-only
     /// aliases, marked via [`LayoutName::dos_only`]).
     pub names: Vec<LayoutName>,
@@ -162,6 +157,16 @@ impl LayoutFile {
     pub fn is_dir(&self) -> bool {
         self.attributes & FILE_ATTRIBUTE_DIRECTORY != 0
     }
+}
+
+/// A file's `SecurityId` and `Usn`, from its `FILE_LAYOUT_INFO_ENTRY`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct LayoutSecurity {
+    /// NTFS gives one ID to every file with the same security descriptor; 0
+    /// means the file keeps its own.
+    pub id: u32,
+    /// The USN of the file's last journal record.
+    pub usn: i64,
 }
 
 /// Structural corruption detected while walking a layout buffer.
@@ -469,8 +474,7 @@ fn parse_file(
     // --- extra info (dates, security ID and USN) ---------------------------
     let mut mtime_ft = None;
     let mut created_ft = None;
-    let mut security_id = None;
-    let mut usn = None;
+    let mut security = None;
     if entry.extra_info_offset.get() != 0 {
         let info_off = follow_offset(
             buf,
@@ -499,8 +503,10 @@ fn parse_file(
                 info_off + INFO_SECURITY_OFFSET,
                 "FILE_LAYOUT_INFO_ENTRY.SecurityId",
             )?;
-            security_id = Some(ids.security_id.get());
-            usn = Some(ids.usn.get());
+            security = Some(LayoutSecurity {
+                id: ids.security_id.get(),
+                usn: ids.usn.get(),
+            });
         }
     }
 
@@ -555,8 +561,7 @@ fn parse_file(
         size,
         mtime_ft,
         created_ft,
-        security_id,
-        usn,
+        security,
         names,
     })
 }
@@ -1090,8 +1095,7 @@ mod tests {
         patch_u32(&mut buf, ENTRY_EXTRA_INFO_LENGTH, 0);
         let parsed = walk_layout_buffer(&buf).expect("legacy info entry parses");
         assert_eq!(parsed[0].mtime_ft, Some(133_800_000_000_000_000));
-        assert_eq!(parsed[0].security_id, one_file().expected().security_id);
-        assert_eq!(parsed[0].usn, one_file().expected().usn);
+        assert_eq!(parsed[0].security, one_file().expected().security);
     }
 
     #[test]
@@ -1102,8 +1106,7 @@ mod tests {
         patch_u32(&mut buf, ENTRY_EXTRA_INFO_LENGTH, 55);
         let parsed = walk_layout_buffer(&buf).expect("short info entry parses");
         assert_eq!(parsed[0].mtime_ft, Some(133_800_000_000_000_000));
-        assert_eq!(parsed[0].security_id, None);
-        assert_eq!(parsed[0].usn, None);
+        assert_eq!(parsed[0].security, None);
     }
 
     #[test]

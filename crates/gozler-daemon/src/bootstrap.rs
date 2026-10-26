@@ -14,7 +14,7 @@ use std::time::Instant;
 
 use anyhow::{Context, Result, anyhow, bail};
 use gozler_core::include::VolumeRules;
-use gozler_core::index::settle::{self, FileLink, FileStat, FolderSecurity, Listed, VolumeReads};
+use gozler_core::index::settle::{self, FileLink, FileStat, Listed, VolumeReads};
 use gozler_core::index::{IdWidth, VolumeIndex};
 use gozler_core::layout::{RECOMMENDED_LAYOUT_FLAGS, walk_layout_buffer, walk_listing_buffer};
 use gozler_core::types::{Frn, IndexProgress};
@@ -266,8 +266,9 @@ pub(crate) struct BuiltIndex {
     /// How long the enumeration took, or `None` when it did not run because
     /// the first pass completed.
     pub enum_secs: Option<f64>,
-    /// How many folder descriptors the build read. The index's stats count
-    /// those that failed.
+    /// How many folder descriptors the build read.
+    /// [`VolumeIndex::unread_folder_count`] counts the folders it could not
+    /// read.
     pub descriptor_reads: u64,
 }
 
@@ -368,7 +369,6 @@ pub(crate) fn build_index(
 
     let read_start = Instant::now();
     let mut descriptor_reads = 0;
-    let mut descriptor_reads_failed = Vec::new();
     let (read_secs, enum_secs, security) = match filesystem {
         Filesystem::Refs => {
             report(IndexProgress::Scanning {
@@ -383,7 +383,7 @@ pub(crate) fn build_index(
                 &[root],
                 cancelled,
                 |listed| {
-                    descriptor_reads_failed.extend(listed.apply(&mut index));
+                    listed.apply(&mut index);
                     match listed {
                         Listed::Folder { .. } => descriptor_reads += 1,
                         Listed::Page(_) => report(IndexProgress::Scanning {
@@ -453,7 +453,6 @@ pub(crate) fn build_index(
             &mut index,
             security,
             &mut Disk::new(handle, guid_path),
-            &mut descriptor_reads_failed,
             cancelled,
         ) else {
             return Ok(None);
@@ -461,7 +460,6 @@ pub(crate) fn build_index(
         descriptor_reads += reads;
     }
     finish_index(&mut index);
-    index.note_descriptor_reads_failed(&descriptor_reads_failed);
     if enum_secs.is_some() {
         index.record_size_pass_stopped();
     }
@@ -576,24 +574,6 @@ impl VolumeReads for Disk<'_> {
         })
     }
 
-    fn folder_security(&mut self, frn: Frn) -> Result<Option<FolderSecurity>> {
-        let read = read_folder_security(self.handle, frn.0)
-            .map_err(anyhow::Error::from)
-            .and_then(|raw| {
-                raw.map(|raw| {
-                    Ok(FolderSecurity {
-                        usn: record_usn(&raw.usn_record)?,
-                        descriptor: raw.descriptor,
-                    })
-                })
-                .transpose()
-            });
-        if let Err(e) = &read {
-            tracing::debug!(volume = %self.volume, ?frn, error = %e, "folder security read failed");
-        }
-        read
-    }
-
     fn stat(&mut self, frn: Frn) -> Result<Option<FileStat>> {
         match stat_file(self.handle, frn.0) {
             Ok(stat) => Ok(stat.map(|s| FileStat {
@@ -631,11 +611,54 @@ impl VolumeReads for Disk<'_> {
     }
 }
 
+/// A folder's descriptor and the USN of its last journal record, read in
+/// that order, so a permission change after the descriptor read gives a
+/// later USN.
+struct FolderSecurity {
+    descriptor: Vec<u8>,
+    usn: i64,
+}
+
+/// The reads [`read_build_descriptors`] makes of a volume.
+trait DescriptorReads {
+    /// The security descriptor of folder `frn`, then the USN of its last
+    /// journal record, both from one open; `Ok(None)` when the folder is gone
+    /// or being deleted.
+    fn folder_security(&mut self, frn: Frn) -> Result<Option<FolderSecurity>>;
+
+    /// As [`VolumeReads::folder_descriptor`].
+    fn folder_descriptor(&mut self, frn: Frn) -> Result<Option<Vec<u8>>>;
+}
+
+impl DescriptorReads for Disk<'_> {
+    fn folder_security(&mut self, frn: Frn) -> Result<Option<FolderSecurity>> {
+        let read = read_folder_security(self.handle, frn.0)
+            .map_err(anyhow::Error::from)
+            .and_then(|raw| {
+                raw.map(|raw| {
+                    Ok(FolderSecurity {
+                        usn: record_usn(&raw.usn_record)?,
+                        descriptor: raw.descriptor,
+                    })
+                })
+                .transpose()
+            });
+        if let Err(e) = &read {
+            tracing::debug!(volume = %self.volume, ?frn, error = %e, "folder security read failed");
+        }
+        read
+    }
+
+    fn folder_descriptor(&mut self, frn: Frn) -> Result<Option<Vec<u8>>> {
+        VolumeReads::folder_descriptor(self, frn)
+    }
+}
+
 /// Reads the descriptors of the folders an NTFS build keeps after the
 /// Include rules, and returns how many reads it made, or `None` when
 /// `cancelled` stopped it. `security` holds each folder of the FILE_LAYOUT
-/// pass, with the `Usn` the pass read, under its `SecurityId`. Each failed
-/// read adds its folder to `failed`.
+/// pass, with the `Usn` the pass read, under its `SecurityId`. A folder
+/// whose read fails stays without a descriptor.
 ///
 /// NTFS gives one `SecurityId` to every file with the same descriptor, so
 /// one read serves all the folders of an ID: when the first folder still has
@@ -646,11 +669,10 @@ impl VolumeReads for Disk<'_> {
 /// Last, each folder that `security` does not hold, such as one the MFT
 /// enumeration added, is read on its own. That can be most folders, which
 /// takes many seconds, so each read first checks `cancelled`.
-fn read_build_descriptors<R: VolumeReads>(
+fn read_build_descriptors(
     index: &mut VolumeIndex,
     security: HashMap<u32, Vec<(Frn, i64)>>,
-    reads: &mut R,
-    failed: &mut Vec<Frn>,
+    reads: &mut impl DescriptorReads,
     cancelled: impl Fn() -> bool,
 ) -> Option<u64> {
     let mut count = 0;
@@ -689,17 +711,11 @@ fn read_build_descriptors<R: VolumeReads>(
     // Whether folder `frn`, read on its own, got its descriptor.
     let mut read_alone = |index: &mut VolumeIndex, frn: Frn| {
         count += 1;
-        match reads.folder_descriptor(frn) {
-            Ok(Some(descriptor)) => {
-                index.set_folder_descriptor(frn, Some(&descriptor));
-                true
-            }
-            Ok(None) => false,
-            Err(_) => {
-                failed.push(frn);
-                false
-            }
-        }
+        let Ok(Some(descriptor)) = reads.folder_descriptor(frn) else {
+            return false;
+        };
+        index.set_folder_descriptor(frn, Some(&descriptor));
+        true
     };
     for frn in alone {
         if cancelled() {
@@ -761,9 +777,9 @@ fn layout_pass(
                     index.insert_layout(f);
                     progress.advance(f.frn.0 as u64);
                     if f.is_dir()
-                        && let (Some(id), Some(usn)) = (f.security_id, f.usn)
+                        && let Some(read) = f.security
                     {
-                        security.entry(id).or_default().push((f.frn, usn));
+                        security.entry(read.id).or_default().push((f.frn, read.usn));
                     }
                 }
                 report(progress.snapshot(index));
@@ -1086,51 +1102,33 @@ mod tests {
         frn.0.to_le_bytes().to_vec()
     }
 
-    impl VolumeReads for BuildReads {
-        type Error = &'static str;
-
-        fn list_folder(
-            &mut self,
-            _: Frn,
-            _: &mut dyn FnMut(Listed<Self::Error>),
-        ) -> Result<bool, Self::Error> {
-            unreachable!("the NTFS build lists no folder")
-        }
-
-        fn folder_descriptor(&mut self, frn: Frn) -> Result<Option<Vec<u8>>, Self::Error> {
+    impl DescriptorReads for BuildReads {
+        fn folder_descriptor(&mut self, frn: Frn) -> Result<Option<Vec<u8>>> {
             self.descriptor_reads.push(frn);
             if self.failing.contains(&frn) {
-                return Err("access denied");
+                bail!("access denied");
             }
             Ok(Some(own(frn)))
         }
 
-        fn folder_security(&mut self, frn: Frn) -> Result<Option<FolderSecurity>, Self::Error> {
+        fn folder_security(&mut self, frn: Frn) -> Result<Option<FolderSecurity>> {
             self.security_reads.push(frn);
             let answer = *self.security.get(&frn).expect("a folder the test answers");
-            answer.map(|read| {
+            answer.map_err(|e| anyhow!(e)).map(|read| {
                 read.map(|(descriptor, usn)| FolderSecurity {
                     descriptor: descriptor.to_vec(),
                     usn,
                 })
             })
         }
-
-        fn stat(&mut self, _: Frn) -> Result<Option<FileStat>, Self::Error> {
-            unreachable!("the descriptor reads read no size")
-        }
-
-        fn links(&mut self, _: Frn) -> Result<Option<Vec<FileLink>>, Self::Error> {
-            unreachable!("the descriptor reads read no link")
-        }
     }
 
-    /// T3: the build shares one read among the folders of a `SecurityId`
-    /// only while the first folder keeps the pass's USN. Without it, one
-    /// folder whose permissions changed during the build gives its new
-    /// permissions to every folder that shared its old `SecurityId`, with no
-    /// error; and a folder read twice, or a metadata folder, is counted in
-    /// `--status`.
+    /// The build shares one read among the folders of a `SecurityId` only
+    /// while the first folder keeps the pass's USN. Without it, one folder
+    /// whose permissions changed during the build gives its new permissions
+    /// to every folder that shared its old `SecurityId`, with no error; and
+    /// a folder is read twice, or a metadata folder is read and its failure
+    /// shows in `--status`.
     #[test]
     fn the_build_shares_a_descriptor_only_when_it_is_safe() {
         use gozler_core::index::NTFS_ROOT_FRN as ROOT;
@@ -1184,9 +1182,7 @@ mod tests {
             failing: vec![f],
             ..BuildReads::default()
         };
-        let mut failed = Vec::new();
-
-        let count = read_build_descriptors(&mut index, security, &mut reads, &mut failed, || false)
+        let count = read_build_descriptors(&mut index, security, &mut reads, || false)
             .expect("not cancelled");
 
         let sorted = |mut frns: Vec<Frn>| {
@@ -1203,7 +1199,6 @@ mod tests {
             "each folder read on its own once, and no metadata folder"
         );
         assert_eq!(count, 13);
-        assert_eq!(failed, [f]);
         for (folder, descriptor) in [
             (a, b"shared".to_vec()),
             (b, b"shared".to_vec()),

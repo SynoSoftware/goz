@@ -93,17 +93,13 @@ pub fn write_status(s: &DaemonStatus, out: &mut impl Write) -> io::Result<()> {
                 ),
             )?;
         }
-        if v.descriptor_reads_failed > 0 {
+        if v.unread_folders > 0 {
             detail(
                 out,
                 "Permissions",
                 &format!(
-                    "{} failed since the last scan; such a folder's contents stay hidden from most users until the folder changes",
-                    plural(
-                        v.descriptor_reads_failed,
-                        "folder permission read",
-                        "folder permission reads"
-                    )
+                    "{} whose permissions are not read yet or could not be read; such a folder's contents stay hidden from users who do not see every file until gozlerd reads its permissions",
+                    plural(v.unread_folders, "folder", "folders")
                 ),
             )?;
         }

@@ -16,20 +16,20 @@ pub(super) struct OpenSettings {
 }
 
 /// The job that runs as administrator, which Settings starts one at a time.
-pub(super) enum IncludeSave {
+pub(super) enum ElevatedJob {
     Idle,
     /// Runs; once it ran, the window sends `SettingsSaved` when
     /// `tells_service`.
-    Saving {
+    Running {
         tells_service: bool,
     },
-    Saved(Result<(), NotSaved>),
+    Answered(Result<(), NotSaved>),
 }
 
 pub(in crate::app) struct SettingsBridge {
     pub(super) open: Cell<Option<OpenSettings>>,
     pub(super) total_commander: RefCell<Option<Result<Option<String>, DaemonFailure>>>,
-    pub(super) include_save: RefCell<IncludeSave>,
+    pub(super) elevated_job: RefCell<ElevatedJob>,
     pub(super) sign_in_saved: RefCell<Option<(Id, io::Result<()>)>>,
     pub(super) labels: RefCell<Vec<(String, Option<String>)>>,
     /// The account names of the SID strings that Settings > Visibility
@@ -47,7 +47,7 @@ impl SettingsBridge {
         Self {
             open: Cell::new(None),
             total_commander: RefCell::new(None),
-            include_save: RefCell::new(IncludeSave::Idle),
+            elevated_job: RefCell::new(ElevatedJob::Idle),
             sign_in_saved: RefCell::new(None),
             labels: RefCell::new(Vec::new()),
             account_names: RefCell::new(Vec::new()),
@@ -498,9 +498,9 @@ impl SettingsBridge {
         window.apply(hwnd, accepted);
     }
 
-    /// Starts saving the Include settings, or asking for a rebuild of the
+    /// Starts saving the service's settings, or asking for a rebuild of the
     /// index, as administrator, after Windows asks the person for
-    /// permission (DESIGN.md: The Include page, The
+    /// permission (DESIGN.md: The Include page, The Visibility page, The
     /// Drives and service page). The Settings dialog starts no second job
     /// while one runs.
     pub(in crate::app) fn run_as_administrator(
@@ -512,8 +512,8 @@ impl SettingsBridge {
         let tells_service = job.tells_service();
         let mut work = window.created().work.borrow_mut();
         if work.elevated.start(job) {
-            self.include_save
-                .replace(IncludeSave::Saving { tells_service });
+            self.elevated_job
+                .replace(ElevatedJob::Running { tells_service });
         }
         let retired = work.elevated.take_retired();
         work.retire(retired);
@@ -522,14 +522,14 @@ impl SettingsBridge {
     /// Takes the job's answer once it arrived: tells the service, which
     /// applies saved settings and rebuilds when asked, and the Settings
     /// dialog.
-    pub(in crate::app) fn finish_include_save(&self, window: &MainWindow) {
+    pub(in crate::app) fn finish_elevated_job(&self, window: &MainWindow) {
         let answer = window.created().work.borrow_mut().elevated.take();
         let Some(answer) = answer else {
             return;
         };
         let tells_service = matches!(
-            *self.include_save.borrow(),
-            IncludeSave::Saving {
+            *self.elevated_job.borrow(),
+            ElevatedJob::Running {
                 tells_service: true
             }
         );
@@ -537,17 +537,17 @@ impl SettingsBridge {
             let fetch = window.model.borrow_mut().settings_saved();
             window.start(fetch);
         }
-        self.include_save.replace(IncludeSave::Saved(answer));
+        self.elevated_job.replace(ElevatedJob::Answered(answer));
         self.post_settings_reply();
     }
 
-    /// The Include save's answer, once it arrived.
-    pub(in crate::app) fn take_include_saved(&self) -> Option<Result<(), NotSaved>> {
-        let mut save = self.include_save.borrow_mut();
-        match std::mem::replace(&mut *save, IncludeSave::Idle) {
-            IncludeSave::Saved(answer) => Some(answer),
+    /// The answer of the job that runs as administrator, once it arrived.
+    pub(in crate::app) fn take_elevated_answer(&self) -> Option<Result<(), NotSaved>> {
+        let mut job = self.elevated_job.borrow_mut();
+        match std::mem::replace(&mut *job, ElevatedJob::Idle) {
+            ElevatedJob::Answered(answer) => Some(answer),
             current => {
-                *save = current;
+                *job = current;
                 None
             }
         }

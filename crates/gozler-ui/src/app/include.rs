@@ -1,13 +1,13 @@
 //! Saving the service's settings, the Include settings (DESIGN.md: The
-//! Include page) and the users and groups who see every file (spec `V14`),
-//! and asking for a rebuild of the index (DESIGN.md: The Drives and service
-//! page). Only an administrator can write them, so OK or Apply starts a
-//! copy of the window as administrator with `--save-include <file>`, which
-//! writes each changed setting, and Rebuild with `--rebuild-index`, after
-//! Windows asks the person for permission. That copy writes the registry
-//! and exits; the service reads it there, where only an administrator can
-//! write, so Windows proves who asked. The work owner waits for that copy
-//! without retaining a window handle.
+//! Include page) and the users and groups who see every file (DESIGN.md: The
+//! Visibility page), and asking for a rebuild of the index (DESIGN.md: The
+//! Drives and service page). Only an administrator can write them, so OK or
+//! Apply starts a copy of the window as administrator with
+//! `--save-include <file>`, which writes each changed setting, and Rebuild
+//! with `--rebuild-index`, after Windows asks the person for permission.
+//! That copy writes the registry and exits; the service reads it there,
+//! where only an administrator can write, so Windows proves who asked. The
+//! work owner waits for that copy without retaining a window handle.
 
 use crate::core::settings::ServiceChanges;
 use crate::win;

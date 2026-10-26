@@ -143,5 +143,5 @@ pub enum SeenBy {
     /// A filtered user: the entries in the folders these answers let them
     /// list, and no folder sizes, because a folder's size would count files
     /// they cannot see.
-    Caller(Listable),
+    Filtered(Listable),
 }

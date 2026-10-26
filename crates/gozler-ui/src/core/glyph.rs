@@ -104,6 +104,8 @@ pub(crate) enum Glyph {
     Paste,
     /// Two bars: pauses a file operation.
     Pause,
+    /// Two people: the Visibility page and its list.
+    People,
     /// A framed picture: the Pictures kind.
     Picture,
     /// A triangle pointing right: resumes a paused file operation, and
@@ -120,8 +122,6 @@ pub(crate) enum Glyph {
     /// A text cursor in a box: Copy name, and the Include page's name
     /// group.
     Rename,
-    /// Two people: the Visibility page and its list.
-    People,
     /// A diskette: Apply.
     Save,
     /// A magnifying glass: Find, Search in this folder, and the Search page

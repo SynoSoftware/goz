@@ -312,8 +312,7 @@ fn layout_pass_never_leaks_a_retenanted_record() {
         size: Some(10),
         mtime_ft: Some(555),
         created_ft: None,
-        security_id: None,
-        usn: None,
+        security: None,
         names: vec![crate::layout::LayoutName {
             parent_frn: root_frn(),
             name: b"tenant.txt".to_vec(),
@@ -1061,8 +1060,7 @@ fn listed(f: Frn, folder: Frn, name: &str, is_dir: bool) -> LayoutFile {
         size: (!is_dir).then_some(0),
         mtime_ft: Some(0),
         created_ft: None,
-        security_id: None,
-        usn: None,
+        security: None,
         names: vec![crate::layout::LayoutName {
             parent_frn: folder,
             name: name.as_bytes().to_vec(),
@@ -1127,10 +1125,6 @@ impl settle::VolumeReads for ModelReads<'_> {
         Ok(self.states[self.now]
             .exists(node)
             .then(|| model_descriptor(node)))
-    }
-
-    fn folder_security(&mut self, _: Frn) -> Result<Option<settle::FolderSecurity>, Self::Error> {
-        unreachable!("the settle and the walk read no folder security")
     }
 
     fn stat(&mut self, _: Frn) -> Result<Option<settle::FileStat>, Self::Error> {
@@ -1366,8 +1360,7 @@ proptest! {
                 size: None,
                 mtime_ft: None,
                 created_ft: None,
-                security_id: None,
-                usn: None,
+                security: None,
                 names: vec![crate::layout::LayoutName {
                     parent_frn: r.parent_frn,
                     name: r.name.clone(),
@@ -1434,7 +1427,7 @@ proptest! {
             listing_changes: Some(changes_per_listing.iter().cycle()),
         };
         let walked = settle::walk_folders(&mut reads, &[ids.root()], || false, |listed| {
-            assert_eq!(listed.apply(&mut index.borrow_mut()), None, "model descriptors read");
+            listed.apply(&mut index.borrow_mut());
         });
         prop_assert!(matches!(walked, Ok(settle::Walk::Complete)));
         reads.listing_changes = None;
@@ -1529,8 +1522,7 @@ fn enrich_with_renamed_directory_never_orphans_children() {
         size: None,
         mtime_ft: Some(555),
         created_ft: None,
-        security_id: None,
-        usn: None,
+        security: None,
         names: vec![crate::layout::LayoutName {
             parent_frn: root_frn(),
             name: b"docs".to_vec(),

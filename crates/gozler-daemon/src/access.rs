@@ -9,12 +9,12 @@
 use std::os::windows::io::BorrowedHandle;
 use std::sync::atomic::{AtomicBool, Ordering};
 
+use anyhow::Context;
 use gozler_core::include::{SEE_EVERY_FILE_VALUE, SETTINGS_KEY};
 use gozler_core::query::Viewer;
-use gozler_winfs::{ClientToken, Sid, WinError, machine_strings, pipe_client_token};
-
-/// `S-1-5-18`, the operating system's own account.
-const SYSTEM: [u8; 12] = [1, 1, 0, 0, 0, 0, 0, 5, 18, 0, 0, 0];
+use gozler_winfs::{
+    ClientToken, Sid, WinError, machine_strings, pipe_client_token, set_machine_strings,
+};
 
 /// What the daemon decided for one request, before it runs.
 pub(crate) enum Access {
@@ -46,7 +46,8 @@ impl Refusal {
     }
 }
 
-/// Whether the caller may list a folder, given its descriptor bytes.
+/// Whether the caller may list a folder, given its descriptor bytes. Named
+/// because clippy's `type_complexity` refuses the boxed form inline.
 pub(crate) type MayList = dyn Fn(&[u8]) -> bool + Send;
 
 /// What an identified caller sees.
@@ -54,14 +55,14 @@ pub(crate) enum Visibility {
     /// Every entry, with folder sizes.
     Everything,
     /// The entries of the folders this check lets the caller list.
-    Caller(Box<MayList>),
+    Filtered(Box<MayList>),
 }
 
 impl Visibility {
     /// The caller's own token decides which folders they may list. A check
     /// that fails hides the folder, because hiding is the safe answer.
     fn of_token(token: ClientToken) -> Visibility {
-        Visibility::Caller(Box::new(move |descriptor: &[u8]| {
+        Visibility::Filtered(Box::new(move |descriptor: &[u8]| {
             token.may_list(descriptor).unwrap_or_else(|error| {
                 tracing::debug!(%error, "folder access check failed; its entries stay hidden");
                 false
@@ -73,7 +74,7 @@ impl Visibility {
     pub(crate) fn viewer(&self) -> Viewer<'_> {
         match self {
             Visibility::Everything => Viewer::Everything,
-            Visibility::Caller(may_list) => Viewer::Filtered(&**may_list),
+            Visibility::Filtered(may_list) => Viewer::Filtered(&**may_list),
         }
     }
 }
@@ -87,10 +88,9 @@ pub(crate) fn of_pipe_client(pipe: BorrowedHandle<'_>) -> Access {
     };
     match token.enabled_sids() {
         Err(error) => Access::Refused(Refusal::Unidentified(error)),
-        Ok(Some(sids)) if sees_everything(&sids, &stored_sids()) => {
-            Access::Sees(Visibility::Everything)
-        }
-        // A restricted token, or a caller who is neither SYSTEM nor listed.
+        Ok(sids) if sees_everything(&sids, &stored_sids()) => Access::Sees(Visibility::Everything),
+        // A caller who is neither SYSTEM nor listed, or a restricted token,
+        // which has no enabled SIDs.
         Ok(_) => Access::Sees(Visibility::of_token(token)),
     }
 }
@@ -100,12 +100,25 @@ pub(crate) fn of_pipe_client(pipe: BorrowedHandle<'_>) -> Access {
 fn sees_everything(caller: &[Sid], list: &[Sid]) -> bool {
     caller
         .iter()
-        .any(|sid| sid.as_bytes() == SYSTEM || list.contains(sid))
+        .any(|sid| sid.as_bytes() == Sid::SYSTEM || list.contains(sid))
+}
+
+/// The lines of the stored list of users and groups who see every file, one
+/// SID string per line of the `SeeEveryFile` value, which only administrators
+/// and the system can write; `None` when no list is stored.
+pub(crate) fn stored_lines() -> anyhow::Result<Option<Vec<String>>> {
+    machine_strings(SETTINGS_KEY, SEE_EVERY_FILE_VALUE)
+        .context("reading the list of users and groups who see every file")
+}
+
+/// Stores `lines` as the list of users and groups who see every file.
+pub(crate) fn store_lines(lines: &[String]) -> anyhow::Result<()> {
+    set_machine_strings(SETTINGS_KEY, SEE_EVERY_FILE_VALUE, lines)
+        .context("storing the list of users and groups who see every file")
 }
 
 /// The SIDs on the stored list of users and groups who see every file, as it
-/// is stored now: one SID string per line of the `SeeEveryFile` value, which
-/// only administrators and the system can write.
+/// is stored now.
 ///
 /// A missing value is an empty list, and so is one that does not read,
 /// because then only SYSTEM sees every file and every other caller is
@@ -115,9 +128,9 @@ fn sees_everything(caller: &[Sid], list: &[Sid]) -> bool {
 /// `gozlerd see-every-file` shows it.
 fn stored_sids() -> Vec<Sid> {
     static UNREADABLE_LOGGED: AtomicBool = AtomicBool::new(false);
-    let lines = machine_strings(SETTINGS_KEY, SEE_EVERY_FILE_VALUE).unwrap_or_else(|error| {
+    let lines = stored_lines().unwrap_or_else(|error| {
         if !UNREADABLE_LOGGED.swap(true, Ordering::Relaxed) {
-            tracing::warn!(%error, "could not read the list of users who see every file");
+            tracing::warn!(error = %format!("{error:#}"), "the list counts as empty");
         }
         None
     });
@@ -134,7 +147,7 @@ mod tests {
         s.parse().expect("a SID string")
     }
 
-    /// T8: who sees every file. Without it, a wrong match turns the filter
+    /// Who sees every file. Without it, a wrong match turns the filter
     /// off for users the administrator did not list, or leaves it on for one
     /// they did.
     #[test]

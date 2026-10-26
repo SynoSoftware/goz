@@ -2621,7 +2621,7 @@ impl MainWindow {
         if !self.update_live() {
             return;
         }
-        self.settings.finish_include_save(self);
+        self.settings.finish_elevated_job(self);
         if !self.update_live() {
             return;
         }

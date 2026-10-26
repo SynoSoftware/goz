@@ -183,7 +183,7 @@ pub(crate) struct Filter {
 pub(crate) struct Filtered {
     pub(crate) input: Filter,
     pub(crate) files: Option<Arc<[ResultItem]>>,
-    pub(crate) chosen_bytes: Option<SelectedSize>,
+    pub(crate) chosen_size: Option<SelectedSize>,
     pub(crate) sums: Sums,
 }
 
@@ -236,8 +236,8 @@ impl Filter {
                 }
             }
         };
-        let chosen_bytes = if self.count_bytes {
-            files.as_deref().map(super::search_list::chosen_bytes)
+        let chosen_size = if self.count_bytes {
+            files.as_deref().map(super::search_list::chosen_size)
         } else {
             None
         };
@@ -245,7 +245,7 @@ impl Filter {
         Filtered {
             input: self,
             files,
-            chosen_bytes,
+            chosen_size,
             sums,
         }
     }

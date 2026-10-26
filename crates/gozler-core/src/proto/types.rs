@@ -480,10 +480,13 @@ pub struct VolumeStatus {
     /// volume may be stale until the next rescan.
     #[serde(default)]
     pub link_reconciles_dropped: u64,
-    /// Folder descriptor reads that failed since the volume was last
-    /// scanned. Each such folder's entries are hidden from every user who
-    /// does not see every file.
-    pub descriptor_reads_failed: u64,
+    /// The folders whose descriptor is not read yet or whose read failed
+    /// ([`VolumeIndex::unread_folder_count`]); 0 for a volume never indexed.
+    /// Each such folder's entries are hidden from every user who does not
+    /// see every file.
+    ///
+    /// [`VolumeIndex::unread_folder_count`]: crate::index::VolumeIndex::unread_folder_count
+    pub unread_folders: u64,
     /// Per-component index memory breakdown. `None` from daemons predating it.
     #[serde(default)]
     pub memory: Option<VolumeMemory>,
@@ -657,7 +660,7 @@ mod tests {
                 delete_of_unknown: 2 * i as u64,
                 stale_slots: 3 * i as u64,
                 link_reconciles_dropped: 4 * i as u64,
-                descriptor_reads_failed: 5 * i as u64,
+                unread_folders: 5 * i as u64,
                 memory: Some(VolumeMemory {
                     entries: MemPair {
                         used: 10 * i as u64,

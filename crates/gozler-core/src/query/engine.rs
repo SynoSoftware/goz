@@ -54,7 +54,8 @@ pub struct MatchSums {
     pub folder_bytes: u64,
     /// `folder_bytes` is only a lower bound: the size pass stopped on a
     /// volume searched, so a folder's size counts only the files it read
-    /// ([`VolumeIndex::folder_sizes_at_least`]).
+    /// ([`VolumeIndex::folder_sizes_at_least`]), or a matching folder's size
+    /// is not known to the reader, as for a filtered user.
     pub folder_bytes_at_least: bool,
 }
 
@@ -108,8 +109,10 @@ fn match_sums(index: &VolumeIndex, records: &[SortRecord], seen_by: &SeenBy) -> 
                 // A filtered user reads no folder's size. Otherwise only an
                 // index whose size pass has not ended lacks one, and the
                 // daemon searches none that holds a folder.
-                let size = entry.size(seen_by).unwrap_or(0);
-                sums.folder_bytes = sums.folder_bytes.saturating_add(size);
+                match entry.size(seen_by) {
+                    Some(size) => sums.folder_bytes = sums.folder_bytes.saturating_add(size),
+                    None => sums.folder_bytes_at_least = true,
+                }
             }
         } else {
             sums.files += 1;
@@ -2010,8 +2013,7 @@ mod tests {
             size: Some(size),
             mtime_ft: Some(1000),
             created_ft: None,
-            security_id: None,
-            usn: None,
+            security: None,
             names: vec![LayoutName {
                 parent_frn,
                 name,
@@ -2868,8 +2870,7 @@ mod tests {
             size,
             mtime_ft: mtime,
             created_ft: None,
-            security_id: None,
-            usn: None,
+            security: None,
             names: links
                 .iter()
                 .map(|&(parent_frn, name)| LayoutName {
@@ -2979,8 +2980,7 @@ mod tests {
                 .map(|(v, i)| reply.reads_volume(v).then_some(&**i))
                 .collect();
             let mut taken = 0;
-            let seen_by: Vec<SeenBy> = held.iter().map(|_| SeenBy::Everything).collect();
-            let more = reply.fill(&held, &seen_by, usize::MAX, |row, names| {
+            let more = reply.fill(&held, usize::MAX, |row, names| {
                 if taken == page_rows {
                     return false;
                 }
@@ -2999,7 +2999,7 @@ mod tests {
 
     /// The rows of one volume's `answer`, read as one page.
     fn read_all(answer: VolumeRows, index: &mut VolumeIndex) -> (Vec<String>, u64) {
-        let mut reply = Reply::new(vec![answer], 0, None);
+        let mut reply = Reply::new(vec![(answer, SeenBy::Everything)], 0, None);
         read_pages(&mut reply, &mut [index], usize::MAX, |_, _| {})
     }
 
@@ -3425,7 +3425,7 @@ mod tests {
         .read_rows(&idx, &SeenBy::Everything)
         .expect("nothing changed");
         let a = idx.head_of(frn(100));
-        let mut reply = Reply::new(vec![answer], 0, None);
+        let mut reply = Reply::new(vec![(answer, SeenBy::Everything)], 0, None);
         let (paths, total) = read_pages(&mut reply, &mut [&mut idx], 1, |_, indexes| {
             let idx = &mut *indexes[0];
             idx.apply_batch(&[
@@ -3474,7 +3474,7 @@ mod tests {
         .read_rows(&idx, &SeenBy::Everything)
         .expect("nothing changed");
         idx.apply_batch(&[rename(frn(100), frn(999), "sub", true)]);
-        let mut reply = Reply::new(vec![answer], 0, None);
+        let mut reply = Reply::new(vec![(answer, SeenBy::Everything)], 0, None);
         let (paths, total) = read_pages(&mut reply, &mut [&mut idx], 1, |_, indexes| {
             indexes[0].apply_batch(&[enum_rec(frn(999), NTFS_ROOT_FRN, "found", true)]);
         });
@@ -3505,7 +3505,7 @@ mod tests {
         .expect("nothing changed");
         idx.apply_batch(&[delete(frn(103))]);
         idx.optimize_storage();
-        let mut reply = Reply::new(vec![answer], 0, None);
+        let mut reply = Reply::new(vec![(answer, SeenBy::Everything)], 0, None);
         let (paths, total) = read_pages(&mut reply, &mut [&mut idx], usize::MAX, |_, _| {});
         assert!(paths.is_empty());
         assert_eq!(total, 0);
@@ -3526,7 +3526,7 @@ mod tests {
                 let answers = volumes
                     .iter()
                     .map(|(prefix, idx)| {
-                        find_matches(
+                        let answer = find_matches(
                             idx,
                             prefix,
                             &parsed,
@@ -3538,7 +3538,8 @@ mod tests {
                         )
                         .order()
                         .read_rows(idx, &SeenBy::Everything)
-                        .expect("nothing changed")
+                        .expect("nothing changed");
+                        (answer, SeenBy::Everything)
                     })
                     .collect();
                 let mut reply = Reply::new(answers, 0, limit);
@@ -3574,10 +3575,10 @@ mod tests {
         for sort in [SortSpec::default(), SortSpec::default_for(SortKey::Path)] {
             let mut c = files(&["a.txt", "c.txt", "d.txt", "e.txt"]);
             let mut d = files(&["f.txt"]);
-            let answers: Vec<VolumeRows> = [(&c, r"C:\"), (&d, r"D:\")]
+            let answers: Vec<(VolumeRows, SeenBy)> = [(&c, r"C:\"), (&d, r"D:\")]
                 .into_iter()
                 .map(|(idx, prefix)| {
-                    find_matches(
+                    let answer = find_matches(
                         idx,
                         prefix,
                         &parsed,
@@ -3589,7 +3590,8 @@ mod tests {
                     )
                     .order()
                     .read_rows(idx, &SeenBy::Everything)
-                    .expect("nothing changed")
+                    .expect("nothing changed");
+                    (answer, SeenBy::Everything)
                 })
                 .collect();
             c.apply_batch(&[delete(frn(101))]);
@@ -3622,11 +3624,11 @@ mod tests {
         .order()
         .read_rows(&idx, &SeenBy::Everything)
         .expect("nothing changed");
-        let mut reply = Reply::new(vec![answer], 3, None);
+        let mut reply = Reply::new(vec![(answer, SeenBy::Everything)], 3, None);
         let mut pages: Vec<Vec<String>> = Vec::new();
         loop {
             let mut page = Vec::new();
-            let more = reply.fill(&[Some(&idx)], &[SeenBy::Everything], 2, |row, _| {
+            let more = reply.fill(&[Some(&idx)], 2, |row, _| {
                 page.push(crate::wtf8::to_string_lossy(row.name));
                 true
             });

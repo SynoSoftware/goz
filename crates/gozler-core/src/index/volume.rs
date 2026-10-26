@@ -133,12 +133,6 @@ pub struct IndexStats {
     /// until the next rescan. A file that is gone is not counted, because its
     /// delete record removes it.
     pub link_reconciles_dropped: u64,
-    /// Folder descriptor reads that failed since the index was built, for a
-    /// folder the index keeps. Such a folder has no descriptor, so its
-    /// entries are hidden from every user who does not see every file, until
-    /// the journal records a change to the folder itself or a rescan reads it
-    /// again.
-    pub descriptor_reads_failed: u64,
 }
 
 /// Where one volume index's heap bytes live, component by component.
@@ -566,9 +560,8 @@ impl VolumeIndex {
                 }
             }
             if let Some(head) = self.head_of(frn)
-                && self.entries.flags(head).contains(EntryFlags::DIR)
                 && (security_changed || self.entries.descriptor(head).is_none())
-                && !self.is_metadata_folder(head)
+                && self.reads_descriptor(head)
             {
                 // Until the new descriptor is read, the folder's entries are
                 // hidden; the old one would show a user who lost the right
@@ -602,23 +595,6 @@ impl VolumeIndex {
     /// successful walks are applied by [`Self::reconcile_links`].
     pub fn note_link_reconciles_dropped(&mut self, n: u64) {
         self.stats.link_reconciles_dropped += n;
-    }
-
-    /// Counts the folders of `folders`, whose descriptor read failed, that
-    /// the index still holds without a descriptor, so `Status` shows that
-    /// their entries are hidden. A folder that is gone, or that the Include
-    /// rules removed, hides nothing, so call this after the rules have
-    /// checked what the reads added. NTFS's metadata folders are not
-    /// counted, as [`Self::wants_descriptor`] says.
-    pub fn note_descriptor_reads_failed(&mut self, folders: &[Frn]) {
-        let hiding = folders
-            .iter()
-            .filter_map(|&frn| self.head_of(frn))
-            .filter(|&head| {
-                self.entries.descriptor(head).is_none() && !self.is_metadata_folder(head)
-            })
-            .count();
-        self.stats.descriptor_reads_failed += hiding as u64;
     }
 
     /// Sets the security descriptor of folder `frn`, or takes it away with
@@ -663,7 +639,7 @@ impl VolumeIndex {
     pub(crate) fn is_seen(&self, idx: EntryIdx, seen_by: &SeenBy) -> bool {
         match seen_by {
             SeenBy::Everything => true,
-            SeenBy::Caller(listable) => {
+            SeenBy::Filtered(listable) => {
                 let parent = self.entries.parent(idx);
                 idx == self.root
                     || (parent != NIL
@@ -676,28 +652,42 @@ impl VolumeIndex {
     }
 
     /// Whether the descriptor of `frn` is to be read: `frn` is a folder in
-    /// the index, and not one of NTFS's metadata folders. Windows refuses
-    /// some of those to gozlerd's backup privilege, and they hold only
-    /// NTFS's own files, so without this rule every PC would show their
-    /// failed reads in `--status`.
+    /// the index, other than lost+found and NTFS's metadata folders.
     pub fn wants_descriptor(&self, frn: Frn) -> bool {
-        self.head_of(frn).is_some_and(|head| {
-            self.entries.flags(head).contains(EntryFlags::DIR) && !self.is_metadata_folder(head)
-        })
+        self.head_of(frn)
+            .is_some_and(|head| self.reads_descriptor(head))
     }
 
     /// Every folder whose descriptor is to be read and that has none.
     pub fn unread_folders(&self) -> Vec<Frn> {
+        self.unread().map(|e| self.entries.frn(e)).collect()
+    }
+
+    /// How many folders [`Self::unread_folders`] returns: those whose read
+    /// failed, and those whose read is still to come, such as a folder whose
+    /// permissions changed in the batch being settled. It is counted from
+    /// the descriptors the index holds, so a folder whose read fails again
+    /// counts once, and one that a later read or a delete settled counts
+    /// nothing. It reads every entry.
+    pub fn unread_folder_count(&self) -> usize {
+        self.unread().count()
+    }
+
+    fn unread(&self) -> impl Iterator<Item = EntryIdx> + '_ {
         self.entries
             .iter_live()
-            .filter(|&e| {
-                e != self.lost_found
-                    && self.entries.flags(e).contains(EntryFlags::DIR)
-                    && self.entries.descriptor(e).is_none()
-                    && !self.is_metadata_folder(e)
-            })
-            .map(|e| self.entries.frn(e))
-            .collect()
+            .filter(|&e| self.entries.descriptor(e).is_none() && self.reads_descriptor(e))
+    }
+
+    /// Whether entry `idx` is a folder whose descriptor is read: not
+    /// lost+found, which no volume holds, and not one of NTFS's metadata
+    /// folders. Windows refuses some of those to gozlerd's backup privilege,
+    /// and they hold only NTFS's own files, so without this rule every PC
+    /// would show their failed reads in `--status`.
+    fn reads_descriptor(&self, idx: EntryIdx) -> bool {
+        idx != self.lost_found
+            && self.entries.flags(idx).contains(EntryFlags::DIR)
+            && !self.is_metadata_folder(idx)
     }
 
     /// Whether folder `idx` is `$Extend`, the root's child in MFT record 11,
@@ -1964,7 +1954,7 @@ impl<'a> EntryView<'a> {
     /// The size as `seen_by` may read it: a folder's is `None` for a
     /// filtered user, because it counts files they may not see.
     pub fn size(&self, seen_by: &SeenBy) -> Option<u64> {
-        if matches!(seen_by, SeenBy::Caller(_)) && self.is_dir() {
+        if matches!(seen_by, SeenBy::Filtered(_)) && self.is_dir() {
             return None;
         }
         let s = self.index.entries.size(self.idx);

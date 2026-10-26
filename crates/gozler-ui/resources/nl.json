@@ -473,7 +473,8 @@
     "index": "Stations en service",
     "include": "Opnemen",
     "visibility": "Zichtbaarheid",
-    "not_saved": "Kan de instellingen voor iedereen op deze pc niet opslaan. {0}"
+    "not_saved": "Kan de instellingen voor iedereen op deze pc niet opslaan. {0}",
+    "admin_note": "Deze instellingen gelden voor iedereen op deze pc. U hebt beheerdersmachtiging nodig om ze te wijzigen."
   },
   "settings_general": {
     "language": "Taa&l:",
@@ -642,7 +643,6 @@
     "not_rebuilt": "Kan de index niet opnieuw opbouwen. {0}"
   },
   "settings_include": {
-    "admin_note": "Deze instellingen gelden voor iedereen op deze pc. U hebt beheerdersmachtiging nodig om ze te wijzigen.",
     "preview": "Nu geïndexeerd: {0} items. Na OK: ongeveer {1}{2}.",
     "preview_added": ", plus de mappen die u opnieuw hebt aangevinkt, zodra ze zijn geïndexeerd",
     "folders": "Mappen",
@@ -664,8 +664,8 @@
   "settings_visibility": {
     "everyone": "Elke gebruiker &ziet alle bestanden",
     "list": "Gebruikers en groepen die alle bestanden zien",
-    "add": "Toevoe&gen…",
-    "remove": "Ver&wijderen",
+    "add": "Toe&voegen…",
+    "remove": "Ve&rwijderen",
     "empty": "Gebruikers zien alleen de bestanden in mappen die ze kunnen openen.",
     "unreadable": "Kan de lijst niet lezen. {0}",
     "picker_failed": "Kan Gebruikers of groepen selecteren niet openen. {0}"

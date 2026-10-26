@@ -60,11 +60,6 @@ pub trait VolumeReads {
     /// is gone or being deleted.
     fn folder_descriptor(&mut self, frn: Frn) -> Result<Option<Vec<u8>>, Self::Error>;
 
-    /// The security descriptor of folder `frn`, then the USN of its last
-    /// journal record, both from one open; `Ok(None)` when the folder is gone
-    /// or being deleted. Only the NTFS build asks for it.
-    fn folder_security(&mut self, frn: Frn) -> Result<Option<FolderSecurity>, Self::Error>;
-
     /// The size and date of `frn`; `Ok(None)` when there is nothing to
     /// refresh, such as a file that is gone or locked.
     fn stat(&mut self, frn: Frn) -> Result<Option<FileStat>, Self::Error>;
@@ -89,33 +84,28 @@ pub enum Listed<E> {
 
 impl<E> Listed<E> {
     /// Applies one event of a walk: a folder's descriptor, or a page's names.
-    /// A descriptor read that failed changes nothing, and the folder is
-    /// returned, for the caller to pass to
-    /// [`VolumeIndex::note_descriptor_reads_failed`] once the Include rules
-    /// have checked what the walk added.
+    /// A descriptor read that failed changes nothing, so the folder stays
+    /// without one.
     ///
     /// A subfolder's entry comes from its parent's page, which a walk gives
     /// before the subfolder's own `Folder`, so events must be applied in walk
     /// order: [`VolumeIndex::set_folder_descriptor`] ignores a folder not yet
     /// in the index.
-    #[must_use = "a failed descriptor read is counted by the caller"]
-    pub fn apply(&self, index: &mut VolumeIndex) -> Option<Frn> {
+    pub fn apply(&self, index: &mut VolumeIndex) {
         match self {
             Listed::Folder {
                 frn,
                 descriptor: Ok(descriptor),
             } => index.set_folder_descriptor(*frn, Some(descriptor)),
             Listed::Folder {
-                frn,
-                descriptor: Err(_),
-            } => return Some(*frn),
+                descriptor: Err(_), ..
+            } => {}
             Listed::Page(files) => {
                 for file in files {
                     index.insert_listed(file);
                 }
             }
         }
-        None
     }
 }
 
@@ -124,14 +114,6 @@ pub struct FileStat {
     pub size: u64,
     pub mtime: i64,
     pub created: i64,
-}
-
-/// A folder's descriptor and the USN of its last journal record, read in
-/// that order, so a permission change after the descriptor read gives a
-/// later USN.
-pub struct FolderSecurity {
-    pub descriptor: Vec<u8>,
-    pub usn: i64,
 }
 
 /// One hard-link name of a file.
@@ -257,8 +239,7 @@ pub fn walk_folders<R: VolumeReads>(
 /// because the daemon is exiting and would never serve the result.
 ///
 /// A descriptor read that fails leaves its folder with none, which hides the
-/// folder's entries, and is counted in `IndexStats::descriptor_reads_failed`
-/// while the index holds the folder.
+/// folder's entries, and [`VolumeIndex::unread_folder_count`] counts it.
 /// A size or date read that fails skips that file. A link read that fails, or
 /// a link in a folder the index does not hold yet, skips that file too, and is
 /// counted in `IndexStats::link_reconciles_dropped`, because the file's names
@@ -310,20 +291,16 @@ pub fn settle_batch<R: VolumeReads>(
         .into_iter()
         .filter(|frn| needs_walk.binary_search(frn).is_err())
         .collect();
-    // A new subfolder of a missed folder is read by both steps, so the
-    // failures of both are counted once, after the rules checked the walk.
-    let mut failed = Vec::new();
     if !needs_descriptor.is_empty() {
         let mut descriptors = Vec::with_capacity(needs_descriptor.len());
         for frn in needs_descriptor {
             if cancelled() {
                 return Ok(settled);
             }
-            match reads.folder_descriptor(frn) {
-                Ok(Some(descriptor)) => descriptors.push((frn, descriptor)),
-                // Gone: the journal's delete record removes it.
-                Ok(None) => {}
-                Err(_) => failed.push(frn),
+            // A folder that is gone needs none: the journal's delete record
+            // removes it.
+            if let Ok(Some(descriptor)) = reads.folder_descriptor(frn) {
+                descriptors.push((frn, descriptor));
             }
         }
         index.write(|i| {
@@ -349,16 +326,13 @@ pub fn settle_batch<R: VolumeReads>(
             })
             .sum();
         index.write(|i| {
-            failed.extend(events.iter().filter_map(|event| event.apply(i)));
+            for event in &events {
+                event.apply(i);
+            }
             i.recheck_listed(&needs_walk);
         });
         settled.missed_folders = needs_walk.len();
         settled.missed_entries = entries;
-    }
-    if !failed.is_empty() {
-        failed.sort_unstable();
-        failed.dedup();
-        index.write(|i| i.note_descriptor_reads_failed(&failed));
     }
 
     // A file created or changed after the build has no size or date in its
@@ -443,8 +417,8 @@ pub fn settle_batch<R: VolumeReads>(
 #[cfg(test)]
 mod tests {
     use super::{
-        Batch, FileLink, FileStat, FolderSecurity, Listed, VolumeReads, Walk, WalkFailed,
-        settle_batch, walk_folders,
+        Batch, FileLink, FileStat, Listed, VolumeReads, Walk, WalkFailed, settle_batch,
+        walk_folders,
     };
     use crate::index::{NTFS_ROOT_FRN, VolumeIndex};
     use crate::layout::{LayoutFile, LayoutName};
@@ -487,8 +461,7 @@ mod tests {
             size: (!is_dir).then_some(0),
             mtime_ft: Some(0),
             created_ft: None,
-            security_id: None,
-            usn: None,
+            security: None,
             names: vec![LayoutName {
                 parent_frn: folder,
                 name: name.as_bytes().to_vec(),
@@ -562,10 +535,6 @@ mod tests {
                 .get(&frn)
                 .cloned()
                 .unwrap_or_else(|| Ok(Some(descriptor(frn))))
-        }
-
-        fn folder_security(&mut self, _: Frn) -> Result<Option<FolderSecurity>, Self::Error> {
-            unreachable!("the settle and the walk read no folder security")
         }
 
         fn stat(&mut self, _: Frn) -> Result<Option<FileStat>, Self::Error> {
@@ -670,15 +639,12 @@ mod tests {
         assert_eq!(index.borrow().stats().link_reconciles_dropped, 0);
     }
 
-    /// A missed folder that cannot be listed fails the settle, so the tail
-    /// rescans. Treated like a gone folder, its contents would be lost for
-    /// good, because the journal records no change to them.
     /// A folder that moves out of a folder the Include rules left out is
     /// listed, and the walk's names that the rules leave out stay out. A
-    /// descriptor read that fails is counted once, also for a new subfolder
-    /// that the settle and the walk both read, and only for a folder the
-    /// index keeps, so `--status` names no hidden folder twice and none that
-    /// does not exist.
+    /// descriptor read that fails leaves its folder without a descriptor,
+    /// also a new subfolder that the settle and the walk both read, and a
+    /// folder the rules removed is not counted, so `--status` counts each
+    /// hidden folder once and none that the index does not hold.
     #[test]
     fn a_folder_moved_out_of_a_left_out_folder_is_listed_by_the_rules() {
         let (windows, users, old, file, modules, js, new) = (
@@ -714,6 +680,11 @@ mod tests {
         index
             .borrow_mut()
             .apply_rules(std::sync::Arc::new(settings.rules_for("V")));
+        for folder in [ROOT, users] {
+            index
+                .borrow_mut()
+                .set_folder_descriptor(folder, Some(&descriptor(folder)));
+        }
         let mut reads = Fake::default();
         reads.listings.insert(
             old,
@@ -741,11 +712,14 @@ mod tests {
             paths(&index),
             set(&["Users", r"Users\Old", r"Users\Old\a.txt", r"Users\Old\New"])
         );
-        let stats = index.borrow().stats().clone();
-        assert_eq!(stats.placeholders_created, 0);
-        assert_eq!(stats.descriptor_reads_failed, 2, "Old and New, once each");
+        let index = index.borrow();
+        assert_eq!(index.stats().placeholders_created, 0);
+        assert_eq!(index.unread_folder_count(), 2, "Old and New, once each");
     }
 
+    /// A missed folder that cannot be listed fails the settle, so the tail
+    /// rescans. Treated like a gone folder, its contents would be lost for
+    /// good, because the journal records no change to them.
     #[test]
     fn a_folder_that_cannot_be_listed_fails_the_settle() {
         let m = id(100);
@@ -757,28 +731,6 @@ mod tests {
         let failed = settle(&index, &mut reads, &[rename], false);
 
         assert!(matches!(failed, Err(WalkFailed { folder, .. }) if folder == m));
-    }
-
-    /// A new folder's descriptor is read in the batch that adds it, or its
-    /// entries stay hidden from every filtered user until a rescan. A read
-    /// that fails is counted, so `--status` shows the hidden folder.
-    #[test]
-    fn a_new_folder_gets_its_descriptor_in_the_same_batch() {
-        let (read, failing) = (id(100), id(101));
-        let index = index_of(&[]);
-        let mut reads = Fake::default();
-        reads.descriptors.insert(failing, Err("access denied"));
-        let records = [
-            record(read, ROOT, "read", true, USN_REASON_FILE_CREATE),
-            record(failing, ROOT, "failing", true, USN_REASON_FILE_CREATE),
-        ];
-
-        settle(&index, &mut reads, &records, false).expect("settles");
-
-        let index = index.borrow();
-        assert_eq!(index.folder_descriptor(read), Some(&descriptor(read)[..]));
-        assert_eq!(index.folder_descriptor(failing), None);
-        assert_eq!(index.stats().descriptor_reads_failed, 1);
     }
 
     /// A link read that fails leaves the file's names as they are and is

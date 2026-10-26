@@ -114,7 +114,7 @@ fn search_counts(
         Selection::TooMany(count) => too_many(strings, numbers, *count),
         Selection::Files(_) | Selection::Folder { .. } => {
             let files = search.list.selection().files().unwrap_or_default();
-            let size = (search.list.chosen_bytes())
+            let size = (search.list.chosen_size())
                 .map(|size| counted_size(strings, numbers, size.known, size.unknown))
                 .unwrap_or_default();
             joined(strings, selected(files.len() as u64), size)

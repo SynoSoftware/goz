@@ -570,7 +570,7 @@ fn rescan(
 
     let entries = built.index.len();
     let descriptor_reads = built.descriptor_reads;
-    let descriptor_reads_failed = built.index.stats().descriptor_reads_failed;
+    let unread_folders = built.index.unread_folder_count();
     building.finish(built, &journal);
     // The entries the rules removed left their names behind.
     state.compact_index();
@@ -581,7 +581,7 @@ fn rescan(
                 volume = %state.mount_prefix(),
                 entries,
                 descriptor_reads,
-                descriptor_reads_failed,
+                unread_folders,
                 "index built; tailing the journal"
             );
             Some(ReadPosition::at(c, state.filesystem, handle))

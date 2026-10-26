@@ -8,7 +8,10 @@
 //! follows explicit offsets, so this is a legal (if minimal) encoding, and it
 //! keeps the fixed field offsets the parser tests hard-code stable.
 
-use super::{FILE_LAYOUT_NAME_ENTRY_DOS, FILE_LAYOUT_NAME_ENTRY_PRIMARY, LayoutFile, LayoutName};
+use super::{
+    FILE_LAYOUT_NAME_ENTRY_DOS, FILE_LAYOUT_NAME_ENTRY_PRIMARY, LayoutFile, LayoutName,
+    LayoutSecurity,
+};
 use crate::types::Frn;
 use crate::wtf8;
 
@@ -169,8 +172,10 @@ impl LayoutFileFixture {
             size,
             mtime_ft,
             created_ft: self.info.as_ref().map(|i| i.created),
-            security_id: self.info.as_ref().map(|i| i.security_id),
-            usn: self.info.as_ref().map(|i| i.usn),
+            security: self.info.as_ref().map(|i| LayoutSecurity {
+                id: i.security_id,
+                usn: i.usn,
+            }),
             names,
         }
     }

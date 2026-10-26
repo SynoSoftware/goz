@@ -179,18 +179,32 @@ pub(crate) struct SettingsValues {
 /// The SID string of Everyone.
 const EVERYONE: &str = "S-1-1-0";
 
-/// The users and groups who see every file (spec `V16`): the lines of the
-/// stored list, SID strings, in its order. A line that is not a SID, which
-/// only a hand edit writes, stays as it is, because the service skips it.
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+/// The users and groups who see every file (DESIGN.md: The Visibility page):
+/// the lines of the stored list, SID strings, in its order. A line that is
+/// not a SID, which only a hand edit writes, stays as it is, because the
+/// service skips it.
+#[derive(Clone, Debug, Default, Eq, Serialize, Deserialize)]
 pub(crate) struct SeeEveryFile(Vec<String>);
+
+/// Two lists are equal when they hold the same lines in any order, ignoring
+/// ASCII case, because the service reads the list as a set: a list only
+/// reordered must not enable Apply or ask for administrator permission.
+impl PartialEq for SeeEveryFile {
+    fn eq(&self, other: &SeeEveryFile) -> bool {
+        let within = |lines: &[String], line: &String| {
+            lines.iter().any(|each| each.eq_ignore_ascii_case(line))
+        };
+        self.0.iter().all(|line| within(&other.0, line))
+            && other.0.iter().all(|line| within(&self.0, line))
+    }
+}
 
 impl SeeEveryFile {
     pub(crate) fn new(lines: Vec<String>) -> SeeEveryFile {
         SeeEveryFile(lines)
     }
 
-    pub(crate) fn sids(&self) -> &[String] {
+    pub(crate) fn lines(&self) -> &[String] {
         &self.0
     }
 
@@ -256,7 +270,7 @@ pub(crate) enum SettingsPage {
     Index,
     /// What the service indexes (DESIGN.md: The Include page).
     Include,
-    /// Who sees every file (spec `V14`).
+    /// Who sees every file (DESIGN.md: The Visibility page).
     Visibility,
 }
 
@@ -1150,7 +1164,8 @@ mod tests {
 
     /// Saving the list asks for administrator permission and replaces the
     /// stored one, so only a real change may be saved: never an account
-    /// picked again, Everyone turned on and off, or a list never read.
+    /// picked again, Everyone turned on and off, a list only reordered, or a
+    /// list never read.
     #[test]
     fn only_a_changed_list_is_saved() {
         const ADMINISTRATORS: &str = "S-1-5-32-544";
@@ -1182,6 +1197,23 @@ mod tests {
                 ])),
             })
         );
+
+        let mut reordered = SettingsDraft::new(SettingsValues {
+            see_every_file: Ok(SeeEveryFile::new(vec![
+                EVERYONE.to_owned(),
+                ADMINISTRATORS.to_owned(),
+            ])),
+            ..values()
+        });
+        list(&mut reordered).set_everyone(false);
+        list(&mut reordered).set_everyone(true);
+        assert_eq!(
+            list(&mut reordered).lines(),
+            [ADMINISTRATORS, EVERYONE],
+            "Everyone moved to the end"
+        );
+        assert!(!reordered.shielded());
+        assert!(!reordered.can_apply());
 
         let unread = SettingsDraft::new(SettingsValues {
             see_every_file: Err("Access is denied.".to_owned()),

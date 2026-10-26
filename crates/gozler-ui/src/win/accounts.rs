@@ -1,6 +1,7 @@
-//! The users and groups who see every file (spec `V16`): the stored list,
-//! the account name of each of its SIDs, and Windows' "Select Users or
-//! Groups" dialog, which Windows' own permission editors open.
+//! The users and groups who see every file (DESIGN.md: The Visibility
+//! page): the stored list, the account name of each of its SIDs, and
+//! Windows' "Select Users or Groups" dialog, which Windows' own permission
+//! editors open.
 
 use super::Hwnd;
 use super::shell::io_error;
@@ -45,7 +46,7 @@ pub(crate) fn see_every_file(_worker: &OffThread) -> io::Result<SeeEveryFile> {
 
 /// Stores `list`. Only an administrator can.
 pub(crate) fn set_see_every_file(list: &SeeEveryFile) -> io::Result<()> {
-    gozler_winfs::set_machine_strings(SETTINGS_KEY, SEE_EVERY_FILE_VALUE, list.sids())
+    gozler_winfs::set_machine_strings(SETTINGS_KEY, SEE_EVERY_FILE_VALUE, list.lines())
         .map_err(os_error)
 }
 

@@ -1582,7 +1582,7 @@ impl Model {
         shown.results.show_message(message);
         shown.abandon_keeping();
         shown.set_selection(Selection::None);
-        shown.chosen_bytes = None;
+        shown.chosen_size = None;
         Accepted {
             touched: Areas::list(list) | Areas::STATUS | Areas::KEY_BAR,
             effects: vec![
@@ -1676,7 +1676,7 @@ impl Model {
         let older = shown.selection.asked();
         let effect = if positions.is_empty() || shown.results.shown_ask().is_none() {
             shown.set_selection(Selection::None);
-            shown.chosen_bytes = None;
+            shown.chosen_size = None;
             None
         } else {
             let source = SelectionSource::Cached {
@@ -1712,7 +1712,7 @@ impl Model {
         };
         let older = shown.selection.asked();
         shown.set_selection(Selection::TooMany(count));
-        shown.chosen_bytes = None;
+        shown.chosen_size = None;
         {
             let mut accepted = Accepted {
                 touched: Areas::list(list) | Areas::STATUS | Areas::KEY_BAR,
@@ -1745,7 +1745,7 @@ impl Model {
             source,
             running: false,
         });
-        shown.chosen_bytes = None;
+        shown.chosen_size = None;
         self.inline_filter(list).and_then(|accepted| {
             accepted.effects.into_iter().find(|effect| {
                 matches!(
@@ -1837,7 +1837,7 @@ impl Model {
         let Filtered {
             input,
             files,
-            chosen_bytes,
+            chosen_size,
             sums,
         } = answer;
         let count = input.source.items();
@@ -1875,7 +1875,7 @@ impl Model {
         } else {
             Deselect::Taken
         };
-        let effect = self.adopt_selection(list, files, chosen_bytes, sums);
+        let effect = self.adopt_selection(list, files, chosen_size, sums);
         {
             let mut accepted = Accepted {
                 touched: Areas::list(list) | Areas::STATUS | Areas::KEY_BAR,
@@ -1922,7 +1922,7 @@ impl Model {
             source,
             running: false,
         });
-        shown.chosen_bytes = None;
+        shown.chosen_size = None;
         true
     }
 
@@ -1930,13 +1930,13 @@ impl Model {
         &mut self,
         list: List,
         files: Arc<[ResultItem]>,
-        chosen_bytes: Option<SelectedSize>,
+        chosen_size: Option<SelectedSize>,
         sums: Sums,
     ) -> Option<Effect> {
         let shown = self.list_mut(list)?;
         if files.is_empty() {
             shown.set_selection(Selection::None);
-            shown.chosen_bytes = None;
+            shown.chosen_size = None;
             return None;
         }
         let folder = match (list, files.as_ref()) {
@@ -1949,7 +1949,7 @@ impl Model {
             (List::Panel(_), _) => {
                 shown.set_selection(Selection::Files(files));
                 shown.selection_sums = sums;
-                shown.chosen_bytes = chosen_bytes;
+                shown.chosen_size = chosen_size;
                 return None;
             }
         };
@@ -2484,7 +2484,7 @@ impl Model {
                         // A new search's rows are other files (DESIGN.md: T2),
                         // and the disk as it is now.
                         shown.set_selection(Selection::None);
-                        shown.chosen_bytes = None;
+                        shown.chosen_size = None;
                         shown.reset_kept();
                         // A panel draws no matched parts bold.
                         if list == List::Search {
@@ -3618,7 +3618,7 @@ pub(crate) mod tests {
                         delete_of_unknown: 0,
                         stale_slots: 0,
                         link_reconciles_dropped: 0,
-                        descriptor_reads_failed: 0,
+                        unread_folders: 0,
                         memory: None,
                     }],
                     volumes_incomplete: false,

@@ -15,9 +15,8 @@ use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use gozler_core::include::{SEE_EVERY_FILE_VALUE, SETTINGS_KEY};
 use gozler_core::proto::SERVICE_NAME;
-use gozler_winfs::{Sid, machine_strings, set_machine_strings};
+use gozler_winfs::Sid;
 use tokio::sync::watch;
 use windows_service::service::{
     ServiceAccess, ServiceAction, ServiceActionType, ServiceControl, ServiceControlAccept,
@@ -30,7 +29,7 @@ use windows_service::service_control_handler::{
 use windows_service::service_dispatcher;
 use windows_service::service_manager::{ServiceManager, ServiceManagerAccess};
 
-use crate::{run, server};
+use crate::{access, run, server};
 
 const DISPLAY_NAME: &str = "Gozler file index";
 const DESCRIPTION: &str = "Indexes NTFS and ReFS volumes for instant file search with gozler.";
@@ -127,15 +126,12 @@ pub(crate) fn install(first_list: Option<&[Sid]>) -> Result<()> {
 /// Stores `list` as the list of users and groups who see every file, unless a
 /// list is stored already.
 fn store_first_list(list: &[Sid]) -> Result<()> {
-    let stored = machine_strings(SETTINGS_KEY, SEE_EVERY_FILE_VALUE)
-        .context("reading the list of users and groups who see every file")?;
-    if stored.is_some() {
+    if access::stored_lines()?.is_some() {
         println!("Kept the existing list of users who see every file.");
         return Ok(());
     }
     let lines: Vec<String> = list.iter().map(Sid::to_string).collect();
-    set_machine_strings(SETTINGS_KEY, SEE_EVERY_FILE_VALUE, &lines)
-        .context("storing the list of users and groups who see every file")
+    access::store_lines(&lines)
 }
 
 /// Stops (if running) and deletes the service. Succeeds even if it was never

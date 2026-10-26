@@ -514,7 +514,7 @@ impl CaptionTable {
                 ],
                 plain: &[
                     (Control(C::IncludeHeading), "settings.include"),
-                    (Control(C::IncludeAdminNote), "settings_include.admin_note"),
+                    (Control(C::IncludeAdminNote), "settings.admin_note"),
                     (Control(C::IncludeFoldersGroup), "settings_include.folders"),
                     (Control(C::IncludeNamesGroup), "settings_include.names"),
                     (Control(C::IncludeNamesHint), "settings_include.names_hint"),
@@ -532,10 +532,7 @@ impl CaptionTable {
                 ],
                 plain: &[
                     (Control(C::VisibilityHeading), "settings.visibility"),
-                    (
-                        Control(C::VisibilityAdminNote),
-                        "settings_include.admin_note",
-                    ),
+                    (Control(C::VisibilityAdminNote), "settings.admin_note"),
                     (Control(C::VisibilityGroup), "settings_visibility.list"),
                 ],
             },

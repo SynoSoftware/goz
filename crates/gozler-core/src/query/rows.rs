@@ -248,6 +248,9 @@ enum Next {
 /// One volume's rows as a reply reads them.
 struct VolumeReader {
     answer: VolumeRows,
+    /// What the request sees of the volume, from the hold that found the
+    /// answer.
+    seen_by: SeenBy,
     /// The next row to read.
     next: usize,
     /// The matches after the rows that the limit cut off that `total` still
@@ -266,35 +269,41 @@ struct VolumeReader {
 }
 
 impl Reply {
-    /// A reply of `answers`, one for each volume of the same search, which
-    /// skips the first `offset` rows and sends at most `limit`.
-    pub(super) fn new(answers: Vec<VolumeRows>, offset: u32, limit: Option<u32>) -> Self {
-        let sort = answers.first().map_or_else(SortSpec::default, |a| a.sort);
+    /// A reply of `answers`, one for each volume of the same search, each
+    /// with what the request sees of that volume, from the hold that found
+    /// the answer. It skips the first `offset` rows and sends at most
+    /// `limit`.
+    pub(super) fn new(answers: Vec<(VolumeRows, SeenBy)>, offset: u32, limit: Option<u32>) -> Self {
+        let volumes: Vec<VolumeReader> = answers
+            .into_iter()
+            .map(|(answer, seen_by)| VolumeReader {
+                past_cut: answer.past_cut,
+                answer,
+                seen_by,
+                next: 0,
+                head: None,
+                folders: None,
+                scope_memo: FxHashMap::default(),
+                folder_path: None,
+            })
+            .collect();
+        let sort = volumes
+            .first()
+            .map_or_else(SortSpec::default, |v| v.answer.sort);
         assert!(
-            answers.iter().all(|a| a.sort == sort),
+            volumes.iter().all(|v| v.answer.sort == sort),
             "the answers of one search share its order"
         );
         let merge = match sort.key {
-            SortKey::Path => merge_paths(sort.dir, &answers),
+            SortKey::Path => merge_paths(sort.dir, &volumes),
             _ => Merge::Compare,
         };
         Self {
-            total: answers
+            total: volumes
                 .iter()
-                .map(|a| a.rows.len() as u64 + a.past_cut)
+                .map(|v| v.answer.rows.len() as u64 + v.past_cut)
                 .sum(),
-            volumes: answers
-                .into_iter()
-                .map(|answer| VolumeReader {
-                    past_cut: answer.past_cut,
-                    answer,
-                    next: 0,
-                    head: None,
-                    folders: None,
-                    scope_memo: FxHashMap::default(),
-                    folder_path: None,
-                })
-                .collect(),
+            volumes,
             names: ResultNames::default(),
             sort,
             merge,
@@ -345,31 +354,26 @@ impl Reply {
     pub(super) fn fill(
         &mut self,
         indexes: &[Option<&VolumeIndex>],
-        seen_by: &[SeenBy],
         page_rows: usize,
         mut push: impl FnMut(RowView<'_>, &ResultNames) -> bool,
     ) -> bool {
-        self.fill_placed(indexes, seen_by, page_rows, |_, _, row, names| {
-            push(row, names)
-        })
+        self.fill_placed(indexes, page_rows, |_, _, row, names| push(row, names))
     }
 
     /// Reads the next rows from `indexes`, one for each answer given to
     /// [`Self::new`], in their order: the index held under its read lock
     /// where [`Self::reads_volume`] says the page reads it, and `None`
-    /// elsewhere. `seen_by` holds what the request sees of each, from the
-    /// hold that found the answer. Hands each row to `push` with the folders
-    /// it names, until `push` refuses one, the page has no row left, or it
-    /// read `page_rows` rows, sent or skipped for the offset, so that one
-    /// hold of the locks does a page's work at most. Returns whether rows
-    /// are left: a row `push` refused is read again for the next page.
+    /// elsewhere. Hands each row to `push` with the folders it names, until
+    /// `push` refuses one, the page has no row left, or it read `page_rows`
+    /// rows, sent or skipped for the offset, so that one hold of the locks
+    /// does a page's work at most. Returns whether rows are left: a row
+    /// `push` refused is read again for the next page.
     ///
     /// `push` also gets each row's volume, the `v`th answer, and its place
     /// in that volume's rows.
     fn fill_placed(
         &mut self,
         indexes: &[Option<&VolumeIndex>],
-        seen_by: &[SeenBy],
         page_rows: usize,
         mut push: impl FnMut(usize, usize, RowView<'_>, &ResultNames) -> bool,
     ) -> bool {
@@ -377,11 +381,6 @@ impl Reply {
             indexes.len(),
             self.volumes.len(),
             "one index for each volume's answer"
-        );
-        assert_eq!(
-            seen_by.len(),
-            self.volumes.len(),
-            "one view for each volume's answer"
         );
         for (volume, index) in self.volumes.iter_mut().zip(indexes) {
             if let Some(index) = index
@@ -395,7 +394,7 @@ impl Reply {
             if self.left == Some(0) {
                 return false;
             }
-            let v = match self.next_volume(indexes, seen_by) {
+            let v = match self.next_volume(indexes) {
                 Next::Volume(v) => v,
                 Next::NotHeld => return true,
                 Next::End => return false,
@@ -418,7 +417,7 @@ impl Reply {
                 folder,
                 name: entry.name(),
                 is_dir: entry.is_dir(),
-                size: entry.size(&seen_by[v]),
+                size: entry.size(&volume.seen_by),
                 mtime: entry.mtime(),
                 created: entry.created(),
                 attributes: entry.attributes(),
@@ -438,7 +437,7 @@ impl Reply {
     /// rows before its next row that it cannot send. A volume that has no
     /// row left although its limit cut off matches ends the reply, because
     /// its next match is unknown.
-    fn next_volume(&mut self, indexes: &[Option<&VolumeIndex>], seen_by: &[SeenBy]) -> Next {
+    fn next_volume(&mut self, indexes: &[Option<&VolumeIndex>]) -> Next {
         let Self {
             volumes,
             names,
@@ -454,7 +453,7 @@ impl Reply {
                     let Some(index) = indexes[v] else {
                         return Next::NotHeld;
                     };
-                    if volume.find_head(index, &seen_by[v], names, total) {
+                    if volume.find_head(index, names, total) {
                         return Next::Volume(v);
                     }
                 }
@@ -470,7 +469,6 @@ impl Reply {
             let found = volumes[v].has_rows()
                 && volumes[v].find_head(
                     indexes[v].expect("a page holds every volume with rows left"),
-                    &seen_by[v],
                     names,
                     total,
                 );
@@ -487,8 +485,8 @@ impl Reply {
                 Some(f)
                     if !volumes[v].precedes(
                         &volumes[f],
-                        (indexes[v].expect("the volume has a row"), &seen_by[v]),
-                        (indexes[f].expect("the volume has a row"), &seen_by[f]),
+                        indexes[v].expect("the volume has a row"),
+                        indexes[f].expect("the volume has a row"),
                         *sort,
                         by_paths,
                     ) =>
@@ -502,13 +500,13 @@ impl Reply {
     }
 }
 
-/// How a path sort merges `answers`: in turn, in the order of their root
+/// How a path sort merges `volumes`: in turn, in the order of their root
 /// paths, when no root path starts another's, and otherwise by comparing
 /// paths. A root path is the folded [`root_name`].
-fn merge_paths(dir: SortDir, answers: &[VolumeRows]) -> Merge {
-    let roots: Vec<Vec<u8>> = answers
+fn merge_paths(dir: SortDir, volumes: &[VolumeReader]) -> Merge {
+    let roots: Vec<Vec<u8>> = volumes
         .iter()
-        .map(|a| fold(root_name(&a.mount_prefix)))
+        .map(|v| fold(root_name(&v.answer.mount_prefix)))
         .collect();
     let nested = roots.iter().enumerate().any(|(i, a)| {
         roots
@@ -519,7 +517,7 @@ fn merge_paths(dir: SortDir, answers: &[VolumeRows]) -> Merge {
     if nested {
         return Merge::ComparePaths;
     }
-    let mut order: Vec<usize> = (0..answers.len()).collect();
+    let mut order: Vec<usize> = (0..volumes.len()).collect();
     order.sort_by(|&a, &b| match dir {
         SortDir::Asc => roots[a].cmp(&roots[b]),
         SortDir::Desc => roots[b].cmp(&roots[a]),
@@ -573,13 +571,7 @@ impl VolumeReader {
     /// Finds the next row that the page can send, leaving out each row before
     /// it that it cannot, which `total` stops counting. Returns whether one
     /// is left.
-    fn find_head(
-        &mut self,
-        index: &VolumeIndex,
-        seen_by: &SeenBy,
-        names: &mut ResultNames,
-        total: &mut u64,
-    ) -> bool {
+    fn find_head(&mut self, index: &VolumeIndex, names: &mut ResultNames, total: &mut u64) -> bool {
         while self.head.is_none() && self.has_rows() {
             let folders = self
                 .folders
@@ -587,7 +579,7 @@ impl VolumeReader {
                 .expect("begin_page made the copy of a volume with rows left");
             self.head = row_folder(
                 index,
-                seen_by,
+                &self.seen_by,
                 self.answer.rows.get(self.next),
                 self.answer.scope,
                 &mut self.scope_memo,
@@ -620,13 +612,13 @@ impl VolumeReader {
     fn precedes(
         &self,
         other: &VolumeReader,
-        (index, seen_by): (&VolumeIndex, &SeenBy),
-        (other_index, other_seen_by): (&VolumeIndex, &SeenBy),
+        index: &VolumeIndex,
+        other_index: &VolumeIndex,
         sort: SortSpec,
         by_paths: bool,
     ) -> bool {
-        let a = self.live(index, seen_by);
-        let b = other.live(other_index, other_seen_by);
+        let a = self.live(index);
+        let b = other.live(other_index);
         let order = if by_paths {
             compare_paths(
                 sort.dir,
@@ -649,11 +641,11 @@ impl VolumeReader {
         path
     }
 
-    /// The next row, as the merge reads it from `index` for `seen_by`.
-    fn live<'a>(&'a self, index: &'a VolumeIndex, seen_by: &'a SeenBy) -> Live<'a> {
+    /// The next row, as the merge reads it from `index` for the request.
+    fn live<'a>(&'a self, index: &'a VolumeIndex) -> Live<'a> {
         Live {
             index,
-            seen_by,
+            seen_by: &self.seen_by,
             idx: self.answer.rows.get(self.next).0,
             volume: self.answer.mount_prefix.as_bytes(),
         }
@@ -826,7 +818,7 @@ impl Viewer<'_> {
     fn seen_by(self, index: &VolumeIndex) -> SeenBy {
         match self {
             Viewer::Everything => SeenBy::Everything,
-            Viewer::Filtered(may_list) => SeenBy::Caller(index.listable(may_list)),
+            Viewer::Filtered(may_list) => SeenBy::Filtered(index.listable(may_list)),
         }
     }
 }
@@ -880,9 +872,6 @@ pub struct ResultRows<V> {
     /// The volumes with rows, in the order given, which the answers of
     /// `reply` follow.
     volumes: Vec<V>,
-    /// What the request sees of each volume, from the hold that found its
-    /// answer, in the order of `volumes`.
-    seen_by: Vec<SeenBy>,
     reply: Reply,
     sums: Option<MatchSums>,
     coverage: Coverage,
@@ -927,7 +916,6 @@ impl<V: IndexedVolume> ResultRows<V> {
         );
         let mut sums = spec.sums.then(MatchSums::default);
         let mut volumes = Vec::with_capacity(found.len());
-        let mut seen = Vec::with_capacity(found.len());
         let mut answers = Vec::with_capacity(found.len());
         for (volume, seen_by, matches) in found {
             // Without a hold, so the journal does not wait for the sort.
@@ -939,8 +927,7 @@ impl<V: IndexedVolume> ResultRows<V> {
                         sums.add(found);
                     }
                     volumes.push(volume);
-                    seen.push(seen_by);
-                    answers.push(answer);
+                    answers.push((answer, seen_by));
                 }
                 // `IndexChanged` says why this volume's rows are lost.
                 Err(IndexChanged) => coverage.volumes_incomplete = true,
@@ -948,7 +935,6 @@ impl<V: IndexedVolume> ResultRows<V> {
         }
         Ok(Self {
             volumes,
-            seen_by: seen,
             reply: Reply::new(answers, spec.offset, spec.limit),
             sums,
             coverage,
@@ -984,8 +970,7 @@ impl<V: IndexedVolume> ResultRows<V> {
             .map(|(v, volume)| self.reply.reads_volume(v).then(|| volume.read().index))
             .collect();
         let indexes: Vec<Option<&VolumeIndex>> = held.iter().map(Option::as_deref).collect();
-        self.reply
-            .fill_placed(&indexes, &self.seen_by, page_rows, push)
+        self.reply.fill_placed(&indexes, page_rows, push)
     }
 
     /// The matches, less every row left out so far: the total each page
@@ -1778,7 +1763,7 @@ mod tests {
         }
     }
 
-    /// T5: a filtered user finds, counts and sums only the entries of the
+    /// A filtered user finds, counts and sums only the entries of the
     /// folders they may list, gets no folder size, and a `size:` term
     /// matches none of their folders. Without it, a reader that skips the
     /// filter shows the names, the count or the space of files the user
@@ -1837,9 +1822,16 @@ mod tests {
                 .all(|(path, size)| [a, b].contains(&path.as_str()) || size.is_none()),
             "no folder has a size: {rows:?}"
         );
-        let shown =
-            |sums: MatchSums| (sums.files, sums.file_bytes, sums.folders, sums.folder_bytes);
-        assert_eq!(shown(sums), (2, 12, 4, 0));
+        let shown = |sums: MatchSums| {
+            (
+                sums.files,
+                sums.file_bytes,
+                sums.folders,
+                sums.folder_bytes,
+                sums.folder_bytes_at_least,
+            )
+        };
+        assert_eq!(shown(sums), (2, 12, 4, 0, true));
         let (_, _, sums) = rows_as(
             vec![plain(&index, &mounts)],
             &every,
@@ -1847,7 +1839,7 @@ mod tests {
             by_name,
             Viewer::Everything,
         );
-        assert_eq!(shown(sums), (4, 40, 4, 40));
+        assert_eq!(shown(sums), (4, 40, 4, 40, false));
 
         assert_eq!(paths(&compiled("size:>0", false), None, caller), [a, b]);
 
@@ -1861,7 +1853,7 @@ mod tests {
         assert_eq!(totals(Viewer::Everything), (4, 40));
     }
 
-    /// T5: a size sort places a filtered user's folders by name, on one
+    /// A size sort places a filtered user's folders by name, on one
     /// volume and in the merge of two. Without it, the order of the tie runs
     /// or of the merge shows which folder is larger.
     #[test]
@@ -1908,7 +1900,7 @@ mod tests {
         );
     }
 
-    /// T5: every page asks again whether the user sees each row. Here,
+    /// Every page asks again whether the user sees each row. Here,
     /// between the search and its page, `sub` gets a descriptor the answers
     /// never saw, and `a.txt` moves into `hidden`. Without it, a long
     /// export shows a file that moved into a folder the user cannot list,

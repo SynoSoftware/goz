@@ -851,7 +851,7 @@ impl<'a> SettingsDialog<'a> {
     /// are disabled and the list says why.
     fn fill_visibility(&self, selected: Option<usize>) {
         let (sids, everyone) = match &self.draft.borrow().edited.see_every_file {
-            Ok(list) => (Some(list.sids().to_vec()), list.everyone()),
+            Ok(list) => (Some(list.lines().to_vec()), list.everyone()),
             Err(_) => (None, false),
         };
         for control in [
@@ -876,11 +876,11 @@ impl<'a> SettingsDialog<'a> {
         if let Some(list) = self.visibility_list() {
             self.filling(|| list.set_rows(&rows, selected));
         }
-        self.update_remove();
+        self.update_visibility_buttons();
     }
 
     /// Remove needs a selected row of a list that was read.
-    fn update_remove(&self) {
+    fn update_visibility_buttons(&self) {
         let selected = self
             .visibility_list()
             .and_then(ReportList::selected)
@@ -916,7 +916,7 @@ impl<'a> SettingsDialog<'a> {
             for sid in &chosen {
                 list.add(sid.clone());
             }
-            (list.sids().iter()).position(|sid| sid.eq_ignore_ascii_case(first))
+            (list.lines().iter()).position(|sid| sid.eq_ignore_ascii_case(first))
         };
         self.fill_visibility(selected);
     }
@@ -933,7 +933,7 @@ impl<'a> SettingsDialog<'a> {
                 return;
             };
             list.remove(index);
-            list.sids().len()
+            list.lines().len()
         };
         self.fill_visibility((left > 0).then(|| index.min(left - 1)));
     }
@@ -964,7 +964,7 @@ impl<'a> SettingsDialog<'a> {
             self.sign_in_answered(dialog);
             return;
         }
-        let Some(answer) = self.main.settings.take_include_saved() else {
+        let Some(answer) = self.main.settings.take_elevated_answer() else {
             return;
         };
         let Some(awaited) = self.saving.take() else {
@@ -2360,7 +2360,7 @@ impl<'a> SettingsDialog<'a> {
                 self.change_speed(|settings| *block(settings) = chosen);
             }
         } else if is(id, ControlId::VisibilityList) {
-            self.update_remove();
+            self.update_visibility_buttons();
         } else if is(id, ControlId::IncludeNames) {
             let text = self
                 .control(SettingsPage::Include, ControlId::IncludeNames)

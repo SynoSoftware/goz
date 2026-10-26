@@ -473,7 +473,8 @@
     "index": "Unidades y servicio",
     "include": "Incluir",
     "visibility": "Visibilidad",
-    "not_saved": "No se pudo guardar la configuración para todos en este equipo. {0}"
+    "not_saved": "No se pudo guardar la configuración para todos en este equipo. {0}",
+    "admin_note": "Esta configuración se aplica a todos en este equipo. Necesitarás permiso de administrador para cambiarla."
   },
   "settings_general": {
     "language": "&Idioma:",
@@ -642,7 +643,6 @@
     "not_rebuilt": "No se pudo reconstruir el índice. {0}"
   },
   "settings_include": {
-    "admin_note": "Esta configuración se aplica a todos en este equipo. Necesitarás permiso de administrador para cambiarla.",
     "preview": "Indexadas ahora: {0} entradas. Después de Aceptar: unas {1}{2}.",
     "preview_added": ", más las carpetas que volviste a marcar, cuando se indexen",
     "folders": "Carpetas",

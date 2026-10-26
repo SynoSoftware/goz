@@ -473,7 +473,8 @@
     "index": "Drives and service",
     "include": "Include",
     "visibility": "Visibility",
-    "not_saved": "Couldn't save the settings for everyone on this PC. {0}"
+    "not_saved": "Couldn't save the settings for everyone on this PC. {0}",
+    "admin_note": "These settings apply to everyone on this PC. You'll need administrator permission to change them."
   },
   "settings_general": {
     "language": "Lan&guage:",
@@ -642,7 +643,6 @@
     "not_rebuilt": "Couldn't rebuild the index. {0}"
   },
   "settings_include": {
-    "admin_note": "These settings apply to everyone on this PC. You'll need administrator permission to change them.",
     "preview": "Indexed now: {0} entries. After OK: about {1}{2}.",
     "preview_added": ", plus the folders you checked again, once they're indexed",
     "folders": "Folders",

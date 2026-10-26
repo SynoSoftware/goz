@@ -193,7 +193,6 @@ impl ResultSnapshot {
             "a sort gives the volumes of the search"
         );
         let mut answers = Vec::with_capacity(self.answers.len());
-        let mut seen = Vec::with_capacity(self.answers.len());
         for (volume, answer) in volumes.iter().zip(&self.answers) {
             let (matches, seen_by) = {
                 let held = volume.read();
@@ -223,12 +222,10 @@ impl ResultSnapshot {
             // Without a hold, so the journal does not wait for the sort.
             let ordered = matches.order();
             let rows = ordered.read_rows(&volume.read().index, &seen_by);
-            answers.push(rows.map_err(|IndexChanged| ResultSnapshotGone)?);
-            seen.push(seen_by);
+            answers.push((rows.map_err(|IndexChanged| ResultSnapshotGone)?, seen_by));
         }
         Ok(ResultRows {
             volumes,
-            seen_by: seen,
             reply: Reply::new(answers, 0, None),
             sums: self.sums,
             coverage: Coverage {
@@ -286,8 +283,7 @@ impl ResultSnapshot {
                 .into_iter()
                 .map(|next| PlaceReader {
                     next,
-                    seen_by: None,
-                    folders: None,
+                    view: None,
                     scope_memo: FxHashMap::default(),
                     scope_gone: false,
                 })
@@ -325,13 +321,11 @@ pub struct SnapshotRows<'s, V> {
 struct PlaceReader {
     /// The next row of the volume.
     next: usize,
-    /// What the read sees of the volume; asked at the first page that
-    /// reads it, and kept, because every page checks that the index keeps
-    /// its instance.
-    seen_by: Option<SeenBy>,
-    /// The folders of the rows read so far; made with the first page that
-    /// reads the volume.
-    folders: Option<FolderCopy>,
+    /// What the read sees of the volume, and the folders of the rows read so
+    /// far, both made at the first page that reads the volume. What it sees
+    /// is kept, because every page checks that the index keeps its
+    /// instance.
+    view: Option<(SeenBy, FolderCopy)>,
     /// The page's memo of folders inside or outside the scope.
     scope_memo: FxHashMap<EntryIdx, bool>,
     /// The search's folder is gone, so every row of the volume is.
@@ -399,11 +393,11 @@ impl<V: IndexedVolume> SnapshotRows<'_, V> {
             let reader = &mut self.readers[v];
             let index: &VolumeIndex = held[v].as_deref().expect("the page holds the row's volume");
             let row = answer.rows.get(reader.next);
-            let seen_by = (reader.seen_by.as_ref()).expect("begin_page asked the viewer");
+            let (seen_by, folders) =
+                (reader.view.as_mut()).expect("begin_page asked the viewer and made the copy");
             let folder = if reader.scope_gone {
                 None
             } else {
-                let folders = (reader.folders.as_mut()).expect("begin_page made the copy");
                 row_folder(
                     index,
                     seen_by,
@@ -449,13 +443,16 @@ impl PlaceReader {
         viewer: Viewer<'_>,
         names: &mut ResultNames,
     ) {
-        self.seen_by.get_or_insert_with(|| viewer.seen_by(index));
+        let (_, folders) = self.view.get_or_insert_with(|| {
+            (
+                viewer.seen_by(index),
+                FolderCopy::new(index, &answer.mount_prefix, names),
+            )
+        });
+        folders.forget_missing_paths();
         self.scope_memo.clear();
         self.scope_gone = answer
             .scope
             .is_some_and(|(scope, frn)| !index.holds(scope, frn));
-        self.folders
-            .get_or_insert_with(|| FolderCopy::new(index, &answer.mount_prefix, names))
-            .forget_missing_paths();
     }
 }

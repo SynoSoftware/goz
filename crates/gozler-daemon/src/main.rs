@@ -40,8 +40,6 @@ mod volume_state;
 use anyhow::Context;
 use clap::{Parser, Subcommand};
 #[cfg(windows)]
-use gozler_core::include::{SEE_EVERY_FILE_VALUE, SETTINGS_KEY};
-#[cfg(windows)]
 use gozler_winfs::Sid;
 
 #[derive(Parser)]
@@ -175,14 +173,21 @@ fn main() -> anyhow::Result<()> {
     )
 }
 
-/// `install`, storing the list the setup chose. The account resolves before
-/// the service is touched, so an unknown name changes nothing.
+/// `install`, storing the list the setup chose. An account that does not
+/// resolve stores no list, so the next setup asks again, and the service is
+/// installed all the same, because every search works without the list.
 #[cfg(windows)]
 fn install(see_every_file: Option<&str>) -> anyhow::Result<()> {
     let first_list = match see_every_file {
         None => None,
         Some(none) if none.eq_ignore_ascii_case("none") => Some(Vec::new()),
-        Some(account) => Some(vec![resolve(account)?]),
+        Some(account) => match resolve(account) {
+            Ok(sid) => Some(vec![sid]),
+            Err(error) => {
+                eprintln!("gozlerd: {error:#}, so no list of users who see every file is stored");
+                None
+            }
+        },
     };
     service::install(first_list.as_deref())
 }
@@ -201,23 +206,12 @@ fn display_name(sid: &Sid) -> String {
     gozler_winfs::account_name(sid).unwrap_or_else(|| sid.to_string())
 }
 
-/// The lines of the stored list of users and groups who see every file, or
-/// none when no list is stored.
-#[cfg(windows)]
-fn stored_lines() -> anyhow::Result<Vec<String>> {
-    Ok(
-        gozler_winfs::machine_strings(SETTINGS_KEY, SEE_EVERY_FILE_VALUE)
-            .context("reading the list of users and groups who see every file")?
-            .unwrap_or_default(),
-    )
-}
-
 /// `see-every-file` alone: prints the list, a line the daemon ignores marked
 /// as such, and how to show every file to every user. It needs no elevation,
 /// because every user may read the list.
 #[cfg(windows)]
 fn show_list() -> anyhow::Result<()> {
-    let lines = stored_lines()?;
+    let lines = access::stored_lines()?.unwrap_or_default();
     let mut everyone = false;
     if lines.is_empty() {
         println!("The list is empty: each user sees the files in folders they can open.");
@@ -226,7 +220,7 @@ fn show_list() -> anyhow::Result<()> {
         for line in &lines {
             match line.parse::<Sid>() {
                 Ok(sid) => {
-                    everyone |= sid.to_string() == "S-1-1-0";
+                    everyone |= sid.as_bytes() == Sid::EVERYONE;
                     println!("  {}", display_name(&sid));
                 }
                 Err(_) => println!("  {line} (ignored: not a SID)"),
@@ -251,7 +245,7 @@ fn change_list(change: &ListChange) -> anyhow::Result<()> {
     let (ListChange::Add { account } | ListChange::Remove { account }) = change;
     let sid = resolve(account)?;
     let name = display_name(&sid);
-    let mut lines = stored_lines()?;
+    let mut lines = access::stored_lines()?.unwrap_or_default();
     let on_list = |line: &String| line.parse::<Sid>().is_ok_and(|listed| listed == sid);
     let done = match change {
         ListChange::Add { .. } if lines.iter().any(on_list) => {
@@ -271,8 +265,7 @@ fn change_list(change: &ListChange) -> anyhow::Result<()> {
             format!("Removed {name}.")
         }
     };
-    gozler_winfs::set_machine_strings(SETTINGS_KEY, SEE_EVERY_FILE_VALUE, &lines)
-        .context("storing the list of users and groups who see every file")?;
+    access::store_lines(&lines)?;
     println!("{done} The change applies from the next search.");
     Ok(())
 }

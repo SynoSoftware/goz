@@ -36,9 +36,6 @@ use crate::error::{WinError, last_error};
 use crate::file_id::check_descriptor;
 use crate::util::{from_wide_nul, to_wide_nul};
 
-/// `S-1-1-0`, Everyone.
-const EVERYONE: [u8; 12] = [1, 1, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0];
-
 /// A binary SID, compared by its bytes. It holds only bytes that Windows
 /// wrote for a valid SID, so its string form, such as `S-1-5-18`, always
 /// exists.
@@ -46,6 +43,12 @@ const EVERYONE: [u8; 12] = [1, 1, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0];
 pub struct Sid(Box<[u8]>);
 
 impl Sid {
+    /// The binary form of `S-1-1-0`, Everyone.
+    pub const EVERYONE: [u8; 12] = [1, 1, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0];
+
+    /// The binary form of `S-1-5-18`, the operating system's own account.
+    pub const SYSTEM: [u8; 12] = [1, 1, 0, 0, 0, 0, 0, 5, 18, 0, 0, 0];
+
     /// The SID whose binary form is all of `bytes`, or `None` when `bytes`
     /// is not exactly one valid SID.
     pub fn from_bytes(bytes: &[u8]) -> Option<Sid> {
@@ -189,19 +192,19 @@ impl ClientToken {
     /// see every file: its user first, unless the token holds the user for
     /// deny only, then each enabled group that is not for deny only.
     ///
-    /// `None` for a restricted token, one with restricting SIDs, write
+    /// Empty for a restricted token, one with restricting SIDs, write
     /// restricted included: the program that restricted it meant it to reach
     /// less than its user, so the list never lets it see every file.
     ///
     /// # Errors
     ///
     /// [`WinError`] when the token cannot be read.
-    pub fn enabled_sids(&self) -> Result<Option<Vec<Sid>>, WinError> {
+    pub fn enabled_sids(&self) -> Result<Vec<Sid>, WinError> {
         let restricted = token_information(self.handle(), TokenRestrictedSids)?;
         // SAFETY: on success the buffer starts with a TOKEN_GROUPS, and it
         // is aligned as u64 is.
         if unsafe { (*restricted.as_ptr().cast::<TOKEN_GROUPS>()).GroupCount } != 0 {
-            return Ok(None);
+            return Ok(Vec::new());
         }
         let deny_only = SE_GROUP_USE_FOR_DENY_ONLY as u32;
         let enabled = SE_GROUP_ENABLED as u32;
@@ -232,7 +235,7 @@ impl ClientToken {
                 }
             }
         }
-        Ok(Some(sids))
+        Ok(sids)
     }
 
     /// Whether this token may list a folder with `descriptor`: `AccessCheck`
@@ -358,7 +361,7 @@ pub fn account_sid(name: &str) -> Result<Option<Sid>, WinError> {
         };
     }
     if name.eq_ignore_ascii_case("Everyone") {
-        return Ok(Some(Sid(EVERYONE.into())));
+        return Ok(Some(Sid(Sid::EVERYONE.into())));
     }
     let wide = to_wide_nul(name);
     let mut sid_len = 0u32;
@@ -756,15 +759,15 @@ mod tests {
         }
     }
 
-    /// Stage 0 item 3 (W1): `may_list` answers as Windows does when the same
-    /// token opens the folder. Without it, a wrong access mask, a descriptor
-    /// read without its label, or a token of the wrong type makes a filtered
-    /// user's results differ from File Explorer's with no error.
+    /// `may_list` answers as Windows does when the same token opens the
+    /// folder. Without it, a wrong access mask, a descriptor read without
+    /// its label, or a token of the wrong type makes a filtered user's
+    /// results differ from File Explorer's with no error.
     #[test]
     fn may_list_agrees_with_opening_the_folder() {
         let process = process_token();
         let user = token_user(process.as_raw_handle());
-        let everyone = Sid(EVERYONE.into());
+        let everyone = Sid(Sid::EVERYONE.into());
         let low: Sid = "S-1-16-4096".parse().expect("Low integrity SID");
 
         let own = TestToken::of(process.as_raw_handle());
@@ -914,7 +917,7 @@ mod tests {
         (server, client)
     }
 
-    /// W2: the pipe gives the caller's token, never one that can act as the
+    /// The pipe gives the caller's token, never one that can act as the
     /// caller, and no token for an anonymous caller. Without it, a kept token
     /// that can impersonate, or an anonymous client served as somebody,
     /// breaks the identification rule with no error.
@@ -947,15 +950,15 @@ mod tests {
         );
     }
 
-    /// W3: SIDs a token holds for deny only, and restricted tokens, never
-    /// meet the list. Without it, a non-elevated administrator sees every
-    /// file when Administrators is on the list, and a program that runs a
-    /// listed user's work with a restricted token reads every name.
+    /// SIDs a token holds for deny only, and restricted tokens, never meet
+    /// the list. Without it, a non-elevated administrator sees every file
+    /// when Administrators is on the list, and a program that runs a listed
+    /// user's work with a restricted token reads every name.
     #[test]
     fn enabled_sids_leave_out_deny_only_sids_and_restricted_tokens() {
         let process = process_token();
         let user = token_user(process.as_raw_handle());
-        let everyone = Sid(EVERYONE.into());
+        let everyone = Sid(Sid::EVERYONE.into());
         let sids_of = |token: &OwnedHandle| {
             ClientToken::identification_copy(token.as_raw_handle())
                 .expect("copy")
@@ -963,23 +966,22 @@ mod tests {
                 .expect("SIDs read")
         };
 
-        let all = sids_of(&process).expect("not restricted");
+        let all = sids_of(&process);
         assert_eq!(all.first(), Some(&user), "the user comes first");
         assert!(all.contains(&everyone), "Everyone is an enabled group");
 
-        let no_everyone = sids_of(&restricted(process.as_raw_handle(), &[&everyone], &[]))
-            .expect("deny-only SIDs do not restrict the token");
+        // Deny-only SIDs do not restrict the token.
+        let no_everyone = sids_of(&restricted(process.as_raw_handle(), &[&everyone], &[]));
         assert!(!no_everyone.contains(&everyone));
         assert!(no_everyone.contains(&user));
 
-        let no_user = sids_of(&restricted(process.as_raw_handle(), &[&user], &[]))
-            .expect("deny-only SIDs do not restrict the token");
+        let no_user = sids_of(&restricted(process.as_raw_handle(), &[&user], &[]));
         assert!(!no_user.contains(&user));
         assert!(no_user.contains(&everyone));
 
         assert_eq!(
             sids_of(&restricted(process.as_raw_handle(), &[], &[&everyone])),
-            None
+            []
         );
     }
 
@@ -988,14 +990,17 @@ mod tests {
     /// a SID that matches nobody, or one Windows reads past the end of.
     #[test]
     fn from_bytes_takes_exactly_one_valid_sid() {
-        let sid = Sid::from_bytes(&EVERYONE).expect("Everyone's bytes are a SID");
+        let sid = Sid::from_bytes(&Sid::EVERYONE).expect("Everyone's bytes are a SID");
         assert_eq!(sid.to_string(), "S-1-1-0");
-        assert_eq!(Sid::from_bytes(&EVERYONE[..11]), None);
-        assert_eq!(Sid::from_bytes(&[EVERYONE.as_slice(), &[0]].concat()), None);
+        assert_eq!(Sid::from_bytes(&Sid::EVERYONE[..11]), None);
+        assert_eq!(
+            Sid::from_bytes(&[Sid::EVERYONE.as_slice(), &[0]].concat()),
+            None
+        );
         assert_eq!(Sid::from_bytes(&[]), None);
     }
 
-    /// T10: `Everyone` and SID strings resolve without `LookupAccountNameW`,
+    /// `Everyone` and SID strings resolve without `LookupAccountNameW`,
     /// which names well-known accounts in the system's language. The SID of
     /// no account shows that a SID string is not looked up.
     #[test]
@@ -1010,9 +1015,10 @@ mod tests {
         }
     }
 
-    /// Stage 0 item 4: the cost of one `may_list` over the distinct
-    /// descriptors of folders this account may read, with its own token at
-    /// the identification level. Run with `build.ps1 -Timing may_list_cost`.
+    /// The cost of one `may_list` over the distinct descriptors of folders
+    /// this account may read, with its own token at the identification
+    /// level (DESIGN.md: Visibility). Run with
+    /// `build.ps1 -Timing may_list_cost`.
     #[test]
     #[ignore = "timing: build.ps1 -Timing may_list_cost"]
     fn may_list_cost() {

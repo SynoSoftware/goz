@@ -806,9 +806,9 @@ pub(crate) mod tests {
         assert!(shown(SizeFormat::Bytes, 41_163_399_668).contains("41,163,399,668"));
     }
 
-    /// T11: a user who does not see every file gets no folder sizes, so one
-    /// arm for every unknown size makes each folder row read "Unknown", which
-    /// reads as "still loading" (spec `V6`).
+    /// A user who does not see every file gets no folder sizes, so one arm
+    /// for every unknown size makes each folder row read "Unknown", which
+    /// reads as "still loading" (DESIGN.md: Results list).
     #[test]
     fn a_folder_with_no_size_shows_an_empty_cell_and_a_file_shows_unknown() {
         let strings = english();

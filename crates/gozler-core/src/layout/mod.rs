@@ -40,7 +40,7 @@ pub use parse::{
     QUERY_FILE_LAYOUT_INCLUDE_STREAMS_WITH_NO_CLUSTERS_ALLOCATED, QUERY_FILE_LAYOUT_RESTART,
     QUERY_FILE_LAYOUT_SINGLE_INSTANCED, RECOMMENDED_LAYOUT_FLAGS,
 };
-pub use parse::{LayoutFile, LayoutName, LayoutWalkError, walk_layout_buffer};
+pub use parse::{LayoutFile, LayoutName, LayoutSecurity, LayoutWalkError, walk_layout_buffer};
 
 #[cfg(test)]
 pub mod fixtures;

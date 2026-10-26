@@ -128,6 +128,17 @@ impl VolumeRead<'_> {
     pub(crate) fn journal_max_bytes(&self) -> Option<u64> {
         self.indexed.journal_max_bytes
     }
+
+    /// [`VolumeIndex::unread_folder_count`], or 0 for the empty index of a
+    /// volume never indexed, whose root has no descriptor only because no
+    /// build has read it.
+    pub(crate) fn unread_folders(&self) -> u64 {
+        if self.indexed.built {
+            self.indexed.index.unread_folder_count() as u64
+        } else {
+            0
+        }
+    }
 }
 
 /// A build of a volume's index under way, from [`VolumeState::begin_build`].

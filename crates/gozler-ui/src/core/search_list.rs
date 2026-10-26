@@ -48,7 +48,7 @@ pub(crate) struct SearchList {
     observing: Option<Generation>,
     /// A search panel's selected size, which its status line shows; `None`
     /// while nothing is read, and for Search's list.
-    pub(super) chosen_bytes: Option<SelectedSize>,
+    pub(super) chosen_size: Option<SelectedSize>,
     retired: Retirement,
 }
 
@@ -66,7 +66,7 @@ pub(crate) struct SelectedSize {
 /// and the unknown sizes counted apart, as a folder panel's sum (DESIGN.md:
 /// Search in a panel). Only the depths at which a selected folder exists
 /// are looked up.
-pub(super) fn chosen_bytes(files: &[ResultItem]) -> SelectedSize {
+pub(super) fn chosen_size(files: &[ResultItem]) -> SelectedSize {
     let folders: HashSet<&str> = (files.iter())
         .filter(|file| file.is_dir)
         .map(|folder| folder.path.trim_end_matches('\\'))
@@ -113,7 +113,7 @@ impl SearchList {
             keeping: None,
             pending: keeping::Pending::default(),
             observing: None,
-            chosen_bytes: None,
+            chosen_size: None,
             retired: Retirement::default(),
         }
     }
@@ -151,8 +151,8 @@ impl SearchList {
         self.selection_sums
     }
 
-    pub(crate) fn chosen_bytes(&self) -> Option<SelectedSize> {
-        self.chosen_bytes
+    pub(crate) fn chosen_size(&self) -> Option<SelectedSize> {
+        self.chosen_size
     }
 
     /// Forgets the rows, the selection and the kept operations, but not the
@@ -162,7 +162,7 @@ impl SearchList {
         self.results.clear();
         self.set_selection(Selection::None);
         self.reset_kept();
-        self.chosen_bytes = None;
+        self.chosen_size = None;
     }
 
     /// The row at `index` as the list shows it: `None` while its chunk has
@@ -309,8 +309,8 @@ mod tests {
             ]
         };
         let size = |known, unknown| SelectedSize { known, unknown };
-        assert_eq!(chosen_bytes(&files(Some(10))), size(Some(11), 0));
-        assert_eq!(chosen_bytes(&files(None)), size(Some(1), 1));
-        assert_eq!(chosen_bytes(&files(None)[..2]), size(None, 1));
+        assert_eq!(chosen_size(&files(Some(10))), size(Some(11), 0));
+        assert_eq!(chosen_size(&files(None)), size(Some(1), 1));
+        assert_eq!(chosen_size(&files(None)[..2]), size(None, 1));
     }
 }

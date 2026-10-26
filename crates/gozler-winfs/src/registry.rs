@@ -7,9 +7,8 @@ use windows_sys::Win32::Foundation::{
     ERROR_FILE_NOT_FOUND, ERROR_INVALID_PARAMETER, ERROR_MORE_DATA, ERROR_SUCCESS,
 };
 use windows_sys::Win32::System::Registry::{
-    HKEY, HKEY_LOCAL_MACHINE, KEY_SET_VALUE, REG_MULTI_SZ, REG_OPTION_NON_VOLATILE,
-    REG_ROUTINE_FLAGS, RRF_RT_REG_MULTI_SZ, RRF_RT_REG_SZ, RegCloseKey, RegCreateKeyExW,
-    RegGetValueW, RegSetValueExW,
+    HKEY_LOCAL_MACHINE, REG_MULTI_SZ, REG_ROUTINE_FLAGS, RRF_RT_REG_MULTI_SZ, RRF_RT_REG_SZ,
+    RegGetValueW, RegSetKeyValueW,
 };
 
 use crate::error::WinError;
@@ -82,46 +81,24 @@ pub fn set_machine_strings(
     }
     let key = to_wide_nul(key);
     let name = to_wide_nul(name);
-    let mut hkey: HKEY = ptr::null_mut();
-    // SAFETY: `key` is NUL-terminated and outlives the call; no class and no
-    // security attributes are given; `hkey` is a live out param.
+    // SAFETY: `key` and `name` are NUL-terminated, and `data` holds `bytes`
+    // bytes, ending in the two NULs REG_MULTI_SZ needs; all three outlive
+    // the call, which only reads them. It creates a missing key, non-volatile
+    // and with the default security descriptor.
     let status = unsafe {
-        RegCreateKeyExW(
+        RegSetKeyValueW(
             HKEY_LOCAL_MACHINE,
             key.as_ptr(),
-            0,
-            ptr::null(),
-            REG_OPTION_NON_VOLATILE,
-            KEY_SET_VALUE,
-            ptr::null(),
-            &mut hkey,
-            ptr::null_mut(),
-        )
-    };
-    if status != ERROR_SUCCESS {
-        return Err(WinError {
-            code: status,
-            context: "RegCreateKeyExW",
-        });
-    }
-    // SAFETY: `hkey` was opened above with KEY_SET_VALUE; `name` is
-    // NUL-terminated; `data` holds `bytes` bytes.
-    let status = unsafe {
-        RegSetValueExW(
-            hkey,
             name.as_ptr(),
-            0,
             REG_MULTI_SZ,
             data.as_ptr().cast(),
             bytes as u32,
         )
     };
-    // SAFETY: `hkey` was opened above and is closed once, here.
-    unsafe { RegCloseKey(hkey) };
     if status != ERROR_SUCCESS {
         return Err(WinError {
             code: status,
-            context: "RegSetValueExW",
+            context: "RegSetKeyValueW",
         });
     }
     Ok(())

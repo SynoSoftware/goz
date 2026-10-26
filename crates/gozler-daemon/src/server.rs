@@ -665,7 +665,7 @@ fn build_status(volumes: &VolumeSet, include: &Include) -> DaemonStatus {
                 delete_of_unknown: stats.delete_of_unknown,
                 stale_slots: stats.stale_slots,
                 link_reconciles_dropped: stats.link_reconciles_dropped,
-                descriptor_reads_failed: stats.descriptor_reads_failed,
+                unread_folders: read.unread_folders(),
                 memory: Some(VolumeMemory {
                     entries: pair(mem.entries),
                     arena_raw: pair(mem.arena_raw),
@@ -929,7 +929,7 @@ mod tests {
         frames.remove(0)
     }
 
-    /// T7: a client gozlerd cannot identify gets no entry and no count,
+    /// A client gozlerd cannot identify gets no entry and no count,
     /// while the requests that show no name still answer. Without it, a
     /// change to `serve` could answer an unknown caller unfiltered, which
     /// lets any program bypass the filter.
@@ -976,7 +976,7 @@ mod tests {
         ));
     }
 
-    /// T7: a filtered user reads only the entries of the folders they may
+    /// A filtered user reads only the entries of the folders they may
     /// list, and gets no Include count. Without it, a change to `serve`
     /// could search for a filtered user unfiltered, or give any user the
     /// Include count, whose rules can spell hidden names.
@@ -995,7 +995,7 @@ mod tests {
             index.set_folder_descriptor(folder, Some(descriptor));
         }
         let vols = set(&[volume(r"C:\", index, VolumePhase::Live)]);
-        let caller = Access::Sees(Visibility::Caller(Box::new(|descriptor: &[u8]| {
+        let caller = Access::Sees(Visibility::Filtered(Box::new(|descriptor: &[u8]| {
             descriptor == b"open"
         })));
 
@@ -1165,8 +1165,7 @@ mod tests {
                 size: Some(size),
                 mtime_ft: Some(5),
                 created_ft: None,
-                security_id: None,
-                usn: None,
+                security: None,
                 names: vec![LayoutName {
                     parent_frn: NTFS_ROOT_FRN,
                     name: format!("{frn}.bin").into_bytes(),
@@ -1195,8 +1194,7 @@ mod tests {
             size: Some(5),
             mtime_ft: Some(5),
             created_ft: None,
-            security_id: None,
-            usn: None,
+            security: None,
             names: vec![LayoutName {
                 parent_frn: Frn(101),
                 name: b"kernel32.dll".to_vec(),
@@ -1695,8 +1693,7 @@ mod tests {
                 size: Some(size),
                 mtime_ft: Some(5),
                 created_ft: None,
-                security_id: None,
-                usn: None,
+                security: None,
                 names: links
                     .iter()
                     .map(|&(parent, name)| LayoutName {
