@@ -462,7 +462,7 @@
     "reset_all": "All&es herstellen",
     "reset_all_tooltip": "Begin opnieuw als bij een nieuwe installatie.",
     "reset_all_question": "Alle instellingen herstellen?",
-    "reset_all_body": "Dit herstelt ook de zoekopties, de filters en de kolommen en deelvensters van het venster en opent Gozler daarna opnieuw. De instellingen voor Opnemen blijven ongewijzigd.",
+    "reset_all_body": "Dit herstelt ook de zoekopties, de filters en de kolommen en deelvensters van het venster en opent Gozler daarna opnieuw. De instellingen voor Opnemen en Zichtbaarheid blijven ongewijzigd.",
     "search_cue": "Instellingen zoeken",
     "no_match": "Geen instellingen komen overeen met uw zoekopdracht.",
     "general": "Algemeen",
@@ -471,7 +471,9 @@
     "keyboard": "Toetsenbord",
     "file_operations": "Bestandsbewerkingen",
     "index": "Stations en service",
-    "include": "Opnemen"
+    "include": "Opnemen",
+    "visibility": "Zichtbaarheid",
+    "not_saved": "Kan de instellingen voor iedereen op deze pc niet opslaan. {0}"
   },
   "settings_general": {
     "language": "Taa&l:",
@@ -657,8 +659,16 @@
     "names_label": "Weggelaten uit de in&dex:",
     "names_hint": "Scheid namen met puntkomma's, zoals *.tmp;node_modules;.git. Een overeenkomende map wordt met alle inhoud weggelaten.",
     "hidden": "&Verborgen bestanden en mappen weglaten",
-    "system": "Systeem&bestanden en -mappen weglaten",
-    "not_saved": "Kan de instellingen voor Opnemen niet opslaan. {0}"
+    "system": "Systeem&bestanden en -mappen weglaten"
+  },
+  "settings_visibility": {
+    "everyone": "Elke gebruiker &ziet alle bestanden",
+    "list": "Gebruikers en groepen die alle bestanden zien",
+    "add": "Toevoe&gen…",
+    "remove": "Ver&wijderen",
+    "empty": "Gebruikers zien alleen de bestanden in mappen die ze kunnen openen.",
+    "unreadable": "Kan de lijst niet lezen. {0}",
+    "picker_failed": "Kan Gebruikers of groepen selecteren niet openen. {0}"
   },
   "indexed_folders": {
     "title": "Geïndexeerde mappen",

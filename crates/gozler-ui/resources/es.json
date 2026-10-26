@@ -462,7 +462,7 @@
     "reset_all": "Restab&lecer todo",
     "reset_all_tooltip": "Empieza de nuevo, como una instalación nueva.",
     "reset_all_question": "¿Restablecer toda la configuración?",
-    "reset_all_body": "También restablece las opciones de búsqueda, los filtros y las columnas y los paneles de la ventana, y luego vuelve a abrir Gozler. La configuración de Incluir no cambia.",
+    "reset_all_body": "También restablece las opciones de búsqueda, los filtros y las columnas y los paneles de la ventana, y luego vuelve a abrir Gozler. La configuración de Incluir y Visibilidad no cambia.",
     "search_cue": "Buscar en la configuración",
     "no_match": "Ninguna opción coincide con tu búsqueda.",
     "general": "General",
@@ -471,7 +471,9 @@
     "keyboard": "Teclado",
     "file_operations": "Operaciones de archivo",
     "index": "Unidades y servicio",
-    "include": "Incluir"
+    "include": "Incluir",
+    "visibility": "Visibilidad",
+    "not_saved": "No se pudo guardar la configuración para todos en este equipo. {0}"
   },
   "settings_general": {
     "language": "&Idioma:",
@@ -657,8 +659,16 @@
     "names_label": "Omitidos del ín&dice:",
     "names_hint": "Separa los nombres con punto y coma, como *.tmp;node_modules;.git. Una carpeta que coincida se omite con todo su contenido.",
     "hidden": "Omitir archivos y carpetas &ocultos",
-    "system": "Omitir archivos y carpetas del &sistema",
-    "not_saved": "No se pudo guardar la configuración de Incluir. {0}"
+    "system": "Omitir archivos y carpetas del &sistema"
+  },
+  "settings_visibility": {
+    "everyone": "&Todos los usuarios ven todos los archivos",
+    "list": "Usuarios y grupos que ven todos los archivos",
+    "add": "A&gregar…",
+    "remove": "&Quitar",
+    "empty": "Cada usuario ve solo los archivos de las carpetas que puede abrir.",
+    "unreadable": "No se pudo leer la lista. {0}",
+    "picker_failed": "No se pudo abrir Seleccionar Usuarios o Grupos. {0}"
   },
   "indexed_folders": {
     "title": "Carpetas indexadas",

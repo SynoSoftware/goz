@@ -29,7 +29,12 @@ serde_json.workspace = true
 
 [target.'cfg(windows)'.dependencies]
 gozler-winfs = { path = "../gozler-winfs" }
-windows.workspace = true
+# Settings > Visibility's Select Users or Groups dialog, and the VARIANT
+# that brings each chosen account's SID.
+windows = { workspace = true, features = [
+    "Win32_Networking_ActiveDirectory",
+    "Win32_System_Variant",
+] }
 windows-core.workspace = true
 
 [build-dependencies]

@@ -25,7 +25,7 @@ use crate::core::model::Model;
 use crate::core::open::browse_command;
 use crate::core::results::Fix;
 use crate::core::settings::{
-    ContextItem, ItemVisibility, Mode, SettingsDraft, SettingsPage, SettingsValues,
+    ContextItem, ItemVisibility, Mode, ServiceChanges, SettingsDraft, SettingsPage, SettingsValues,
 };
 use crate::core::shortcuts::{
     CommandRow, CommandShortcuts, ShowShortcut, command_place, command_rows,
@@ -71,11 +71,11 @@ enum Awaited {
     SignIn {
         id: Id,
         on: bool,
-        include: Option<IndexSettings>,
+        service: Option<ServiceChanges>,
         after: AfterSave,
     },
-    /// Saves these Include settings, after Apply or OK.
-    Include(IndexSettings, AfterSave),
+    /// Saves these service settings, after Apply or OK.
+    Service(ServiceChanges, AfterSave),
     /// Asks the service to rebuild the index, after Rebuild.
     Rebuild,
 }
@@ -99,6 +99,7 @@ fn heading(page: SettingsPage) -> ControlId {
         SettingsPage::Performance => ControlId::SpeedHeading,
         SettingsPage::Index => ControlId::IndexHeading,
         SettingsPage::Include => ControlId::IncludeHeading,
+        SettingsPage::Visibility => ControlId::VisibilityHeading,
     }
 }
 
@@ -560,6 +561,7 @@ impl<'a> SettingsDialog<'a> {
             SettingsPage::Performance => self.fill_speed(&values.choices.speed),
             SettingsPage::Index => self.fill_dates_created(values.include.as_ref()),
             SettingsPage::Include => self.fill_include(values.include.as_mut()),
+            SettingsPage::Visibility => self.fill_visibility(None),
         });
         self.show_closed_note();
     }
@@ -823,17 +825,117 @@ impl<'a> SettingsDialog<'a> {
         }
     }
 
-    /// Saves the captured Include edit; later edits remain in the draft.
-    fn save_include(&self, include: Option<IndexSettings>, after: AfterSave) -> bool {
-        let Some(include) = include else {
+    /// Saves the captured service settings; later edits remain in the
+    /// draft.
+    fn save_service(&self, service: Option<ServiceChanges>, after: AfterSave) -> bool {
+        let Some(service) = service else {
             return false;
         };
         self.saving
-            .replace(Some(Awaited::Include(include.clone(), after)));
+            .replace(Some(Awaited::Service(service.clone(), after)));
         self.main
             .settings
-            .run_as_administrator(self.main, self.window, Elevated::Include(include));
+            .run_as_administrator(self.main, self.window, Elevated::Save(service));
         true
+    }
+
+    fn visibility_list(&self) -> Option<ReportList> {
+        ReportList::of_dialog(
+            self.page(SettingsPage::Visibility)?,
+            ControlId::VisibilityList.id(),
+        )
+    }
+
+    /// Sets the Visibility page's controls from the edited list, with the
+    /// row at `selected` selected. While the list could not be read, they
+    /// are disabled and the list says why.
+    fn fill_visibility(&self, selected: Option<usize>) {
+        let (sids, everyone) = match &self.draft.borrow().edited.see_every_file {
+            Ok(list) => (Some(list.sids().to_vec()), list.everyone()),
+            Err(_) => (None, false),
+        };
+        for control in [
+            ControlId::VisibilityEveryone,
+            ControlId::VisibilityList,
+            ControlId::VisibilityAdd,
+        ] {
+            if let Some(control) = self.control(SettingsPage::Visibility, control) {
+                control.set_enabled(sids.is_some());
+            }
+        }
+        if let Some(check) = self.check_box(SettingsPage::Visibility, ControlId::VisibilityEveryone)
+        {
+            self.filling(|| check.set_checked(everyone));
+        }
+        let sids = sids.unwrap_or_default();
+        // A SID shows as its string while Windows has not named it.
+        let names = self.main.settings.account_names(self.main, &sids);
+        let rows: Vec<[String; 1]> = (sids.into_iter().zip(names))
+            .map(|(sid, name)| [name.unwrap_or(sid)])
+            .collect();
+        if let Some(list) = self.visibility_list() {
+            self.filling(|| list.set_rows(&rows, selected));
+        }
+        self.update_remove();
+    }
+
+    /// Remove needs a selected row of a list that was read.
+    fn update_remove(&self) {
+        let selected = self
+            .visibility_list()
+            .and_then(ReportList::selected)
+            .is_some();
+        let readable = self.draft.borrow().edited.see_every_file.is_ok();
+        if let Some(remove) = self.control(SettingsPage::Visibility, ControlId::VisibilityRemove) {
+            remove.set_enabled(selected && readable);
+        }
+    }
+
+    /// Add… opens Windows' Select Users or Groups dialog, and adds those
+    /// the person chose that the list does not hold.
+    fn add_accounts(&self, dialog: Hwnd) {
+        let chosen = match win::accounts::pick_accounts(dialog) {
+            Ok(chosen) => chosen,
+            Err(error) => {
+                let text = self.strings.format(
+                    "settings_visibility.picker_failed",
+                    &[&win::error_text(&error)],
+                );
+                win::dialog::error_box(Some(dialog), &text, self.strings.text("window.title"));
+                return;
+            }
+        };
+        let Some(first) = chosen.first() else {
+            return;
+        };
+        let selected = {
+            let mut draft = self.draft.borrow_mut();
+            let Ok(list) = &mut draft.edited.see_every_file else {
+                return;
+            };
+            for sid in &chosen {
+                list.add(sid.clone());
+            }
+            (list.sids().iter()).position(|sid| sid.eq_ignore_ascii_case(first))
+        };
+        self.fill_visibility(selected);
+    }
+
+    /// Remove takes the selected row off the list and selects the row that
+    /// takes its place.
+    fn remove_account(&self) {
+        let Some(index) = self.visibility_list().and_then(ReportList::selected) else {
+            return;
+        };
+        let left = {
+            let mut draft = self.draft.borrow_mut();
+            let Ok(list) = &mut draft.edited.see_every_file else {
+                return;
+            };
+            list.remove(index);
+            list.sids().len()
+        };
+        self.fill_visibility((left > 0).then(|| index.min(left - 1)));
     }
 
     /// Asks the service to rebuild the index, as administrator (DESIGN.md:
@@ -869,8 +971,8 @@ impl<'a> SettingsDialog<'a> {
             return;
         };
         match (awaited, answer) {
-            (Awaited::Include(include, after), Ok(())) => {
-                self.draft.borrow_mut().include_saved(include);
+            (Awaited::Service(service, after), Ok(())) => {
+                self.draft.borrow_mut().service_saved(service);
                 if after == AfterSave::Close && self.apply(dialog, AfterSave::Close) {
                     dialog::end(dialog, DialogEnd::Ok);
                     return;
@@ -882,7 +984,7 @@ impl<'a> SettingsDialog<'a> {
             }
             (awaited, Err(NotSaved::Failed(reason))) => {
                 let key = match awaited {
-                    Awaited::Include(..) => "settings_include.not_saved",
+                    Awaited::Service(..) => "settings.not_saved",
                     Awaited::Rebuild => "settings_index.not_rebuilt",
                     Awaited::SignIn { .. } | Awaited::Shortcut(..) => {
                         unreachable!("shortcut and registry replies are handled separately")
@@ -974,10 +1076,10 @@ impl<'a> SettingsDialog<'a> {
         if !self.main.settings.sign_in_is_current(self.main, id) || win::window::quit_pending() {
             return;
         }
-        let Some(Awaited::SignIn { include, after, .. }) = self.saving.take() else {
+        let Some(Awaited::SignIn { service, after, .. }) = self.saving.take() else {
             return;
         };
-        let saving = self.save_include(include, after);
+        let saving = self.save_service(service, after);
         if !saving && after == AfterSave::Close && self.apply(dialog, AfterSave::Close) {
             dialog::end(dialog, DialogEnd::Ok);
             return;
@@ -1172,11 +1274,11 @@ impl<'a> SettingsDialog<'a> {
 
     /// Apply is enabled while a value differs from what was applied
     /// (DESIGN.md: Dialogs), a refused speed included. OK and Apply show
-    /// the administrator shield while the Include settings differ, because
-    /// saving them asks Windows for permission. Rebuild is enabled while
-    /// the service answers.
+    /// the administrator shield while a service setting differs, because
+    /// saving it asks Windows for permission. Rebuild is enabled while the
+    /// service answers.
     fn update_apply(&self, dialog: Hwnd) {
-        let (changed, include_changed) = {
+        let (changed, service_changed) = {
             let draft = self.draft.borrow();
             (draft.can_apply(), draft.shielded())
         };
@@ -1199,13 +1301,13 @@ impl<'a> SettingsDialog<'a> {
                 button.set_enabled(!saving);
             }
         }
-        if self.apply_shield.replace(Some(include_changed)) != Some(include_changed) {
+        if self.apply_shield.replace(Some(service_changed)) != Some(service_changed) {
             for (button, key) in [
                 (DialogItem::Ok.id(), "button.ok"),
                 (ControlId::SettingsApply.id(), "settings.apply"),
             ] {
                 if let Some(button) = Button::of_dialog(dialog, button) {
-                    button.set_icon(ButtonIcon::of(key, include_changed));
+                    button.set_icon(ButtonIcon::of(key, service_changed));
                 }
             }
         }
@@ -1241,10 +1343,10 @@ impl<'a> SettingsDialog<'a> {
                                 .after(now.saturating_duration_since(applying.accepted)),
                         ),
                         Awaited::SignIn { id, .. } => self.main.sign_in_waiting(*id, now),
-                        Awaited::Include(..) | Awaited::Rebuild => self.main.elevated_waiting(now),
+                        Awaited::Service(..) | Awaited::Rebuild => self.main.elevated_waiting(now),
                     };
                     let key = match awaited {
-                        Awaited::Shortcut(..) | Awaited::SignIn { .. } | Awaited::Include(..) => {
+                        Awaited::Shortcut(..) | Awaited::SignIn { .. } | Awaited::Service(..) => {
                             "settings.saving"
                         }
                         Awaited::Rebuild => "settings.rebuilding",
@@ -1532,6 +1634,11 @@ impl<'a> SettingsDialog<'a> {
                         (text("settings_include.folders_column"), 52, false),
                     ]);
                     list.show_info_tips();
+                }
+            }
+            SettingsPage::Visibility => {
+                if let Some(list) = self.visibility_list() {
+                    list.set_columns(&[("", 100, false)]);
                 }
             }
         }
@@ -1881,7 +1988,7 @@ impl<'a> SettingsDialog<'a> {
     /// Gives the edited values to the main window, and answers whether they
     /// were applied; a speed that cannot be one, or a shortcut that another
     /// program holds, keeps the dialog open (DESIGN.md: Dialogs). Changed
-    /// Include settings are applied once they are saved, and `after` says
+    /// service settings are applied once they are saved, and `after` says
     /// what the dialog does then.
     fn apply(&self, dialog: Hwnd, after: AfterSave) -> bool {
         if let Err((control, message)) = self.read_speed() {
@@ -1964,10 +2071,7 @@ impl<'a> SettingsDialog<'a> {
         self.draft
             .borrow_mut()
             .choices_applied(edited.choices.clone());
-        let include = edited
-            .include
-            .clone()
-            .filter(|_| edited.include != last.include);
+        let service = edited.service_changes(&last);
         let saving = if edited.start_at_sign_in != last.start_at_sign_in {
             let id = self
                 .main
@@ -1976,12 +2080,12 @@ impl<'a> SettingsDialog<'a> {
             self.saving.replace(Some(Awaited::SignIn {
                 id,
                 on: edited.start_at_sign_in,
-                include,
+                service,
                 after,
             }));
             true
         } else {
-            self.save_include(include, after)
+            self.save_service(service, after)
         };
         if Mode::ALL
             .into_iter()
@@ -2255,6 +2359,8 @@ impl<'a> SettingsDialog<'a> {
             if let Some(chosen) = chosen {
                 self.change_speed(|settings| *block(settings) = chosen);
             }
+        } else if is(id, ControlId::VisibilityList) {
+            self.update_remove();
         } else if is(id, ControlId::IncludeNames) {
             let text = self
                 .control(SettingsPage::Include, ControlId::IncludeNames)
@@ -2323,6 +2429,19 @@ impl<'a> SettingsDialog<'a> {
             self.fill(SettingsPage::Performance);
         } else if is(id, ControlId::IncludeModify) {
             self.modify_folders(dialog);
+        } else if is(id, ControlId::VisibilityEveryone) {
+            let checked = self
+                .check_box(SettingsPage::Visibility, ControlId::VisibilityEveryone)
+                .is_some_and(CheckBox::is_checked);
+            if let Ok(list) = &mut self.draft.borrow_mut().edited.see_every_file {
+                list.set_everyone(checked);
+            }
+            let selected = self.visibility_list().and_then(ReportList::selected);
+            self.fill_visibility(selected);
+        } else if is(id, ControlId::VisibilityAdd) {
+            self.add_accounts(dialog);
+        } else if is(id, ControlId::VisibilityRemove) {
+            self.remove_account();
         } else if let Some((mode, _, _)) = SHOW_SHORTCUTS
             .into_iter()
             .find(|(_, _, clear)| is(id, *clear))
@@ -2536,6 +2655,12 @@ impl DialogProc for SettingsDialog<'_> {
             }
             DialogMessage::Reply => {
                 self.total_commander_found(dialog);
+                if self.main.settings.take_account_names_changed()
+                    && self.page(SettingsPage::Visibility).is_some()
+                {
+                    let selected = self.visibility_list().and_then(ReportList::selected);
+                    self.fill_visibility(selected);
+                }
                 if self.main.settings.take_include_summary_changed()
                     && self.include_folders().is_some()
                 {
@@ -2640,6 +2765,14 @@ impl DialogProc for SettingsDialog<'_> {
     }
 
     fn empty_text(&self, id: u16) -> Option<String> {
+        if is(id, ControlId::VisibilityList) {
+            return Some(match &self.draft.borrow().edited.see_every_file {
+                Ok(_) => self.strings.text("settings_visibility.empty").to_owned(),
+                Err(reason) => self
+                    .strings
+                    .format("settings_visibility.unreadable", &[reason.as_str()]),
+            });
+        }
         let index = self.index.borrow();
         let text = &index.as_ref()?.no_drives;
         (is(id, ControlId::IndexDrives) && !text.is_empty()).then(|| text.clone())

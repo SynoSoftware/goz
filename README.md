@@ -178,7 +178,8 @@ speed and [reduced memory use for deep-folder exports](docs/research/deep-folder
 ## Security
 
 The search service indexes file names, sizes and dates with administrator
-access. Those names are visible to other local users, as with Everything.
+access, and shows each user only the names in folders that user can open,
+except the users and groups an administrator lists to see every file.
 File operations run with your own permissions. Read the
 [security model](docs/SECURITY.md) for shared-PC use and reporting vulnerabilities.
 

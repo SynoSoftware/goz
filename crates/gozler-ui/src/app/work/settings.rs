@@ -3,7 +3,7 @@
 
 use super::{Surface, local_service};
 use crate::core::fetch::LocalService;
-use crate::core::settings::{Changes, Settings};
+use crate::core::settings::{Changes, SeeEveryFile, Settings};
 use crate::core::work::{Id, Replacement, Retirement, Waiting};
 use crate::win::wake::OpenWaker;
 use crate::win::work::{OffThread, Task};
@@ -31,8 +31,15 @@ enum Registry {
 }
 
 pub(in crate::app) enum RegistryAnswer {
-    Read(bool),
+    Read(RegistryRead),
     SignIn(io::Result<()>),
+}
+
+/// What Settings shows of the registry when it opens.
+pub(in crate::app) struct RegistryRead {
+    pub(in crate::app) start_at_sign_in: bool,
+    /// The stored list, or Windows' words for why it could not be read.
+    pub(in crate::app) see_every_file: Result<SeeEveryFile, String>,
 }
 
 pub(in crate::app) struct Work {
@@ -41,6 +48,9 @@ pub(in crate::app) struct Work {
     pairing_surface: Surface,
     labels: Task<Vec<String>, Vec<(String, Option<String>)>>,
     label_prefixes: Vec<String>,
+    /// The account names of SID strings, which can wait on a domain
+    /// controller.
+    account_names: Task<Vec<String>, Vec<(String, Option<String>)>>,
     registry: Option<Task<Registry, RegistryAnswer>>,
     registry_write: Option<Id>,
     retired: Retirement,
@@ -54,6 +64,8 @@ impl Work {
             pairing_surface: Surface::Main,
             labels: Task::new(waker.clone(), Replacement::Cancel, read_labels).background(),
             label_prefixes: Vec::new(),
+            account_names: Task::new(waker.clone(), Replacement::Cancel, read_account_names)
+                .background(),
             registry: Some(Task::new(waker, Replacement::Finish, registry)),
             registry_write: None,
             retired: Retirement::default(),
@@ -177,6 +189,16 @@ impl Work {
         self.labels.take().map(|(_, labels)| labels)
     }
 
+    /// Looks up the account names of `sids`, replacing a lookup that has not
+    /// answered.
+    pub(in crate::app) fn account_names(&mut self, sids: Vec<String>) {
+        self.account_names.replace(sids);
+    }
+
+    pub(in crate::app) fn take_account_names(&mut self) -> Option<Vec<(String, Option<String>)>> {
+        self.account_names.take().map(|(_, names)| names)
+    }
+
     pub(super) fn pairing_waiting(&self, surface: Surface, now: Instant) -> Option<Waiting> {
         (self.pairing_surface == surface)
             .then(|| self.pairing.waiting(now))
@@ -202,6 +224,7 @@ impl Work {
     pub(super) fn tick(&mut self, now: Instant) -> bool {
         let mut active = self.pairing.tick(now).is_some();
         active |= self.labels.tick(now).is_some();
+        active |= self.account_names.tick(now).is_some();
         if let Some(task) = &mut self.saving {
             active |= task.tick(now).is_some();
         }
@@ -214,6 +237,7 @@ impl Work {
     pub(super) fn take_retired(&mut self) -> Retirement {
         self.retired.append(self.pairing.take_retired());
         self.retired.append(self.labels.take_retired());
+        self.retired.append(self.account_names.take_retired());
         if let Some(task) = &mut self.saving {
             self.retired.append(task.take_retired());
         }
@@ -228,8 +252,10 @@ impl Work {
     ) -> (Retirement, impl FnOnce(&OffThread) + Send + 'static + use<>) {
         self.pairing.cancel();
         self.labels.cancel();
+        self.account_names.cancel();
         self.retired.append(self.pairing.close_delivery());
         self.retired.append(self.labels.close_delivery());
+        self.retired.append(self.account_names.close_delivery());
         let prefixes = std::mem::take(&mut self.label_prefixes);
         let items = prefixes.len();
         self.retired.push(prefixes, items);
@@ -295,7 +321,11 @@ fn save(save: Save, worker: &OffThread, _cancel: &CancelToken) -> Saved {
 
 fn registry(input: Registry, worker: &OffThread, _cancel: &CancelToken) -> RegistryAnswer {
     match input {
-        Registry::Read => RegistryAnswer::Read(crate::win::shell::starts_at_sign_in(worker)),
+        Registry::Read => RegistryAnswer::Read(RegistryRead {
+            start_at_sign_in: crate::win::shell::starts_at_sign_in(worker),
+            see_every_file: crate::win::accounts::see_every_file(worker)
+                .map_err(|error| crate::win::error_text(&error)),
+        }),
         Registry::SignIn { on, log } => {
             let result = std::env::current_exe()
                 .and_then(|program| crate::win::shell::set_start_at_sign_in(on, &program, worker));
@@ -325,6 +355,20 @@ fn check_pairing(
 ) -> (LocalService, bool) {
     let paired = !cancel.is_cancelled() && local_service::is_paired(&local.program);
     (local, paired)
+}
+
+fn read_account_names(
+    sids: Vec<String>,
+    worker: &OffThread,
+    cancel: &CancelToken,
+) -> Vec<(String, Option<String>)> {
+    sids.into_iter()
+        .take_while(|_| !cancel.is_cancelled())
+        .map(|sid| {
+            let name = crate::win::accounts::account_name(&sid, worker);
+            (sid, name)
+        })
+        .collect()
 }
 
 fn read_labels(

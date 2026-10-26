@@ -462,7 +462,7 @@
     "reset_all": "T&ümünü sıfırla",
     "reset_all_tooltip": "Yeni bir kurulum gibi yeniden başlayın.",
     "reset_all_question": "Tüm ayarlar sıfırlansın mı?",
-    "reset_all_body": "Arama seçenekleri, filtreler ile pencerenin sütunları ve bölmeleri de sıfırlanır, sonra Gozler yeniden açılır. Dahil et ayarları değişmez.",
+    "reset_all_body": "Arama seçenekleri, filtreler ile pencerenin sütunları ve bölmeleri de sıfırlanır, sonra Gozler yeniden açılır. Dahil et ve Görünürlük ayarları değişmez.",
     "search_cue": "Ayarlarda ara",
     "no_match": "Aramanızla eşleşen ayar yok.",
     "general": "Genel",
@@ -471,7 +471,9 @@
     "keyboard": "Klavye",
     "file_operations": "Dosya işlemleri",
     "index": "Sürücüler ve hizmet",
-    "include": "Dahil et"
+    "include": "Dahil et",
+    "visibility": "Görünürlük",
+    "not_saved": "Bu bilgisayardaki herkes için ayarlar kaydedilemedi. {0}"
   },
   "settings_general": {
     "language": "&Dil:",
@@ -657,8 +659,16 @@
     "names_label": "Dizi&nin dışında bırakılanlar:",
     "names_hint": "Adları noktalı virgülle ayırın, örneğin *.tmp;node_modules;.git. Eşleşen bir klasör, içindeki her şeyle birlikte dışarıda bırakılır.",
     "hidden": "&Gizli dosya ve klasörleri dışarıda bırak",
-    "system": "&Sistem dosyalarını ve klasörlerini dışarıda bırak",
-    "not_saved": "Dahil et ayarları kaydedilemedi. {0}"
+    "system": "&Sistem dosyalarını ve klasörlerini dışarıda bırak"
+  },
+  "settings_visibility": {
+    "everyone": "Her kullanıcı tüm dosyaları &görür",
+    "list": "Tüm dosyaları gören kullanıcılar ve gruplar",
+    "add": "&Ekle…",
+    "remove": "Ka&ldır",
+    "empty": "Her kullanıcı yalnızca açabildiği klasörlerdeki dosyaları görür.",
+    "unreadable": "Liste okunamadı. {0}",
+    "picker_failed": "Kullanıcıları veya Grupları Seç açılamadı. {0}"
   },
   "indexed_folders": {
     "title": "Dizinlenen klasörler",

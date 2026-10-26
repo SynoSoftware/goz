@@ -462,7 +462,7 @@
     "reset_all": "Reset a&ll",
     "reset_all_tooltip": "Start again as a new installation.",
     "reset_all_question": "Reset all settings?",
-    "reset_all_body": "This also resets the search options, the filters and the window's columns and panes, then opens Gozler again. The Include settings don't change.",
+    "reset_all_body": "This also resets the search options, the filters and the window's columns and panes, then opens Gozler again. The Include and Visibility settings don't change.",
     "search_cue": "Search settings",
     "no_match": "No settings match your search.",
     "general": "General",
@@ -471,7 +471,9 @@
     "keyboard": "Keyboard",
     "file_operations": "File operations",
     "index": "Drives and service",
-    "include": "Include"
+    "include": "Include",
+    "visibility": "Visibility",
+    "not_saved": "Couldn't save the settings for everyone on this PC. {0}"
   },
   "settings_general": {
     "language": "Lan&guage:",
@@ -657,8 +659,16 @@
     "names_label": "Left out of the inde&x:",
     "names_hint": "Separate names with semicolons, such as *.tmp;node_modules;.git. A matching folder is left out with everything in it.",
     "hidden": "Leave out &hidden files and folders",
-    "system": "Leave out s&ystem files and folders",
-    "not_saved": "Couldn't save the Include settings. {0}"
+    "system": "Leave out s&ystem files and folders"
+  },
+  "settings_visibility": {
+    "everyone": "&Every user sees every file",
+    "list": "Users and groups who see every file",
+    "add": "A&dd…",
+    "remove": "Re&move",
+    "empty": "Each user sees only the files in folders they can open.",
+    "unreadable": "Couldn't read the list. {0}",
+    "picker_failed": "Couldn't open Select Users or Groups. {0}"
   },
   "indexed_folders": {
     "title": "Indexed folders",

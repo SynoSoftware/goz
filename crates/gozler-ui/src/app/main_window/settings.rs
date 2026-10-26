@@ -5,6 +5,7 @@ use super::{
     Strings, SummaryRow, Surface, Waiting, captions, connected_drives, connected_volumes,
     include_drives, io, label_of, preview, summary_rows, win,
 };
+use crate::app::work::RegistryRead;
 use crate::core::include::summary_drives_changed;
 use gozler_core::proto::DaemonStatus;
 
@@ -14,9 +15,14 @@ pub(super) struct OpenSettings {
     pub(super) follow_fix: bool,
 }
 
+/// The job that runs as administrator, which Settings starts one at a time.
 pub(super) enum IncludeSave {
     Idle,
-    Saving,
+    /// Runs; once it ran, the window sends `SettingsSaved` when
+    /// `tells_service`.
+    Saving {
+        tells_service: bool,
+    },
     Saved(Result<(), NotSaved>),
 }
 
@@ -26,6 +32,12 @@ pub(in crate::app) struct SettingsBridge {
     pub(super) include_save: RefCell<IncludeSave>,
     pub(super) sign_in_saved: RefCell<Option<(Id, io::Result<()>)>>,
     pub(super) labels: RefCell<Vec<(String, Option<String>)>>,
+    /// The account names of the SID strings that Settings > Visibility
+    /// asked for, `None` for a SID without one, kept for the window's
+    /// lifetime, because accounts are rarely renamed.
+    account_names: RefCell<Vec<(String, Option<String>)>>,
+    /// Whether the names changed since the Visibility page last showed them.
+    account_names_dirty: Cell<bool>,
     include_summary_dirty: Cell<bool>,
     include_preview_dirty: Cell<bool>,
 }
@@ -38,6 +50,8 @@ impl SettingsBridge {
             include_save: RefCell::new(IncludeSave::Idle),
             sign_in_saved: RefCell::new(None),
             labels: RefCell::new(Vec::new()),
+            account_names: RefCell::new(Vec::new()),
+            account_names_dirty: Cell::new(false),
             include_summary_dirty: Cell::new(false),
             include_preview_dirty: Cell::new(false),
         }
@@ -177,7 +191,7 @@ impl SettingsBridge {
         &self,
         window: &MainWindow,
         hwnd: Hwnd,
-        start_at_sign_in: bool,
+        read: RegistryRead,
     ) {
         self.refresh_volume_labels(window);
         let (choices, strings) = {
@@ -194,8 +208,9 @@ impl SettingsBridge {
         });
         let values = SettingsValues {
             choices,
-            start_at_sign_in,
+            start_at_sign_in: read.start_at_sign_in,
             include,
+            see_every_file: read.see_every_file,
         };
         let dialog = SettingsDialog::new(window, hwnd, strings, values);
         window.open_dialog(hwnd, DialogId::Settings, &dialog);
@@ -494,9 +509,11 @@ impl SettingsBridge {
         _hwnd: Hwnd,
         job: Elevated,
     ) {
+        let tells_service = job.tells_service();
         let mut work = window.created().work.borrow_mut();
         if work.elevated.start(job) {
-            self.include_save.replace(IncludeSave::Saving);
+            self.include_save
+                .replace(IncludeSave::Saving { tells_service });
         }
         let retired = work.elevated.take_retired();
         work.retire(retired);
@@ -510,7 +527,13 @@ impl SettingsBridge {
         let Some(answer) = answer else {
             return;
         };
-        if answer.is_ok() {
+        let tells_service = matches!(
+            *self.include_save.borrow(),
+            IncludeSave::Saving {
+                tells_service: true
+            }
+        );
+        if answer.is_ok() && tells_service {
             let fetch = window.model.borrow_mut().settings_saved();
             window.start(fetch);
         }
@@ -528,6 +551,54 @@ impl SettingsBridge {
                 None
             }
         }
+    }
+
+    /// The account names of `sids` that are known, `None` for a SID whose
+    /// lookup has not answered or found no name. Asks Windows, off the
+    /// window's thread, for the SIDs never asked about; the answer tells the
+    /// open Settings dialog.
+    pub(in crate::app) fn account_names(
+        &self,
+        window: &MainWindow,
+        sids: &[String],
+    ) -> Vec<Option<String>> {
+        let known = self.account_names.borrow();
+        let name = |sid: &String| known.iter().find(|(each, _)| each == sid);
+        let unasked: Vec<String> = (sids.iter())
+            .filter(|sid| name(sid).is_none())
+            .cloned()
+            .collect();
+        let names = (sids.iter())
+            .map(|sid| name(sid).and_then(|(_, name)| name.clone()))
+            .collect();
+        drop(known);
+        if !unasked.is_empty() {
+            window
+                .created()
+                .work
+                .borrow_mut()
+                .settings
+                .account_names(unasked);
+        }
+        names
+    }
+
+    /// Keeps the names that a lookup answered.
+    pub(in crate::app) fn accept_account_names(&self, names: Vec<(String, Option<String>)>) {
+        let mut known = self.account_names.borrow_mut();
+        for (sid, name) in names {
+            if !known.iter().any(|(each, _)| *each == sid) {
+                known.push((sid, name));
+            }
+        }
+        drop(known);
+        if self.open.get().is_some() && !self.account_names_dirty.replace(true) {
+            self.post_settings_reply();
+        }
+    }
+
+    pub(in crate::app) fn take_account_names_changed(&self) -> bool {
+        self.account_names_dirty.replace(false)
     }
 
     /// The Use Total Commander link: searches the index for Total

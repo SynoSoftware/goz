@@ -40,7 +40,7 @@ pub(super) use queue::{
 };
 #[cfg(test)]
 pub(crate) use settings::write_settings;
-pub(super) use settings::{RegistryAnswer, load_settings};
+pub(super) use settings::{RegistryAnswer, RegistryRead, load_settings};
 pub(super) use shell::{OpenTarget, Opened, ShellPurpose, ShellTarget};
 
 pub(super) const REPOSITORY: &str = env!("CARGO_PKG_REPOSITORY");

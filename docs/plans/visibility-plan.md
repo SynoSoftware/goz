@@ -11,11 +11,22 @@ changes.
 Item 3 passed on 2026-10-26 as test W1. Item 4 on 2026-10-26: 1.88 µs per
 check, 10,000 checks over the 114 distinct descriptors of 20,000 folders
 under Program Files, ProgramData, Windows and Users (`build.ps1 -Timing
-may_list_cost`). Items 1 and 2 wait for the owner's script, which needs
+may_list_cost`). Items 1 and 2 ran on 2026-10-26 (owner's script, warm
+cache, 19 hours after boot): `C:` has 274,208 folders, 1,499 distinct folder
+`SecurityId`s and 1,444 distinct descriptors of 327 bytes on average, so a
+filtered request pays about 2.7 ms and the answers stay per request. One read
+per `SecurityId` took 0.11 s against 27 s for every folder; the record's USN
+equalled the layout's for 1,498 of 1,499 and no `SecurityId` gave two
+descriptors, so the NTFS build shares descriptors. The only failed reads were
+four folders below `$Extend` (`$RmMetadata`, `$Deleted`, `$TxfLog`, `$Txf`),
+all `ERROR_ACCESS_DENIED`, so the metadata predicate stays. ReFS on `V:`
+writes `SECURITY_CHANGE` for a changed folder and for a child that inherits
+the change. The owner's script needs
 `target\release\examples\visibility_stage0.exe` from `cargo build --release
 --workspace --examples`.
 
-**Stage 1 review of 1a** (2026-10-26): pass after one fix round. Fixed: the
+**Stage 1a** is committed as `16d88c3` (2026-10-26). **Stage 1 review of
+1a**: pass after one fix round. Fixed: the
 descriptor table grew without bound when a user changed a folder's
 permissions in a loop (now rebuilt from the column, with a new instance,
 when it holds over twice what the last rebuild kept plus 1 MiB); a missed
@@ -61,6 +72,35 @@ lead):
   take a `Viewer` (everything, or the `may_list` closure). A refused caller
   also gets no `ResultSnapshotRows` and no `SortResultSnapshot`. The list
   has its own Settings page, Visibility (service settings plan).
+- **Stage 1 review of 1b** (2026-10-26): pass, no findings. Departures
+  accepted: `std::collections::HashMap` for the SecurityId map, because the
+  daemon does not depend on rustc-hash; `is_metadata_folder` stays private
+  and the daemon asks `wants_descriptor` and `unread_folders`, so one owner
+  in core decides which folders are read; `read_build_descriptors` returns
+  its failures in `failed` and stops when the build is cancelled; when the
+  first folder's USN differs it keeps its own new bytes, which the journal
+  replay corrects if they changed; `VolumeIndex::folder_descriptor` is public
+  for the daemon's T3.
+- **Security review of 2a, 2b and 3** (2026-10-26): pass. No sequence
+  showed a filtered user a hidden name, count or size. Fixed: a stored list
+  that does not read logged a warning on every request; an empty SID from
+  the picker reached `slice::from_raw_parts` with a null pointer; `serve`
+  handled the refusal four times; `StoredList` was a one-caller wrapper;
+  `show_list` parsed each line twice. The re-check passed those fixes and
+  found one issue in 1b, fixed: on an NTFS volume without an active journal
+  NTFS does not update a folder's USN, so the build shares descriptors only
+  when the journal is active and otherwise reads each folder on its own. The
+  documents say only that a program that took the pipe name gets no token
+  for the user, because `GetNamedPipeClientSessionId` may still give it the
+  session. Accepted risk: the elevated save reads
+  a file the standard user can write, so a UAC approval approves the
+  program, not the list it saves; the Include save works the same way, and
+  the administrator still approves the prompt.
+- **Found during the work.** A search panel's selection showed no size at
+  all when one selected folder's size was unknown (`chosen_bytes` in
+  `core/search_list.rs`), which a filtered user would see on every folder
+  selection; it now shows the known sum and how many sizes are unknown,
+  with stage 3.
 - **Commits.** Each stage is committed on `main` after its review passes,
   in the order 1a, 1b, then 2a and 2b together, then 2c and 3. Nothing is
   pushed.
@@ -223,7 +263,7 @@ From Microsoft's documentation:
 | The NTFS build | `gozler-daemon/src/bootstrap.rs` | `read_build_descriptors` |
 | The caller | `gozler-winfs/src/caller.rs` (new) | `Sid`, `ClientToken`, `pipe_client_token`, the access check, account names |
 | The stored list | `gozler-winfs/src/registry.rs`, `gozler-core/src/include.rs` | `machine_strings`, `set_machine_strings`, `SEE_EVERY_FILE_VALUE` |
-| Who sees what | `gozler-daemon/src/access.rs` (new) | `Access`, `Visibility`, `sees_everything`, `StoredList` |
+| Who sees what | `gozler-daemon/src/access.rs` (new) | `Access`, `Visibility`, `sees_everything`, `stored_sids` |
 | The journal | `usn/ops.rs`, `index/settle.rs`, `tail.rs` | `UsnOp::SecurityDirty`, reading changed descriptors |
 | The commands | `gozler-daemon/src/main.rs`, `service.rs` | `gozlerd see-every-file`, `gozlerd install --see-every-file` |
 | The setup's choice | `installer/Setup.iss` | the page that offers the signed-in user |
@@ -694,7 +734,7 @@ needs. The uninstaller keeps it, as it keeps `Include`.
   `set_machine_string` (`gozler-ui/src/win/shell.rs`), because `gozlerd
   see-every-file` writes the list too and `gozler-daemon` does not depend on
   `gozler-ui`; stage 3's elevated save uses the same writer.
-- `StoredList` in `access.rs` reads the value for each frame and converts
+- `stored_sids` in `access.rs` reads the value for each frame and converts
   each line with `Sid`'s string form. A line that does not convert is
   skipped without a log line, because only a hand edit with `regedit` writes
   one, and a warning for each search would fill the log; the bare `gozlerd
@@ -1157,4 +1197,11 @@ test that writes `HKLM` needs elevation; owner check S5 covers them.
 
 When stage 3 lands, the rules move into `docs/DESIGN.md`,
 `docs/SECURITY.md` and `README.md`, as "Text" says, and this plan and its
-spec are deleted. The probes in `target\probe\` are deleted with them.
+spec are deleted. Before the deletion, every decision this plan holds moves,
+with its reason, into `docs/DESIGN.md` or into the doc comment of the
+module that owns it: the "Decisions made during the work" list, the
+choices in "Design" (such as the per-request answers instead of cached
+views, the descriptor table's rebuild, and why the NTFS build shares
+descriptors or not), and the accepted risks, not only what "Text" lists,
+because a decision that leaves with the plan cannot be checked later. The
+probes in `target\probe\` are deleted with them.

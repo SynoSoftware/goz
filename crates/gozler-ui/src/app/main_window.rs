@@ -23,7 +23,8 @@ use super::status_bar::{Entry as StatusEntry, Slot as StatusSlot, StatusBar};
 use super::viewer::Viewers;
 use super::work::{
     Awaited, CopyFailure, CopyNotice, OpenTarget, Opened, PathAction, PathPurpose, PreparedPaths,
-    QueueReady, RegistryAnswer, ReleaseAnswer, ReleasePurpose, ShellPurpose, ShellTarget, Surface,
+    QueueReady, RegistryAnswer, RegistryRead, ReleaseAnswer, ReleasePurpose, ShellPurpose,
+    ShellTarget, Surface,
 };
 use crate::core::captions::{
     self, ButtonIcon, DialogCaptions, DialogItem, FilterCaptions, IndexCaptions, Inspected,
@@ -519,7 +520,7 @@ enum ModalStep {
     },
     SettingsNotSaved(std::io::Error),
     WindowsShortcutFailed(std::io::Error),
-    OpenSettings(Id, bool),
+    OpenSettings(Id, RegistryRead),
     CopyFailed(Id, CopyFailure),
     Opened(ShellPurpose, crate::core::work::Id, Opened),
     PreparedPaths(PathPurpose, Id, PreparedPaths),
@@ -2207,7 +2208,7 @@ impl MainWindow {
                         }
                     }
                 }
-                ModalStep::OpenSettings(id, sign_in) => {
+                ModalStep::OpenSettings(id, read) => {
                     if self
                         .created()
                         .work
@@ -2216,7 +2217,7 @@ impl MainWindow {
                         .registry_is_current(id)
                         && self.settings.open.get().is_none()
                     {
-                        self.settings.show_settings(self, hwnd, sign_in);
+                        self.settings.show_settings(self, hwnd, read);
                     }
                 }
                 ModalStep::Opened(purpose, id, opened) => {
@@ -2504,6 +2505,15 @@ impl MainWindow {
             self.settings.accept_labels(self, labels);
             self.settings.post_settings_reply();
         }
+        let names = self
+            .created()
+            .work
+            .borrow_mut()
+            .settings
+            .take_account_names();
+        if let Some(names) = names {
+            self.settings.accept_account_names(names);
+        }
         let copied = self.created().work.borrow_mut().clipboard.take();
         match copied {
             Some(CopyNotice::Retry) => hwnd.set_timer(
@@ -2519,9 +2529,7 @@ impl MainWindow {
             let answer = self.created().work.borrow_mut().settings.take_registry();
             let Some((id, answer)) = answer else { break };
             match answer {
-                RegistryAnswer::Read(sign_in) => {
-                    self.defer(hwnd, ModalStep::OpenSettings(id, sign_in))
-                }
+                RegistryAnswer::Read(read) => self.defer(hwnd, ModalStep::OpenSettings(id, read)),
                 RegistryAnswer::SignIn(result) => {
                     self.settings.sign_in_saved.replace(Some((id, result)));
                     self.settings.post_settings_reply();

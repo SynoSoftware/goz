@@ -588,7 +588,7 @@ pub(crate) fn volume_label(root: &str, _worker: &super::work::OffThread) -> Opti
 
 /// An operating-system error as Rust's, so [`super::error_text`] gives
 /// Windows' words for it.
-fn io_error(error: windows::core::Error) -> io::Error {
+pub(super) fn io_error(error: windows::core::Error) -> io::Error {
     let code = error.code().0 as u32;
     // An HRESULT made from a Win32 error code holds the code in its low word.
     if code & 0xffff_0000 == 0x8007_0000 {

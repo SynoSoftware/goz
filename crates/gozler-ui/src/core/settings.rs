@@ -159,9 +159,9 @@ impl Default for Choices {
     }
 }
 
-/// What the Settings dialog edits: the choices, the two settings whose
-/// one copy is in the registry, read when the dialog opens, and the
-/// service's Include settings.
+/// What the Settings dialog edits: the choices, the settings whose one copy
+/// is in the registry, read when the dialog opens, and the service's
+/// settings.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct SettingsValues {
     pub(crate) choices: Choices,
@@ -170,6 +170,76 @@ pub(crate) struct SettingsValues {
     /// drive; `None` while the service gives no status, and the Include page
     /// then changes nothing.
     pub(crate) include: Option<IndexSettings>,
+    /// The users and groups who see every file; Windows' words for why the
+    /// list could not be read, and the page then changes nothing, because
+    /// saving a list it never read would replace the stored one.
+    pub(crate) see_every_file: Result<SeeEveryFile, String>,
+}
+
+/// The SID string of Everyone.
+const EVERYONE: &str = "S-1-1-0";
+
+/// The users and groups who see every file (spec `V16`): the lines of the
+/// stored list, SID strings, in its order. A line that is not a SID, which
+/// only a hand edit writes, stays as it is, because the service skips it.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct SeeEveryFile(Vec<String>);
+
+impl SeeEveryFile {
+    pub(crate) fn new(lines: Vec<String>) -> SeeEveryFile {
+        SeeEveryFile(lines)
+    }
+
+    pub(crate) fn sids(&self) -> &[String] {
+        &self.0
+    }
+
+    /// Whether the list holds Everyone, which turns the filter off; the
+    /// "Every user sees every file" check box shows it.
+    pub(crate) fn everyone(&self) -> bool {
+        self.0.iter().any(|sid| sid.eq_ignore_ascii_case(EVERYONE))
+    }
+
+    /// The check box adds or removes Everyone and stores nothing of its own.
+    pub(crate) fn set_everyone(&mut self, on: bool) {
+        if on {
+            self.add(EVERYONE.to_owned());
+        } else {
+            self.0.retain(|sid| !sid.eq_ignore_ascii_case(EVERYONE));
+        }
+    }
+
+    /// Adds `sid` at the end, unless the list holds it.
+    pub(crate) fn add(&mut self, sid: String) {
+        if !self.0.iter().any(|each| each.eq_ignore_ascii_case(&sid)) {
+            self.0.push(sid);
+        }
+    }
+
+    pub(crate) fn remove(&mut self, index: usize) {
+        if index < self.0.len() {
+            self.0.remove(index);
+        }
+    }
+}
+
+/// The service's settings that differ from the applied ones, which OK and
+/// Apply save through one copy of the window that runs as administrator;
+/// `None` for each one that did not change.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub(crate) struct ServiceChanges {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) include: Option<IndexSettings>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) see_every_file: Option<SeeEveryFile>,
+}
+
+impl ServiceChanges {
+    /// Whether the service must read its settings again: it reads the list
+    /// for each search, but the Include settings only when told.
+    pub(crate) fn tells_service(&self) -> bool {
+        self.include.is_some()
+    }
 }
 
 /// A page of the Settings dialog, in the page list's order.
@@ -186,10 +256,12 @@ pub(crate) enum SettingsPage {
     Index,
     /// What the service indexes (DESIGN.md: The Include page).
     Include,
+    /// Who sees every file (spec `V14`).
+    Visibility,
 }
 
 impl SettingsPage {
-    pub(crate) const ALL: [SettingsPage; 8] = [
+    pub(crate) const ALL: [SettingsPage; 9] = [
         SettingsPage::General,
         SettingsPage::Search,
         SettingsPage::ContextMenu,
@@ -198,6 +270,7 @@ impl SettingsPage {
         SettingsPage::Performance,
         SettingsPage::Index,
         SettingsPage::Include,
+        SettingsPage::Visibility,
     ];
 
     /// Its child-dialog template.
@@ -211,6 +284,7 @@ impl SettingsPage {
             SettingsPage::Performance => DialogId::SettingsPerformance,
             SettingsPage::Index => DialogId::SettingsIndex,
             SettingsPage::Include => DialogId::SettingsInclude,
+            SettingsPage::Visibility => DialogId::SettingsVisibility,
         }
     }
 
@@ -225,6 +299,7 @@ impl SettingsPage {
             SettingsPage::Performance => "settings.performance",
             SettingsPage::Index => "settings.index",
             SettingsPage::Include => "settings.include",
+            SettingsPage::Visibility => "settings.visibility",
         }
     }
 
@@ -239,11 +314,28 @@ impl SettingsPage {
             SettingsPage::Performance => Glyph::SpeedHigh,
             SettingsPage::Index => Glyph::HardDrive,
             SettingsPage::Include => Glyph::CheckList,
+            SettingsPage::Visibility => Glyph::People,
         }
     }
 }
 
 impl SettingsValues {
+    /// The service's settings that these values change from `applied`, or
+    /// `None` when they change none.
+    pub(crate) fn service_changes(&self, applied: &SettingsValues) -> Option<ServiceChanges> {
+        let include = (self.include != applied.include)
+            .then(|| self.include.clone())
+            .flatten();
+        let see_every_file = match (&self.see_every_file, &applied.see_every_file) {
+            (Ok(list), Ok(applied)) if list != applied => Some(list.clone()),
+            _ => None,
+        };
+        (include.is_some() || see_every_file.is_some()).then_some(ServiceChanges {
+            include,
+            see_every_file,
+        })
+    }
+
     /// Sets `page`'s settings to their defaults, which Apply or OK then
     /// applies (DESIGN.md: Settings dialog).
     pub(crate) fn restore_defaults(&mut self, page: SettingsPage) {
@@ -285,7 +377,7 @@ impl SettingsValues {
             SettingsPage::Performance => {
                 choices.speed = defaults.speed;
             }
-            SettingsPage::Index => {}
+            SettingsPage::Index | SettingsPage::Visibility => {}
             SettingsPage::Include => {
                 if let Some(include) = &mut self.include {
                     // Every drive the page knows, checked, as the defaults
@@ -485,11 +577,11 @@ impl SettingsDraft {
         self.edited != self.applied || self.refused().is_some()
     }
 
-    /// Whether OK and Apply show the administrator shield: the Include
-    /// settings differ from the applied ones, and saving them asks Windows
-    /// for permission.
+    /// Whether OK and Apply show the administrator shield: a service setting
+    /// differs from the applied one, and saving it asks Windows for
+    /// permission.
     pub(crate) fn shielded(&self) -> bool {
-        self.edited.include != self.applied.include
+        self.edited.service_changes(&self.applied).is_some()
     }
 
     pub(crate) fn choices_applied(&mut self, choices: Choices) {
@@ -513,9 +605,14 @@ impl SettingsDraft {
         &self.applied
     }
 
-    /// Records `include`, Include settings that were saved, as applied.
-    pub(crate) fn include_saved(&mut self, include: IndexSettings) {
-        self.applied.include = Some(include);
+    /// Records each service setting of `saved` as applied.
+    pub(crate) fn service_saved(&mut self, saved: ServiceChanges) {
+        if let Some(include) = saved.include {
+            self.applied.include = Some(include);
+        }
+        if let Some(list) = saved.see_every_file {
+            self.applied.see_every_file = Ok(list);
+        }
     }
 
     /// Records the text typed in `number`'s box, which makes the speed
@@ -886,6 +983,7 @@ mod tests {
             choices: Choices::default(),
             start_at_sign_in: false,
             include: Some(IndexSettings::default()),
+            see_every_file: Ok(SeeEveryFile::default()),
         }
     }
 
@@ -1026,6 +1124,7 @@ mod tests {
             },
             start_at_sign_in: true,
             include: None,
+            see_every_file: Ok(SeeEveryFile::default()),
         };
         let mut draft = SettingsDraft::new(values.clone());
         assert!(!draft.can_apply());
@@ -1047,6 +1146,48 @@ mod tests {
         assert_eq!(draft.edited.choices.open_files, "notepad %1");
         draft.edited.restore_defaults(SettingsPage::ContextMenu);
         assert_eq!(draft.edited.choices.open_files, "");
+    }
+
+    /// Saving the list asks for administrator permission and replaces the
+    /// stored one, so only a real change may be saved: never an account
+    /// picked again, Everyone turned on and off, or a list never read.
+    #[test]
+    fn only_a_changed_list_is_saved() {
+        const ADMINISTRATORS: &str = "S-1-5-32-544";
+        fn list(draft: &mut SettingsDraft) -> &mut SeeEveryFile {
+            draft
+                .edited
+                .see_every_file
+                .as_mut()
+                .expect("the list was read")
+        }
+        let mut draft = SettingsDraft::new(SettingsValues {
+            see_every_file: Ok(SeeEveryFile::new(vec![ADMINISTRATORS.to_owned()])),
+            ..values()
+        });
+        list(&mut draft).add("s-1-5-32-544".to_owned());
+        list(&mut draft).set_everyone(true);
+        list(&mut draft).set_everyone(false);
+        assert!(!draft.shielded());
+
+        list(&mut draft).set_everyone(true);
+        let changes = draft.edited.service_changes(draft.last_applied());
+        assert_eq!(
+            changes,
+            Some(ServiceChanges {
+                include: None,
+                see_every_file: Some(SeeEveryFile::new(vec![
+                    ADMINISTRATORS.to_owned(),
+                    EVERYONE.to_owned(),
+                ])),
+            })
+        );
+
+        let unread = SettingsDraft::new(SettingsValues {
+            see_every_file: Err("Access is denied.".to_owned()),
+            ..values()
+        });
+        assert_eq!(unread.edited.service_changes(unread.last_applied()), None);
     }
 
     /// A file another version or a person edited must not lose every

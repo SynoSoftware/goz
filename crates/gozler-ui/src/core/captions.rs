@@ -160,7 +160,7 @@ impl DialogItem {
 /// caption shows the same icon on every button that has it (DESIGN.md:
 /// Look). A fix that needs administrator permission shows the
 /// administrator shield instead, so its caption has no icon here.
-const BUTTON_GLYPHS: [(&str, Glyph); 24] = [
+const BUTTON_GLYPHS: [(&str, Glyph); 26] = [
     ("button.ok", Glyph::Accept),
     ("button.cancel", Glyph::Cancel),
     ("button.close", Glyph::Cancel),
@@ -174,6 +174,8 @@ const BUTTON_GLYPHS: [(&str, Glyph); 24] = [
     ("settings_keyboard.add", Glyph::Add),
     ("settings_keyboard.edit", Glyph::Edit),
     ("settings_keyboard.remove", Glyph::Remove),
+    ("settings_visibility.add", Glyph::Add),
+    ("settings_visibility.remove", Glyph::Remove),
     ("service_report.copy", Glyph::Copy),
     ("file_operations.hide", Glyph::Remove),
     ("filter.clear", Glyph::EraseTool),
@@ -518,6 +520,25 @@ impl CaptionTable {
                     (Control(C::IncludeNamesHint), "settings_include.names_hint"),
                 ],
             },
+            DialogId::SettingsVisibility => CaptionTable {
+                title: "settings.visibility",
+                keyed: &[
+                    (
+                        Control(C::VisibilityEveryone),
+                        "settings_visibility.everyone",
+                    ),
+                    (Control(C::VisibilityAdd), "settings_visibility.add"),
+                    (Control(C::VisibilityRemove), "settings_visibility.remove"),
+                ],
+                plain: &[
+                    (Control(C::VisibilityHeading), "settings.visibility"),
+                    (
+                        Control(C::VisibilityAdminNote),
+                        "settings_include.admin_note",
+                    ),
+                    (Control(C::VisibilityGroup), "settings_visibility.list"),
+                ],
+            },
             DialogId::SettingsFileOperations => CaptionTable {
                 title: "settings.file_operations",
                 keyed: &[
@@ -670,6 +691,7 @@ impl CaptionTable {
             | DialogId::SettingsKeyboard
             | DialogId::SettingsIndex
             | DialogId::SettingsInclude
+            | DialogId::SettingsVisibility
             | DialogId::SettingsFileOperations
             | DialogId::SettingsPerformance => Some(DialogId::Settings),
             DialogId::About

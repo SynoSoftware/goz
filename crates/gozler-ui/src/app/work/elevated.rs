@@ -1,4 +1,4 @@
-//! Accepted Include and rebuild writes run to completion without owning a UI HWND.
+//! Accepted service-setting and rebuild writes run to completion without owning a UI HWND.
 
 use crate::app::include::{Elevated, NotSaved, REBUILD_ARGUMENT, SAVE_ARGUMENT};
 use crate::core::work::{Replacement, Retirement, Waiting};
@@ -71,10 +71,11 @@ impl Saves {
 fn run(session: &crate::win::shell::Session, job: &Elevated) -> Result<(), NotSaved> {
     let failed = |error: &io::Error| NotSaved::Failed(win::error_text(error));
     let file = match job {
-        Elevated::Include(settings) => {
+        Elevated::Save(changes) => {
             let file =
-                std::env::temp_dir().join(format!("gozler-include-{}.json", std::process::id()));
-            if let Err(error) = std::fs::write(&file, settings.to_json()) {
+                std::env::temp_dir().join(format!("gozler-settings-{}.json", std::process::id()));
+            let text = serde_json::to_string(changes).expect("the settings are plain data");
+            if let Err(error) = std::fs::write(&file, text) {
                 let _ = std::fs::remove_file(&file);
                 return Err(failed(&error));
             }

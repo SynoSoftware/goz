@@ -120,6 +120,8 @@ pub(crate) enum Glyph {
     /// A text cursor in a box: Copy name, and the Include page's name
     /// group.
     Rename,
+    /// Two people: the Visibility page and its list.
+    People,
     /// A diskette: Apply.
     Save,
     /// A magnifying glass: Find, Search in this folder, and the Search page
@@ -144,7 +146,7 @@ pub(crate) enum Glyph {
 }
 
 impl Glyph {
-    pub(crate) const ALL: [Glyph; 61] = [
+    pub(crate) const ALL: [Glyph; 62] = [
         Glyph::Accept,
         Glyph::Add,
         Glyph::BackToWindow,
@@ -189,6 +191,7 @@ impl Glyph {
         Glyph::Page,
         Glyph::Paste,
         Glyph::Pause,
+        Glyph::People,
         Glyph::Picture,
         Glyph::Play,
         Glyph::PowerButton,
@@ -255,6 +258,7 @@ impl Glyph {
             Glyph::Page => '\u{E7C3}',
             Glyph::Paste => '\u{E77F}',
             Glyph::Pause => '\u{E769}',
+            Glyph::People => '\u{E716}',
             Glyph::Picture => '\u{E8B9}',
             Glyph::Play => '\u{E768}',
             Glyph::PowerButton => '\u{E7E8}',
