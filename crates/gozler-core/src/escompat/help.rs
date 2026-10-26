@@ -355,6 +355,12 @@ const NOTES: &[(Reader, &str)] = &[
          is counted twice.",
     ),
     (
+        Reader::CommandLine,
+        "A search shows the files in folders you can open, and folder sizes only if \
+         you see every file. The users and groups that `gozlerd see-every-file` \
+         lists see every file.",
+    ),
+    (
         Reader::Both,
         "`dm:today`, `dm:yesterday` and `dm:YYYY-MM-DD` are calendar days in the local \
          time zone. `7days` is the 7 times 24 hours before the search starts, and `dm:<30days` finds files older than 30 \

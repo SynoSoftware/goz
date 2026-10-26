@@ -8,6 +8,10 @@
 //! which later requests read by its id from one daemon-wide table
 //! ([`crate::result_snapshots`]). Indexing itself (bootstrap + tail) stays
 //! on dedicated OS threads; tokio only serves the pipe.
+//!
+//! Each request frame is answered for the client that sent it
+//! ([`crate::access`]): a request that names files reads only what that
+//! client may see, and one from a client gozlerd cannot identify is refused.
 
 use std::ops::Deref;
 use std::os::windows::io::AsHandle;
@@ -25,7 +29,7 @@ use gozler_core::proto::{
 };
 use gozler_core::query::{
     CompiledQuery, HeldVolume, MatchSums, ResultRows, ResultSnapshot, RowsSpec, TotalsError,
-    search_totals,
+    Viewer, search_totals,
 };
 use gozler_core::scope::VolumeMounts;
 use gozler_winfs::{PipeSecurity, build_pipe_security};
@@ -33,6 +37,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::windows::named_pipe::{NamedPipeServer, ServerOptions};
 use tokio::sync::{Semaphore, watch};
 
+use crate::access::{self, Access, Refusal};
 use crate::include::Include;
 use crate::result_snapshots::{Kept, ResultSnapshots, live_volumes};
 use crate::volume_state::{VolumeRead, VolumeRegistry, VolumeSet, VolumeState};
@@ -189,6 +194,7 @@ async fn handle_connection(
         .into();
     let mut decoder = gozler_core::proto::FrameDecoder::new(MAX_CLIENT_FRAME);
     let mut read_buf = vec![0u8; 16 * 1024];
+    let mut unidentified_logged = false;
     loop {
         // Reap idle/half-open connections: a connected client that never sends a
         // request is dropped after IDLE_TIMEOUT, freeing its task/buffer/pipe.
@@ -206,6 +212,16 @@ async fn handle_connection(
                 Ok(None) => break,
                 Err(e) => return Err(anyhow::anyhow!("frame error: {e}")),
             };
+            // Asked for each frame, because the pipe gives the token of the
+            // last message read, and a change to the stored list applies at
+            // the next search.
+            let access = access::of_pipe_client(server.as_handle());
+            if let Access::Refused(Refusal::Unidentified(error)) = &access
+                && !unidentified_logged
+            {
+                tracing::warn!(%error, "could not tell which user sent a request; its searches are refused");
+                unidentified_logged = true;
+            }
             // Query execution plus result serialization is the heaviest CPU
             // work in the process and holds a read lock, so every request runs
             // on the blocking pool rather than stalling an async worker (and
@@ -221,9 +237,15 @@ async fn handle_connection(
             let encoder = tokio::task::spawn_blocking(move || {
                 // A failed send means the receiver is gone (client vanished or
                 // write error): stop encoding.
-                serve(&vols, &include, &snapshots, &user, &frame, &mut |reply| {
-                    tx.blocking_send(reply).is_ok()
-                });
+                serve(
+                    &vols,
+                    &include,
+                    &snapshots,
+                    &user,
+                    &access,
+                    &frame,
+                    &mut |reply| tx.blocking_send(reply).is_ok(),
+                );
             });
             let mut write_err: Option<std::io::Error> = None;
             while let Some(reply) = rx.recv().await {
@@ -251,19 +273,27 @@ async fn write_reply(server: &mut NamedPipeServer, bytes: &[u8]) -> std::io::Res
         .map_err(|_| std::io::Error::new(std::io::ErrorKind::TimedOut, "client stopped reading"))?
 }
 
-/// Answers one request frame from a client running as `user`, handing each
-/// framed reply to `emit` as soon as it is encoded. `emit` returning `false`
-/// means the client is gone; encoding stops.
+/// Answers one request frame from a client running as `user`, with what
+/// `access` lets it see, handing each framed reply to `emit` as soon as it is
+/// encoded. `emit` returning `false` means the client is gone; encoding
+/// stops.
+///
+/// `Hello`, `Status` and `SettingsSaved` answer every client, because they
+/// show no name. A request that reads the index's entries is refused when
+/// gozlerd cannot tell who sent it, and the Include count answers only a
+/// user who sees every file: its folder and name rules over the whole index
+/// would let any other user count hidden entries until the counts spell
+/// their names.
 fn serve(
     volumes: &VolumeSet,
     include: &Include,
     snapshots: &Snapshots,
     user: &[u8],
+    access: &Access,
     frame: &[u8],
     emit: &mut dyn FnMut(Vec<u8>) -> bool,
 ) {
-    let search = match gozler_core::proto::decode_request(frame) {
-        Ok(Request::Search(search)) => search,
+    let request = match gozler_core::proto::decode_request(frame) {
         Ok(Request::Hello {
             proto_min,
             proto_max,
@@ -276,17 +306,37 @@ fn serve(
             include.reload();
             return reply(emit, Response::SettingsApplied);
         }
-        Ok(Request::CountIncluded(settings)) => {
-            let entries = count_included(volumes, &settings);
-            return reply(emit, Response::IncludedCount { entries });
-        }
-        Ok(Request::ResultSnapshotRows(read)) => {
-            return read_snapshot(volumes, snapshots, &read, emit);
-        }
-        Ok(Request::SortResultSnapshot(sort)) => {
-            return sort_snapshot(volumes, snapshots, user, &sort, emit);
-        }
+        Ok(request) => request,
         Err(e) => return reply(emit, refusal(format!("malformed request: {e}"))),
+    };
+    let viewer = match access {
+        Access::Sees(visibility) => visibility.viewer(),
+        Access::Refused(refused) => return reply(emit, unsupported(refused.message())),
+    };
+    let search = match request {
+        Request::Search(search) => search,
+        Request::CountIncluded(settings) => {
+            return reply(
+                emit,
+                match viewer {
+                    Viewer::Everything => Response::IncludedCount {
+                        entries: count_included(volumes, &settings),
+                    },
+                    Viewer::Filtered(_) => unsupported(
+                        "only a user who sees every file can count what the Include settings keep",
+                    ),
+                },
+            );
+        }
+        Request::ResultSnapshotRows(read) => {
+            return read_snapshot(volumes, snapshots, &read, viewer, emit);
+        }
+        Request::SortResultSnapshot(sort) => {
+            return sort_snapshot(volumes, snapshots, user, &sort, viewer, emit);
+        }
+        Request::Hello { .. } | Request::Status | Request::SettingsSaved => {
+            unreachable!("answered before the client's access is taken")
+        }
     };
     if let Err(off) = include.applied().allows(&search.query) {
         return reply(emit, refusal(off.to_string()));
@@ -300,25 +350,27 @@ fn serve(
     let targets = volumes.to_vec();
     let scope = search.scope.as_deref();
     match search.returns {
-        Returns::Rows(wanted) => match ResultRows::search(targets, &query, scope, wanted.spec()) {
-            Ok(rows) => stream_rows(rows, &wanted, emit),
-            Err(not_indexed) => reply(emit, refusal(not_indexed.to_string())),
-        },
-        Returns::Totals => reply(emit, totals(targets, &query, scope)),
+        Returns::Rows(wanted) => {
+            match ResultRows::search(targets, &query, scope, wanted.spec(), viewer) {
+                Ok(rows) => stream_rows(rows, &wanted, emit),
+                Err(not_indexed) => reply(emit, refusal(not_indexed.to_string())),
+            }
+        }
+        Returns::Totals => reply(emit, totals(targets, &query, scope, viewer)),
         Returns::ResultSnapshot { rows, replaces } => {
             let every_row = RowsSpec {
                 offset: 0,
                 limit: None,
                 ..rows.spec()
             };
-            match ResultRows::search(targets, &query, scope, every_row) {
+            match ResultRows::search(targets, &query, scope, every_row, viewer) {
                 Ok(found) => {
                     let made = Made {
                         user,
                         replaces,
                         cap: snapshot_cap(volumes),
                     };
-                    make_snapshot(snapshots, made, found, &rows, emit);
+                    make_snapshot(snapshots, made, found, &rows, viewer, emit);
                 }
                 Err(not_indexed) => reply(emit, refusal(not_indexed.to_string())),
             }
@@ -341,12 +393,14 @@ fn snapshot_cap(volumes: &VolumeSet) -> u64 {
 }
 
 /// Keeps `found`, a search for every row, as a result snapshot, answers its
-/// id, and streams the rows that `rows`' offset and limit ask for.
+/// id, and streams the rows that `rows`' offset and limit ask for, as
+/// `viewer` sees them.
 fn make_snapshot(
     snapshots: &Snapshots,
     made: Made<'_>,
     found: ResultRows<Arc<VolumeState>>,
     rows: &Rows,
+    viewer: Viewer<'_>,
     emit: &mut dyn FnMut(Vec<u8>) -> bool,
 ) {
     let (snapshot, volumes) = match found.into_snapshot() {
@@ -385,15 +439,16 @@ fn make_snapshot(
         want_attributes: rows.want_attributes,
     };
     let sums = rows.want_sums.then(|| snapshot.sums()).flatten();
-    stream_snapshot(&snapshot, volumes, &read, sums, emit);
+    stream_snapshot(&snapshot, volumes, &read, sums, viewer, emit);
 }
 
-/// Streams the rows of the result snapshot that `read` names, or says it is
-/// gone.
+/// Streams the rows of the result snapshot that `read` names, as `viewer`
+/// sees them, or says it is gone.
 fn read_snapshot(
     volumes: &VolumeSet,
     snapshots: &Snapshots,
     read: &SnapshotRowsRequest,
+    viewer: Viewer<'_>,
     emit: &mut dyn FnMut(Vec<u8>) -> bool,
 ) {
     let found = snapshots.get(read.id, Instant::now());
@@ -403,17 +458,19 @@ fn read_snapshot(
     let Some(held) = live_volumes(&held, volumes) else {
         return reply(emit, snapshot_gone());
     };
-    stream_snapshot(&snapshot, held, read, None, emit);
+    stream_snapshot(&snapshot, held, read, None, viewer, emit);
 }
 
-/// Sorts the result snapshot that `sort` names again with no search, keeps
-/// the sorted one in its place, answers its id, and streams the rows that
-/// `sort.rows`' offset and limit ask for; or says it is gone.
+/// Sorts the result snapshot that `sort` names again with no search, as
+/// `viewer` sees its rows, keeps the sorted one in its place, answers its id,
+/// and streams the rows that `sort.rows`' offset and limit ask for; or says
+/// it is gone.
 fn sort_snapshot(
     volumes: &VolumeSet,
     snapshots: &Snapshots,
     user: &[u8],
     sort: &SortSnapshotRequest,
+    viewer: Viewer<'_>,
     emit: &mut dyn FnMut(Vec<u8>) -> bool,
 ) {
     let found = snapshots.get(sort.id, Instant::now());
@@ -423,7 +480,7 @@ fn sort_snapshot(
     let Some(held) = live_volumes(&held, volumes) else {
         return reply(emit, snapshot_gone());
     };
-    let Ok(sorted) = snapshot.sort_again(held, sort.rows.sort) else {
+    let Ok(sorted) = snapshot.sort_again(held, sort.rows.sort, viewer) else {
         return reply(emit, snapshot_gone());
     };
     let made = Made {
@@ -431,20 +488,22 @@ fn sort_snapshot(
         replaces: Some(sort.id),
         cap: snapshot_cap(volumes),
     };
-    make_snapshot(snapshots, made, sorted, &sort.rows, emit);
+    make_snapshot(snapshots, made, sorted, &sort.rows, viewer, emit);
 }
 
 /// Streams the rows of `snapshot` that `read` asks for, from `volumes`, its
-/// volumes, as [`stream_rows`] streams a search's; each page carries `sums`.
-/// An index replaced meanwhile ends the reply with the gone error.
+/// volumes, as `viewer` sees them and as [`stream_rows`] streams a search's;
+/// each page carries `sums`. An index replaced meanwhile ends the reply with
+/// the gone error.
 fn stream_snapshot(
     snapshot: &ResultSnapshot,
     volumes: Vec<Arc<VolumeState>>,
     read: &SnapshotRowsRequest,
     sums: Option<MatchSums>,
+    viewer: Viewer<'_>,
     emit: &mut dyn FnMut(Vec<u8>) -> bool,
 ) {
-    let mut rows = snapshot.read(volumes, read.offset, read.limit);
+    let mut rows = snapshot.read(volumes, read.offset, read.limit, viewer);
     let mut sent = SentFolders::default();
     loop {
         match encode_snapshot_page(&mut rows, read, sums, &mut sent) {
@@ -481,6 +540,14 @@ fn refusal(message: String) -> Response {
     }
 }
 
+/// The reply that refuses a request this client may not make.
+fn unsupported(message: &str) -> Response {
+    Response::Error {
+        code: ProtoError::Unsupported,
+        message: message.into(),
+    }
+}
+
 /// Streams `rows` as one or more binary results-page frames (paged by
 /// [`ResultsPage::push`](gozler_core::proto::ResultsPage::push), `more` set
 /// on all but the last). An empty result set still emits one `more: false`
@@ -502,9 +569,14 @@ fn stream_rows(
     }
 }
 
-/// The reply to a [`Returns::Totals`] search.
-fn totals(volumes: Vec<Arc<VolumeState>>, query: &CompiledQuery, scope: Option<&str>) -> Response {
-    match search_totals(volumes, query, scope) {
+/// The reply to a [`Returns::Totals`] search, of the matches `viewer` sees.
+fn totals(
+    volumes: Vec<Arc<VolumeState>>,
+    query: &CompiledQuery,
+    scope: Option<&str>,
+    viewer: Viewer<'_>,
+) -> Response {
+    match search_totals(volumes, query, scope, viewer) {
         Ok(totals) => Response::Totals(totals.into()),
         Err(TotalsError::NotIndexed(not_indexed)) => refusal(not_indexed.to_string()),
         Err(TotalsError::Overflow(overflow)) => Response::Error {
@@ -649,6 +721,7 @@ impl gozler_core::query::IndexedVolume for VolumeState {
 #[cfg(test)]
 mod tests {
     use super::{Snapshots, build_status, serve};
+    use crate::access::{Access, Refusal, Visibility};
     use crate::include::Include;
     use crate::result_snapshots::ResultSnapshots;
     use crate::volume_state::{Indexed, VolumeSet, VolumeState};
@@ -820,12 +893,24 @@ mod tests {
 
     /// [`reply_bytes`] with the result snapshots of earlier requests.
     fn reply_bytes_in(volumes: &VolumeSet, snapshots: &Snapshots, request: &Request) -> Vec<u8> {
+        let everything = Access::Sees(Visibility::Everything);
+        reply_bytes_as(volumes, snapshots, &everything, request)
+    }
+
+    /// [`reply_bytes_in`] for a client that `access` describes.
+    fn reply_bytes_as(
+        volumes: &VolumeSet,
+        snapshots: &Snapshots,
+        access: &Access,
+        request: &Request,
+    ) -> Vec<u8> {
         let mut out = Vec::new();
         serve(
             volumes,
             &defaults(),
             snapshots,
             b"",
+            access,
             &request_frame(request),
             &mut |reply| {
                 out.extend_from_slice(&reply);
@@ -833,6 +918,101 @@ mod tests {
             },
         );
         out
+    }
+
+    /// The one frame the daemon replies to `request` from a client that
+    /// `access` describes.
+    fn answer_as(volumes: &VolumeSet, access: &Access, request: &Request) -> Response {
+        let bytes = reply_bytes_as(volumes, &ResultSnapshots::new(), access, request);
+        let mut frames = decode_frames(&bytes);
+        assert_eq!(frames.len(), 1, "one reply");
+        frames.remove(0)
+    }
+
+    /// T7: a client gozlerd cannot identify gets no entry and no count,
+    /// while the requests that show no name still answer. Without it, a
+    /// change to `serve` could answer an unknown caller unfiltered, which
+    /// lets any program bypass the filter.
+    #[test]
+    fn an_unidentified_client_reads_no_entry() {
+        use gozler_core::proto::SnapshotRowsRequest;
+        let vols = set(&[live_volume(r"C:\")]);
+        let refused = Access::Refused(Refusal::Anonymous);
+        let snapshot_read = Request::ResultSnapshotRows(SnapshotRowsRequest {
+            id: gozler_core::proto::ResultSnapshotId(1),
+            offset: 0,
+            limit: None,
+            want_size: false,
+            want_mtime: false,
+            want_created: false,
+            want_attributes: false,
+        });
+        for request in [
+            search(query("System32")),
+            totals_search("System32", None),
+            Request::CountIncluded(IndexSettings::default()),
+            snapshot_read,
+        ] {
+            match answer_as(&vols, &refused, &request) {
+                Response::Error {
+                    code: ProtoError::Unsupported,
+                    message,
+                } => assert_eq!(message, Refusal::Anonymous.message()),
+                other => panic!("a refusal, not {other:?}"),
+            }
+        }
+        let hello = hello_request(PROTO_VERSION, PROTO_VERSION);
+        assert!(matches!(
+            answer_as(&vols, &refused, &hello),
+            Response::Hello { .. }
+        ));
+        assert!(matches!(
+            answer_as(&vols, &refused, &Request::Status),
+            Response::Status(_)
+        ));
+        assert!(matches!(
+            answer_as(&vols, &refused, &Request::SettingsSaved),
+            Response::SettingsApplied
+        ));
+    }
+
+    /// T7: a filtered user reads only the entries of the folders they may
+    /// list, and gets no Include count. Without it, a change to `serve`
+    /// could search for a filtered user unfiltered, or give any user the
+    /// Include count, whose rules can spell hidden names.
+    #[test]
+    fn a_filtered_user_reads_only_what_they_may_list() {
+        let mut index = windows_index();
+        index.insert_enum(&dir_record(102, NTFS_ROOT_FRN.0, "Users"));
+        let mut file = dir_record(103, 102, "a.txt");
+        file.attributes = 0;
+        index.insert_enum(&file);
+        for (folder, descriptor) in [
+            (NTFS_ROOT_FRN, &b"open"[..]),
+            (Frn(100), b"hidden"),
+            (Frn(102), b"open"),
+        ] {
+            index.set_folder_descriptor(folder, Some(descriptor));
+        }
+        let vols = set(&[volume(r"C:\", index, VolumePhase::Live)]);
+        let caller = Access::Sees(Visibility::Caller(Box::new(|descriptor: &[u8]| {
+            descriptor == b"open"
+        })));
+
+        let bytes = reply_bytes_as(&vols, &ResultSnapshots::new(), &caller, &search(query("")));
+        assert_eq!(
+            paths(&bytes),
+            [r"C:\Users\a.txt", r"C:\Users", r"C:\Windows"],
+            "System32 is in a folder the user cannot list"
+        );
+        let count = Request::CountIncluded(IndexSettings::default());
+        assert!(matches!(
+            answer_as(&vols, &caller, &count),
+            Response::Error {
+                code: ProtoError::Unsupported,
+                ..
+            }
+        ));
     }
 
     /// A search as a test writes it: query text, which [`search`] parses as
@@ -946,6 +1126,7 @@ mod tests {
             &defaults(),
             &ResultSnapshots::new(),
             b"",
+            &Access::Sees(Visibility::Everything),
             br#"{"t":"Search","query":"#,
             &mut |reply| {
                 replies.extend_from_slice(&reply);
@@ -1221,6 +1402,7 @@ mod tests {
             &defaults(),
             &ResultSnapshots::new(),
             b"",
+            &Access::Sees(Visibility::Everything),
             &request_frame(&search(query("hit"))),
             &mut |reply| {
                 if out.is_empty() {
@@ -1316,6 +1498,7 @@ mod tests {
             &defaults(),
             &ResultSnapshots::new(),
             b"",
+            &Access::Sees(Visibility::Everything),
             &request_frame(&search(query("hit"))),
             &mut |_page| {
                 emitted += 1;

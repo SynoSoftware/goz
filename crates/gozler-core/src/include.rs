@@ -37,6 +37,10 @@ pub const INCLUDE_VALUE: &str = "Include";
 /// indexed volume when it reads a token it has not seen.
 pub const REBUILD_VALUE: &str = "Rebuild";
 
+/// The `REG_MULTI_SZ` value of [`SETTINGS_KEY`] that lists the users and
+/// groups who see every file, one SID string per line.
+pub const SEE_EVERY_FILE_VALUE: &str = "SeeEveryFile";
+
 /// What gozlerd indexes, as the Include page edits it. A field that is
 /// missing takes its default, so the defaults index everything.
 ///

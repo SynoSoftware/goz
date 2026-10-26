@@ -554,6 +554,7 @@ fn rescan(
         &state.guid,
         state.filesystem,
         &rules,
+        &journal,
         Some(stop),
         |progress| building.report(progress),
     ) {

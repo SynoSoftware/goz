@@ -2,8 +2,9 @@
 //!
 //! Builds a tree resembling a real volume (nested directories, varied file
 //! names, a known fraction containing a rare token) and measures `run_query`
-//! for rare, medium, and wildcard needles, then what keeping folder sizes
-//! costs over the same tree, and what a sort change in the window asks.
+//! for rare, medium, and wildcard needles, what a user who cannot list half
+//! the folders pays for a broad search, then what keeping folder sizes costs
+//! over the same tree, and what a sort change in the window asks.
 //! Run with `cargo bench -p gozler-core`.
 
 // Measure the effect of a thread-caching allocator on the alloc-heavy broad
@@ -17,7 +18,7 @@ use criterion::{Criterion, criterion_group, criterion_main};
 use gozler_core::index::{NTFS_ROOT_FRN, VolumeIndex};
 use gozler_core::query::{
     CompiledQuery, HeldVolume, IndexedVolume, ParseOptions, ResultRows, ResultSnapshot, RowsSpec,
-    parse_query, parse_query_with, run_query,
+    Viewer, parse_query, parse_query_with, run_query,
 };
 use gozler_core::scope::VolumeMounts;
 use gozler_core::types::{Frn, SortDir, SortKey, SortSpec};
@@ -47,11 +48,18 @@ fn enum_rec(f: Frn, parent: Frn, name: &str, is_dir: bool) -> ParsedUsnRecord {
     }
 }
 
+/// The descriptor of every folder a filtered user may list.
+const OPEN: &[u8] = b"open";
+/// The descriptor of every other folder: every second leaf folder.
+const CLOSED: &[u8] = b"closed";
+
 /// Builds a deep synthetic index (5 directory levels with long WinSxS-style
 /// names). Every 10,000th file's name contains the rare token "kernel32" so a
-/// rare query returns a realistic ~200 hits.
+/// rare query returns a realistic ~200 hits. Every second leaf folder has the
+/// descriptor [`CLOSED`], and every other folder [`OPEN`].
 fn build_index() -> (VolumeIndex, usize) {
     let mut idx = VolumeIndex::new(NTFS_ROOT_FRN);
+    idx.set_folder_descriptor(NTFS_ROOT_FRN, Some(OPEN));
     let mut next: u64 = 1000;
     let mut count = 0usize;
 
@@ -59,6 +67,7 @@ fn build_index() -> (VolumeIndex, usize) {
         let d1 = frn(next);
         next += 1;
         idx.insert_enum(&enum_rec(d1, NTFS_ROOT_FRN, &format!("amd64_microsoft-windows-component-{a:03}_31bf3856ad364e35_10.0.26100.1_none_deadbeef"), true));
+        idx.set_folder_descriptor(d1, Some(OPEN));
         for b in 0..L2 {
             let d2 = frn(next);
             next += 1;
@@ -68,14 +77,18 @@ fn build_index() -> (VolumeIndex, usize) {
                 &format!("subcomponent_{b:03}_none_cafef00dbaadf00d"),
                 true,
             ));
+            idx.set_folder_descriptor(d2, Some(OPEN));
             for cc in 0..L3 {
                 let d3 = frn(next);
                 next += 1;
                 idx.insert_enum(&enum_rec(d3, d2, &format!("module_group_{cc:03}"), true));
+                idx.set_folder_descriptor(d3, Some(OPEN));
                 for e in 0..L4 {
                     let d4 = frn(next);
                     next += 1;
                     idx.insert_enum(&enum_rec(d4, d3, &format!("bin_x64_{e:02}"), true));
+                    let leaf = if e % 2 == 0 { OPEN } else { CLOSED };
+                    idx.set_folder_descriptor(d4, Some(leaf));
                     for fidx in 0..FILES_PER_LEAF {
                         let file = frn(next);
                         let seq = next;
@@ -229,7 +242,37 @@ fn bench_query(c: &mut Criterion<measure::Measure>) {
         });
     }
 
+    // The same search, read as gozlerd reads it, for a user who sees every
+    // file and for one who cannot list half the leaf folders, who pays one
+    // check per descriptor and one parent lookup per candidate.
+    let parsed = compiled("document");
+    let may_list = |descriptor: &[u8]| descriptor == OPEN;
+    for (label, viewer) in [
+        ("search(document)", Viewer::Everything),
+        ("search(document) caller(half)", Viewer::Filtered(&may_list)),
+    ] {
+        broad.bench_function(label, |b| {
+            b.iter(|| black_box(search_rows(&idx, &parsed, viewer)))
+        });
+    }
+
     broad.finish();
+}
+
+/// Reads every row of `query` over `idx` as `viewer` sees it.
+fn search_rows(idx: &VolumeIndex, query: &CompiledQuery, viewer: Viewer<'_>) -> u64 {
+    let volume = BenchVolume {
+        index: idx,
+        mounts: [r"C:\".to_string()],
+    };
+    let spec = RowsSpec {
+        sort: SortSpec::default(),
+        offset: 0,
+        limit: None,
+        sums: false,
+    };
+    let rows = ResultRows::search(vec![volume], query, None, spec, viewer).expect("no scope");
+    read_pages(rows)
 }
 
 /// The bench's index, searched as gozlerd searches a volume.
@@ -283,7 +326,8 @@ fn sort_by_search(volume: &Arc<BenchVolume>, query: &CompiledQuery, sort: SortSp
         limit: Some(CHUNK_ROWS),
         sums: true,
     };
-    let rows = ResultRows::search(vec![volume.clone()], query, None, spec).expect("no scope");
+    let rows = ResultRows::search(vec![volume.clone()], query, None, spec, Viewer::Everything)
+        .expect("no scope");
     read_pages(rows)
 }
 
@@ -296,10 +340,10 @@ fn sort_snapshot_again(
     sort: SortSpec,
 ) -> u64 {
     let sorted = snapshot
-        .sort_again(vec![volume.clone()], sort)
+        .sort_again(vec![volume.clone()], sort, Viewer::Everything)
         .expect("the index stays");
     let (sorted, volumes) = sorted.into_snapshot().expect("one volume");
-    let mut rows = sorted.read(volumes, 0, Some(CHUNK_ROWS));
+    let mut rows = sorted.read(volumes, 0, Some(CHUNK_ROWS), Viewer::Everything);
     let mut read = 0u64;
     while rows
         .page(4096, |_, _| {
@@ -326,10 +370,16 @@ fn bench_sort_change(c: &mut Criterion<measure::Measure>) {
         limit: None,
         sums: false,
     };
-    let (snapshot, _) = ResultRows::search(vec![volume.clone()], &query, None, by_name)
-        .expect("no scope")
-        .into_snapshot()
-        .expect("one volume");
+    let (snapshot, _) = ResultRows::search(
+        vec![volume.clone()],
+        &query,
+        None,
+        by_name,
+        Viewer::Everything,
+    )
+    .expect("no scope")
+    .into_snapshot()
+    .expect("one volume");
     let by_size = SortSpec {
         key: SortKey::Size,
         dir: SortDir::Desc,

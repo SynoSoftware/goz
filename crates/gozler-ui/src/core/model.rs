@@ -24,7 +24,7 @@ use super::query::{self, Filters, LocationItem, Matching};
 use super::results::{Fix, ListButton, ListMessage, RowsChange, Shown};
 use super::search::SearchArea;
 use super::search_list::Deselect;
-use super::search_list::{Ended, Keep, Kept, SearchList};
+use super::search_list::{Ended, Keep, Kept, SearchList, SelectedSize};
 use super::selection::{
     Filter, Filtered, FolderContents, RowSelection, SELECTION_LIMIT, Selection, SelectionSource,
     Sums,
@@ -1930,7 +1930,7 @@ impl Model {
         &mut self,
         list: List,
         files: Arc<[ResultItem]>,
-        chosen_bytes: Option<u64>,
+        chosen_bytes: Option<SelectedSize>,
         sums: Sums,
     ) -> Option<Effect> {
         let shown = self.list_mut(list)?;

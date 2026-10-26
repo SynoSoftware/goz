@@ -4,13 +4,17 @@
 //! tails the USN change journal, and serves queries over
 //! `\\.\pipe\gozler-v1`. `run` starts the live daemon (console by default;
 //! `--service` under the SCM); `scan` does a one-shot bootstrap and prints
-//! stats; `install`/`uninstall` register the auto-start Windows service.
+//! stats; `install`/`uninstall` register the auto-start Windows service;
+//! `see-every-file` shows and changes the list of users and groups who see
+//! every file.
 
 // Thread-caching allocator; the workspace Cargo.toml note says why.
 #[cfg(windows)]
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
+#[cfg(windows)]
+mod access;
 #[cfg(windows)]
 mod bootstrap;
 #[cfg(windows)]
@@ -32,7 +36,13 @@ mod tail;
 #[cfg(windows)]
 mod volume_state;
 
+#[cfg(windows)]
+use anyhow::Context;
 use clap::{Parser, Subcommand};
+#[cfg(windows)]
+use gozler_core::include::{SEE_EVERY_FILE_VALUE, SETTINGS_KEY};
+#[cfg(windows)]
+use gozler_winfs::Sid;
 
 #[derive(Parser)]
 #[command(
@@ -65,16 +75,47 @@ enum Command {
         service: bool,
     },
     /// Register and start the gozler service (needs an elevated terminal).
-    Install,
+    Install {
+        /// When no list of users and groups who see every file is stored
+        /// yet, store one with this user or group, or an empty one with
+        /// `none`. A stored list is kept.
+        #[arg(long, value_name = "ACCOUNT")]
+        see_every_file: Option<String>,
+    },
     /// Stop and remove the gozler service (needs an elevated terminal).
     Uninstall,
     /// Show whether the gozler service is installed and running.
     Status,
+    /// Show the users and groups who see every file, or add or remove one.
+    ///
+    /// Every other user sees only the files in folders they can open.
+    /// Adding or removing needs an elevated terminal.
+    SeeEveryFile {
+        #[command(subcommand)]
+        change: Option<ListChange>,
+    },
     /// Print the oldest and newest protocol versions this build serves, and
     /// its version, separated by spaces. The window asks the gozlerd.exe
     /// beside it before it offers Use local, without starting a service.
     #[command(hide = true)]
     Protocol,
+}
+
+/// A change to the list of users and groups who see every file.
+#[derive(Subcommand)]
+enum ListChange {
+    /// Let a user or group see every file.
+    Add {
+        /// A user or group, such as PC\ana or Everyone, or a SID, such as
+        /// S-1-5-32-545.
+        account: String,
+    },
+    /// Take a user or group off the list.
+    Remove {
+        /// A user or group, such as PC\ana or Everyone, or a SID, such as
+        /// S-1-5-32-545.
+        account: String,
+    },
 }
 
 /// Purge freed memory immediately, because delayed purging needs later
@@ -99,9 +140,13 @@ fn main() -> std::process::ExitCode {
         Command::Scan { query } => run_scan(query),
         Command::Run { service: true, .. } => service::run(),
         Command::Run { .. } => run::run_console(),
-        Command::Install => service::install(),
+        Command::Install { see_every_file } => install(see_every_file.as_deref()),
         Command::Uninstall => service::uninstall(),
         Command::Status => service::status(),
+        Command::SeeEveryFile { change: None } => show_list(),
+        Command::SeeEveryFile {
+            change: Some(change),
+        } => change_list(&change),
         Command::Protocol => {
             use gozler_core::proto::{OLDEST_PROTO_VERSION, PROTO_VERSION};
             println!(
@@ -128,6 +173,108 @@ fn main() -> anyhow::Result<()> {
     anyhow::bail!(
         "gozlerd requires Windows (it reads NTFS and ReFS volumes and their USN journals)"
     )
+}
+
+/// `install`, storing the list the setup chose. The account resolves before
+/// the service is touched, so an unknown name changes nothing.
+#[cfg(windows)]
+fn install(see_every_file: Option<&str>) -> anyhow::Result<()> {
+    let first_list = match see_every_file {
+        None => None,
+        Some(none) if none.eq_ignore_ascii_case("none") => Some(Vec::new()),
+        Some(account) => Some(vec![resolve(account)?]),
+    };
+    service::install(first_list.as_deref())
+}
+
+/// The SID of the user or group `account`.
+#[cfg(windows)]
+fn resolve(account: &str) -> anyhow::Result<Sid> {
+    gozler_winfs::account_sid(account)
+        .with_context(|| format!("looking up {account}"))?
+        .with_context(|| format!("no user or group is named {account}"))
+}
+
+/// The account name of `sid`, or its SID string when it has none.
+#[cfg(windows)]
+fn display_name(sid: &Sid) -> String {
+    gozler_winfs::account_name(sid).unwrap_or_else(|| sid.to_string())
+}
+
+/// The lines of the stored list of users and groups who see every file, or
+/// none when no list is stored.
+#[cfg(windows)]
+fn stored_lines() -> anyhow::Result<Vec<String>> {
+    Ok(
+        gozler_winfs::machine_strings(SETTINGS_KEY, SEE_EVERY_FILE_VALUE)
+            .context("reading the list of users and groups who see every file")?
+            .unwrap_or_default(),
+    )
+}
+
+/// `see-every-file` alone: prints the list, a line the daemon ignores marked
+/// as such, and how to show every file to every user. It needs no elevation,
+/// because every user may read the list.
+#[cfg(windows)]
+fn show_list() -> anyhow::Result<()> {
+    let lines = stored_lines()?;
+    let mut everyone = false;
+    if lines.is_empty() {
+        println!("The list is empty: each user sees the files in folders they can open.");
+    } else {
+        println!("Users and groups who see every file:");
+        for line in &lines {
+            match line.parse::<Sid>() {
+                Ok(sid) => {
+                    everyone |= sid.to_string() == "S-1-1-0";
+                    println!("  {}", display_name(&sid));
+                }
+                Err(_) => println!("  {line} (ignored: not a SID)"),
+            }
+        }
+    }
+    if !everyone {
+        println!("To show every file to every user, open a terminal as administrator and run:");
+        println!("  gozlerd see-every-file add Everyone");
+    }
+    Ok(())
+}
+
+/// `see-every-file add` and `remove`. Elevation is checked before the name
+/// resolves, so a standard user learns at once that the change is not
+/// theirs. A line that is not a SID stays as it is.
+#[cfg(windows)]
+fn change_list(change: &ListChange) -> anyhow::Result<()> {
+    if !gozler_winfs::is_elevated() {
+        anyhow::bail!("changing who sees every file needs an administrator terminal");
+    }
+    let (ListChange::Add { account } | ListChange::Remove { account }) = change;
+    let sid = resolve(account)?;
+    let name = display_name(&sid);
+    let mut lines = stored_lines()?;
+    let on_list = |line: &String| line.parse::<Sid>().is_ok_and(|listed| listed == sid);
+    let done = match change {
+        ListChange::Add { .. } if lines.iter().any(on_list) => {
+            println!("{name} is already on the list; nothing changed.");
+            return Ok(());
+        }
+        ListChange::Add { .. } => {
+            lines.push(sid.to_string());
+            format!("Added {name}.")
+        }
+        ListChange::Remove { .. } if !lines.iter().any(on_list) => {
+            println!("{name} is not on the list; nothing changed.");
+            return Ok(());
+        }
+        ListChange::Remove { .. } => {
+            lines.retain(|line| !on_list(line));
+            format!("Removed {name}.")
+        }
+    };
+    gozler_winfs::set_machine_strings(SETTINGS_KEY, SEE_EVERY_FILE_VALUE, &lines)
+        .context("storing the list of users and groups who see every file")?;
+    println!("{done} The change applies from the next search.");
+    Ok(())
 }
 
 #[cfg(windows)]

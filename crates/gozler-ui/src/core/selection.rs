@@ -4,6 +4,7 @@
 //! selection).
 
 use super::fetch::{CachedRows, Generation};
+use super::search_list::SelectedSize;
 use gozler_core::proto::{QueryTotals, ResultItem};
 use gozler_fileops::{OperationId, Taken};
 use std::collections::{BTreeMap, HashSet};
@@ -182,7 +183,7 @@ pub(crate) struct Filter {
 pub(crate) struct Filtered {
     pub(crate) input: Filter,
     pub(crate) files: Option<Arc<[ResultItem]>>,
-    pub(crate) chosen_bytes: Option<u64>,
+    pub(crate) chosen_bytes: Option<SelectedSize>,
     pub(crate) sums: Sums,
 }
 
@@ -236,7 +237,7 @@ impl Filter {
             }
         };
         let chosen_bytes = if self.count_bytes {
-            files.as_deref().and_then(super::search_list::chosen_bytes)
+            files.as_deref().map(super::search_list::chosen_bytes)
         } else {
             None
         };

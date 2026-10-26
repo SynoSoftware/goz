@@ -47,18 +47,26 @@ pub(crate) struct SearchList {
     pending: keeping::Pending,
     observing: Option<Generation>,
     /// A search panel's selected size, which its status line shows; `None`
-    /// while nothing is read, for Search's list, or when a counted folder's
-    /// size is unknown.
-    pub(super) chosen_bytes: Option<u64>,
+    /// while nothing is read, and for Search's list.
+    pub(super) chosen_bytes: Option<SelectedSize>,
     retired: Retirement,
+}
+
+/// The size of a search panel's selection, as its status line shows it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct SelectedSize {
+    /// The sum of the known sizes; `None` when no counted size is known.
+    pub(crate) known: Option<u64>,
+    /// How many counted entries have no known size.
+    pub(crate) unknown: u64,
 }
 
 /// The size of `files`, a search panel's selection, as its status line
 /// adds it: each entry once, so a file below a selected folder is left out,
-/// and `None` when a counted size is unknown, as a folder panel's sum
-/// (DESIGN.md: Search in a panel). Only the depths at which a selected folder
-/// exists are looked up.
-pub(super) fn chosen_bytes(files: &[ResultItem]) -> Option<u64> {
+/// and the unknown sizes counted apart, as a folder panel's sum (DESIGN.md:
+/// Search in a panel). Only the depths at which a selected folder exists
+/// are looked up.
+pub(super) fn chosen_bytes(files: &[ResultItem]) -> SelectedSize {
     let folders: HashSet<&str> = (files.iter())
         .filter(|file| file.is_dir)
         .map(|folder| folder.path.trim_end_matches('\\'))
@@ -78,10 +86,20 @@ pub(super) fn chosen_bytes(files: &[ResultItem]) -> Option<u64> {
             depths.binary_search(&depth).is_ok() && folders.contains(ancestor)
         })
     };
-    (files.iter())
-        .filter(|file| folders.is_empty() || !below_selected(&file.path))
-        .map(|file| file.size)
-        .sum()
+    let mut size = SelectedSize {
+        known: None,
+        unknown: 0,
+    };
+    for file in files {
+        if !folders.is_empty() && below_selected(&file.path) {
+            continue;
+        }
+        match file.size {
+            Some(bytes) => size.known = Some(size.known.unwrap_or(0) + bytes),
+            None => size.unknown += 1,
+        }
+    }
+    size
 }
 
 impl SearchList {
@@ -133,7 +151,7 @@ impl SearchList {
         self.selection_sums
     }
 
-    pub(crate) fn chosen_bytes(&self) -> Option<u64> {
+    pub(crate) fn chosen_bytes(&self) -> Option<SelectedSize> {
         self.chosen_bytes
     }
 
@@ -278,8 +296,9 @@ mod tests {
     }
 
     /// T8: a folder's size already holds the files below it, so a sum of
-    /// every selected size counts them twice; an unknown folder size hides
-    /// the sum, as a folder panel's does.
+    /// every selected size counts them twice. An unknown folder size, which
+    /// every folder has for a user who does not see every file, is counted
+    /// apart and never hides the known sum, as in a folder panel.
     #[test]
     fn a_file_below_a_selected_folder_counts_once() {
         let files = |folder_size| {
@@ -289,7 +308,9 @@ mod tests {
                 item(r"C:\c.txt", Some(1), false),
             ]
         };
-        assert_eq!(chosen_bytes(&files(Some(10))), Some(11));
-        assert_eq!(chosen_bytes(&files(None)), None);
+        let size = |known, unknown| SelectedSize { known, unknown };
+        assert_eq!(chosen_bytes(&files(Some(10))), size(Some(11), 0));
+        assert_eq!(chosen_bytes(&files(None)), size(Some(1), 1));
+        assert_eq!(chosen_bytes(&files(None)[..2]), size(None, 1));
     }
 }

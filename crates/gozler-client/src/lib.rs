@@ -182,7 +182,8 @@ impl From<Arc<AtomicBool>> for CancelToken {
 /// it is invalid input: an empty answer would read as "no such file"
 /// instead of "wrong folder". Only a folder that the operating system
 /// reports as missing counts. A folder the user cannot read still searches,
-/// because gozlerd answers from its index and not from the folder.
+/// because gozlerd answers from its index and not from the folder, and the
+/// search shows only what the user may see there.
 pub fn folder_is_missing(folder: &str) -> bool {
     std::fs::metadata(folder).is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound)
 }

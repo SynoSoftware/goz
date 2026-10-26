@@ -24,7 +24,7 @@
 //!   folder whose permissions changed has none until it is read again, so no
 //!   user sees its entries by another folder's rights.
 
-use super::descriptors::DescriptorTable;
+use super::descriptors::{DescriptorTable, Listable, SeenBy};
 use super::store::{
     CompactedNames, ComponentBytes, EntryFlags, EntryTable, FrnMap, IdWidth, MTIME_UNKNOWN, NameId,
     NamePair, NameRanks, NameStore, SIZE_UNKNOWN, hash_bytes, moved,
@@ -135,9 +135,9 @@ pub struct IndexStats {
     pub link_reconciles_dropped: u64,
     /// Folder descriptor reads that failed since the index was built, for a
     /// folder the index keeps. Such a folder has no descriptor, so its
-    /// entries are hidden from every user
-    /// who does not see every file, until the journal records a change to
-    /// the folder itself or a rescan reads it again.
+    /// entries are hidden from every user who does not see every file, until
+    /// the journal records a change to the folder itself or a rescan reads it
+    /// again.
     pub descriptor_reads_failed: u64,
 }
 
@@ -568,6 +568,7 @@ impl VolumeIndex {
             if let Some(head) = self.head_of(frn)
                 && self.entries.flags(head).contains(EntryFlags::DIR)
                 && (security_changed || self.entries.descriptor(head).is_none())
+                && !self.is_metadata_folder(head)
             {
                 // Until the new descriptor is read, the folder's entries are
                 // hidden; the old one would show a user who lost the right
@@ -607,12 +608,15 @@ impl VolumeIndex {
     /// the index still holds without a descriptor, so `Status` shows that
     /// their entries are hidden. A folder that is gone, or that the Include
     /// rules removed, hides nothing, so call this after the rules have
-    /// checked what the reads added.
+    /// checked what the reads added. NTFS's metadata folders are not
+    /// counted, as [`Self::wants_descriptor`] says.
     pub fn note_descriptor_reads_failed(&mut self, folders: &[Frn]) {
         let hiding = folders
             .iter()
             .filter_map(|&frn| self.head_of(frn))
-            .filter(|&head| self.entries.descriptor(head).is_none())
+            .filter(|&head| {
+                self.entries.descriptor(head).is_none() && !self.is_metadata_folder(head)
+            })
             .count();
         self.stats.descriptor_reads_failed += hiding as u64;
     }
@@ -645,9 +649,71 @@ impl VolumeIndex {
         self.instance = next_instance();
     }
 
+    /// Asks `may_list` once for every descriptor of the index, for one
+    /// request that reads it. A request asks before it scans, so the time a
+    /// search takes does not depend on whether a hidden name matches it.
+    pub fn listable(&self, may_list: &dyn Fn(&[u8]) -> bool) -> Listable {
+        self.descriptors.listable(may_list)
+    }
+
+    /// Whether `seen_by` sees entry `idx`: the one test of every row a
+    /// request reads. A filtered user sees the root, which no folder holds,
+    /// and the entries of a folder whose descriptor they may list; a folder
+    /// whose descriptor is not read hides its entries.
+    pub(crate) fn is_seen(&self, idx: EntryIdx, seen_by: &SeenBy) -> bool {
+        match seen_by {
+            SeenBy::Everything => true,
+            SeenBy::Caller(listable) => {
+                let parent = self.entries.parent(idx);
+                idx == self.root
+                    || (parent != NIL
+                        && self
+                            .entries
+                            .descriptor(parent)
+                            .is_some_and(|id| listable.lists(id)))
+            }
+        }
+    }
+
+    /// Whether the descriptor of `frn` is to be read: `frn` is a folder in
+    /// the index, and not one of NTFS's metadata folders. Windows refuses
+    /// some of those to gozlerd's backup privilege, and they hold only
+    /// NTFS's own files, so without this rule every PC would show their
+    /// failed reads in `--status`.
+    pub fn wants_descriptor(&self, frn: Frn) -> bool {
+        self.head_of(frn).is_some_and(|head| {
+            self.entries.flags(head).contains(EntryFlags::DIR) && !self.is_metadata_folder(head)
+        })
+    }
+
+    /// Every folder whose descriptor is to be read and that has none.
+    pub fn unread_folders(&self) -> Vec<Frn> {
+        self.entries
+            .iter_live()
+            .filter(|&e| {
+                e != self.lost_found
+                    && self.entries.flags(e).contains(EntryFlags::DIR)
+                    && self.entries.descriptor(e).is_none()
+                    && !self.is_metadata_folder(e)
+            })
+            .map(|e| self.entries.frn(e))
+            .collect()
+    }
+
+    /// Whether folder `idx` is `$Extend`, the root's child in MFT record 11,
+    /// or a folder below it, on a volume whose root ID is not wide, as an
+    /// NTFS root's is.
+    fn is_metadata_folder(&self, idx: EntryIdx) -> bool {
+        const EXTEND_RECORD: u64 = 11;
+        !self.entries.frn(self.root).is_wide()
+            && self.chain_up(idx).iter().any(|&e| {
+                self.entries.parent(e) == self.root
+                    && self.entries.frn(e).record_number() == EXTEND_RECORD
+            })
+    }
+
     /// The descriptor bytes of folder `frn`, or `None` when it has none.
-    #[cfg(test)]
-    pub(crate) fn folder_descriptor(&self, frn: Frn) -> Option<&[u8]> {
+    pub fn folder_descriptor(&self, frn: Frn) -> Option<&[u8]> {
         let id = self.entries.descriptor(self.head_of(frn)?)?;
         Some(self.descriptors.bytes(id))
     }
@@ -1771,7 +1837,7 @@ impl VolumeIndex {
                     if seen.insert(cur) {
                         let entry = self.entry(cur);
                         if !entry.is_dir() {
-                            sum = sum.wrapping_add(entry.size().unwrap_or(0));
+                            sum = sum.wrapping_add(entry.size(&SeenBy::Everything).unwrap_or(0));
                         }
                         heads.push(self.entries.first_child(cur));
                     }
@@ -1785,7 +1851,7 @@ impl VolumeIndex {
             .filter(|&e| self.entry(e).is_dir())
             .all(|dir| {
                 let want = (self.folder_sizes != FolderSizes::Unknown).then(|| rebuilt(dir));
-                self.entry(dir).size() == want
+                self.entry(dir).size(&SeenBy::Everything) == want
             })
     }
 
@@ -1895,7 +1961,12 @@ impl<'a> EntryView<'a> {
     pub fn is_dir(&self) -> bool {
         self.index.entries.flags(self.idx).contains(EntryFlags::DIR)
     }
-    pub fn size(&self) -> Option<u64> {
+    /// The size as `seen_by` may read it: a folder's is `None` for a
+    /// filtered user, because it counts files they may not see.
+    pub fn size(&self, seen_by: &SeenBy) -> Option<u64> {
+        if matches!(seen_by, SeenBy::Caller(_)) && self.is_dir() {
+            return None;
+        }
         let s = self.index.entries.size(self.idx);
         (s != SIZE_UNKNOWN).then_some(s)
     }

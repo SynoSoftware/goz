@@ -556,8 +556,13 @@ pub(crate) fn cell(
         Column::Name | Column::Path => row.path
             [path_part(column, &row.path).expect("Name and Path are parts of the path")]
         .to_owned(),
+        // A folder's size is unknown while a size pass runs and, for a user
+        // who does not see every file, always; File Explorer leaves every
+        // folder's Size cell empty, and the volume's state says when a pass
+        // runs (DESIGN.md: Results list).
         Column::Size => match row.size {
             Some(size) => sizes.text(strings, numbers, size),
+            None if row.is_dir => String::new(),
             None => strings.text("cell.unknown").to_owned(),
         },
         Column::DateModified => {
@@ -799,5 +804,39 @@ pub(crate) mod tests {
         assert_eq!(shown(SizeFormat::Mb, 1_048_576), mb("1.00"));
         assert_eq!(shown(SizeFormat::Mb, 1_048_577), mb("1.01"));
         assert!(shown(SizeFormat::Bytes, 41_163_399_668).contains("41,163,399,668"));
+    }
+
+    /// T11: a user who does not see every file gets no folder sizes, so one
+    /// arm for every unknown size makes each folder row read "Unknown", which
+    /// reads as "still loading" (spec `V6`).
+    #[test]
+    fn a_folder_with_no_size_shows_an_empty_cell_and_a_file_shows_unknown() {
+        let strings = english();
+        let dates = crate::core::dates::Dates::new(
+            crate::core::dates::DateFormat::Full,
+            jiff::Timestamp::UNIX_EPOCH.to_zoned(jiff::tz::TimeZone::UTC),
+        );
+        let size_cell = |is_dir| {
+            let row = ResultItem {
+                path: r"C:\a".to_owned(),
+                path_u16: None,
+                size: None,
+                mtime_ft: None,
+                created_ft: None,
+                is_dir,
+                attributes: None,
+            };
+            cell(
+                &strings,
+                &English,
+                SizeFormat::Kb,
+                &dates,
+                Column::Size,
+                &row,
+            )
+            .full
+        };
+        assert_eq!(size_cell(true), "");
+        assert_eq!(size_cell(false), "Unknown");
     }
 }

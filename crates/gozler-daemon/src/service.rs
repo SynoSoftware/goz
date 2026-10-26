@@ -15,7 +15,9 @@ use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use anyhow::{Context, Result};
+use gozler_core::include::{SEE_EVERY_FILE_VALUE, SETTINGS_KEY};
 use gozler_core::proto::SERVICE_NAME;
+use gozler_winfs::{Sid, machine_strings, set_machine_strings};
 use tokio::sync::watch;
 use windows_service::service::{
     ServiceAccess, ServiceAction, ServiceActionType, ServiceControl, ServiceControlAccept,
@@ -77,7 +79,13 @@ fn service_info() -> Result<ServiceInfo> {
 /// Registers the auto-start service and starts it now, so search works
 /// immediately after install without a reboot. Idempotent: re-running refreshes
 /// the config (e.g. after an app upgrade moved the binary) and ensures it runs.
-pub(crate) fn install() -> Result<()> {
+///
+/// With `first_list`, the list of users and groups who see every file is
+/// stored before the service starts, so the first search follows it, but only
+/// when no list is stored yet: an upgrade, or a new install after an
+/// uninstall, keeps the list an administrator made, so a user they removed is
+/// never added back.
+pub(crate) fn install(first_list: Option<&[Sid]>) -> Result<()> {
     let manager = ServiceManager::local_computer(
         None::<&str>,
         ServiceManagerAccess::CONNECT | ServiceManagerAccess::CREATE_SERVICE,
@@ -108,9 +116,26 @@ pub(crate) fn install() -> Result<()> {
     // Let the SCM supervise crash recovery: restart on failure with backoff,
     // so a dead daemon self-heals without app involvement or a UAC prompt.
     let _ = set_failure_actions(&service);
+    if let Some(list) = first_list {
+        store_first_list(list)?;
+    }
     start_if_stopped(&service).context("starting the gozler service")?;
     println!("gozler service installed and started.");
     Ok(())
+}
+
+/// Stores `list` as the list of users and groups who see every file, unless a
+/// list is stored already.
+fn store_first_list(list: &[Sid]) -> Result<()> {
+    let stored = machine_strings(SETTINGS_KEY, SEE_EVERY_FILE_VALUE)
+        .context("reading the list of users and groups who see every file")?;
+    if stored.is_some() {
+        println!("Kept the existing list of users who see every file.");
+        return Ok(());
+    }
+    let lines: Vec<String> = list.iter().map(Sid::to_string).collect();
+    set_machine_strings(SETTINGS_KEY, SEE_EVERY_FILE_VALUE, &lines)
+        .context("storing the list of users and groups who see every file")
 }
 
 /// Stops (if running) and deletes the service. Succeeds even if it was never

@@ -16,7 +16,9 @@
 
 use gozler_core::index::{NTFS_ROOT_FRN, VolumeIndex};
 use gozler_core::proto::{Rows, SentFolders, encode_page};
-use gozler_core::query::{CompiledQuery, HeldVolume, IndexedVolume, ResultRows, parse_query};
+use gozler_core::query::{
+    CompiledQuery, HeldVolume, IndexedVolume, ResultRows, Viewer, parse_query,
+};
 use gozler_core::scope::VolumeMounts;
 use gozler_core::types::{Frn, SortDir, SortKey, SortSpec};
 use gozler_core::usn::record::{FILE_ATTRIBUTE_DIRECTORY, ParsedUsnRecord, USN_REASON_FILE_CREATE};
@@ -265,8 +267,14 @@ fn main() {
     // The scan under the volume's index read lock, the sort without it, and
     // the rows under it again.
     let searching = Instant::now();
-    let mut rows = ResultRows::search(vec![&volume], &query, None, wanted.spec())
-        .expect("the search has no scope");
+    let mut rows = ResultRows::search(
+        vec![&volume],
+        &query,
+        None,
+        wanted.spec(),
+        Viewer::Everything,
+    )
+    .expect("the search has no scope");
     let search_s = searching.elapsed().as_secs_f64();
     let lock_peak = peak_since(base);
     let (scan_s, read_s) = match volume.holds.take()[..] {

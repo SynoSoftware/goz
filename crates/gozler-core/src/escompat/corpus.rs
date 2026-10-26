@@ -20,7 +20,7 @@ use crate::proto::{
 };
 use crate::query::{
     CompiledQuery, HeldVolume, IndexedVolume, QueryError, QueryStart, ResultNames, ResultRows,
-    TotalsError, search_totals,
+    TotalsError, Viewer, search_totals,
 };
 use crate::scope::VolumeMounts;
 use crate::types::Frn;
@@ -936,8 +936,9 @@ fn answer(volumes: &[Volume], search: &SearchRequest) -> Result<Vec<Response>, S
     let volumes: Vec<&Volume> = volumes.iter().collect();
     match &search.returns {
         Returns::Rows(wanted) => {
-            let mut rows = ResultRows::search(volumes, &query, scope, wanted.spec())
-                .map_err(|e| e.to_string())?;
+            let mut rows =
+                ResultRows::search(volumes, &query, scope, wanted.spec(), Viewer::Everything)
+                    .map_err(|e| e.to_string())?;
             let mut sent = SentFolders::default();
             let mut names = ResultNames::default();
             let mut pages = Vec::new();
@@ -951,7 +952,8 @@ fn answer(volumes: &[Volume], search: &SearchRequest) -> Result<Vec<Response>, S
         }
         Returns::ResultSnapshot { .. } => unreachable!("gozler never asks for a result snapshot"),
         Returns::Totals => {
-            let totals = search_totals(volumes, &query, scope).map_err(|e| e.to_string())?;
+            let totals = search_totals(volumes, &query, scope, Viewer::Everything)
+                .map_err(|e| e.to_string())?;
             Ok(vec![Response::Totals(totals.into())])
         }
     }
@@ -1087,7 +1089,12 @@ fn a_total_too_large_for_64_bits_is_refused() {
     let search = search(&plan).expect("parses");
     let query = CompiledQuery::new(&search.query).expect("compiles");
     assert!(matches!(
-        search_totals(vec![&volume], &query, search.scope.as_deref()),
+        search_totals(
+            vec![&volume],
+            &query,
+            search.scope.as_deref(),
+            Viewer::Everything
+        ),
         Err(TotalsError::Overflow(_))
     ));
 }

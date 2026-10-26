@@ -119,7 +119,7 @@ mod tests {
     use super::*;
     use gozler_core::index::{NTFS_ROOT_FRN, VolumeIndex};
     use gozler_core::query::{
-        CompiledQuery, HeldVolume, IndexedVolume, ResultRows, RowsSpec, parse_query,
+        CompiledQuery, HeldVolume, IndexedVolume, ResultRows, RowsSpec, Viewer, parse_query,
     };
     use gozler_core::scope::VolumeMounts;
     use gozler_core::types::{Frn, SortKey, SortSpec};
@@ -173,7 +173,8 @@ mod tests {
             limit: None,
             sums: false,
         };
-        let found = ResultRows::search(vec![volume], &query, None, spec).expect("no scope");
+        let found = ResultRows::search(vec![volume], &query, None, spec, Viewer::Everything)
+            .expect("no scope");
         let snapshot = found.into_snapshot().expect("one volume").0;
         assert_eq!(snapshot.total(), rows as u64);
         Arc::new(snapshot)

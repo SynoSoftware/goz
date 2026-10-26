@@ -66,6 +66,10 @@ CleanupText=For each program you select, Setup deletes its files and removes its
 CleanGoz=Remove goz from %1
 CleanOldGozler=Remove the other copy of Gozler from %1
 CleaningUp=Finishing installation...
+SeeEveryFileCaption=Choose who sees every file
+SeeEveryFileDescription=Gozler shows each user only the files in folders they can open.
+SeeEveryFileText=Checked, %1 sees every file name, also without running as administrator. This does not let them open any file they cannot open now.%n%nTo change who sees every file later, open Settings > Visibility.
+SeeEveryFileItem=Let %1 see the names of every file on this PC
 WindowStays=Gozler is still running, so Setup can't replace it.%n%nExit Gozler, then select Back and Install again.
 GozFailed=Setup couldn't remove goz (error code %1).%n%nTo remove goz's service, open a terminal as administrator and run:%n  pushd "%2"%n  .\gozd.exe uninstall%n%nIf the command succeeds, delete goz.exe and gozd.exe from that folder.
 
@@ -97,6 +101,14 @@ const
   EnvironmentKey = 'SYSTEM\CurrentControlSet\Control\Session Manager\Environment';
   SMTO_ABORTIFHUNG = 2;
   SMTO_NOTIMEOUTIFNOTHUNG = 8;
+  // The service's settings key and its list of users and groups who see
+  // every file: SETTINGS_KEY and SEE_EVERY_FILE_VALUE in gozler-core's
+  // include module.
+  SettingsKey = 'SOFTWARE\Gozler';
+  SeeEveryFileValue = 'SeeEveryFile';
+  WTS_CURRENT_SESSION = $FFFFFFFF;
+  WTSUserName = 5;
+  WTSDomainName = 7;
 
 type
   // A goz or an earlier gozler that people run: one that a service runs or
@@ -116,6 +128,10 @@ var
   Found: array of TFound;
   // Created only when something is found.
   CleanupPage: TInputOptionWizardPage;
+  // Created only when the setup offers SignedInUser a place on the list of
+  // users who see every file.
+  SeeEveryFilePage: TInputOptionWizardPage;
+  SignedInUser: String;
 
 function NormalFolder(Folder: String): String;
 begin
@@ -265,24 +281,87 @@ begin
   end;
 end;
 
-procedure InitializeWizard;
+// Buffer receives the address of the text. Pascal Script has no pointer
+// type, so it is a pointer-sized integer, which only lstrlenW, lstrcpynW and
+// WTSFreeMemory read.
+function WTSQuerySessionInformation(Server: THandle; SessionId: DWORD; InfoClass: Integer;
+  var Buffer: NativeInt; var Bytes: DWORD): BOOL;
+  external 'WTSQuerySessionInformationW@wtsapi32.dll stdcall';
+procedure WTSFreeMemory(Memory: NativeInt);
+  external 'WTSFreeMemory@wtsapi32.dll stdcall';
+function lstrlenW(Text: NativeInt): Integer;
+  external 'lstrlenW@kernel32.dll stdcall';
+function lstrcpynW(Target: String; Source: NativeInt; MaxLength: Integer): NativeInt;
+  external 'lstrcpynW@kernel32.dll stdcall';
+
+// The InfoClass text of the Windows session that runs the setup, or '' when
+// Windows gives none.
+function SessionText(const InfoClass: Integer): String;
 var
-  Daemon: String;
+  Buffer: NativeInt;
+  Bytes: DWORD;
+  Count: Integer;
+begin
+  Result := '';
+  if not WTSQuerySessionInformation(0, WTS_CURRENT_SESSION, InfoClass, Buffer, Bytes) then
+    exit;
+  Count := lstrlenW(Buffer);
+  if Count > 0 then
+  begin
+    SetLength(Result, Count);
+    lstrcpynW(Result, Buffer, Count + 1);
+  end;
+  WTSFreeMemory(Buffer);
+end;
+
+// The user signed in to the session that runs the setup, as DOMAIN\name, or
+// '' when nobody is, as in session 0. It is the session's user, not the
+// account that approved the elevation, so an install that another
+// administrator approved names the person who started it.
+function SessionUser: String;
+var
+  Name, Domain: String;
+begin
+  Result := '';
+  Name := SessionText(WTSUserName);
+  if Name = '' then exit;
+  Domain := SessionText(WTSDomainName);
+  if Domain = '' then
+    Result := Name
+  else
+    Result := Domain + '\' + Name;
+end;
+
+// Offers the signed-in user a place on the list of users who see every
+// file. Only a first install asks, when no list is stored: an upgrade or a
+// new install after an uninstall keeps the list, so a user an administrator
+// removed is never added back. A silent install asks nobody, so it grants
+// nobody.
+procedure CreateSeeEveryFilePage;
+var
+  After: Integer;
+begin
+  if WizardSilent or RegValueExists(HKLM64, SettingsKey, SeeEveryFileValue) then exit;
+  SignedInUser := SessionUser;
+  if SignedInUser = '' then exit;
+  // Granting a user is unrelated to removing other programs, so it gets its
+  // own page, the last choice before Ready.
+  if CleanupPage <> nil then
+    After := CleanupPage.ID
+  else
+    After := wpLicense;
+  SeeEveryFilePage := CreateInputOptionPage(After, CustomMessage('SeeEveryFileCaption'),
+    CustomMessage('SeeEveryFileDescription'),
+    FmtMessage(CustomMessage('SeeEveryFileText'), [SignedInUser]), False, False);
+  SeeEveryFilePage.Add(FmtMessage(CustomMessage('SeeEveryFileItem'), [SignedInUser]));
+  SeeEveryFilePage.Values[0] := True;
+end;
+
+// The page that offers to remove each goz and earlier gozler in Found.
+procedure CreateCleanupPage;
+var
   I: Integer;
 begin
-  InstallFolder := ExpandConstant('{#AppFolder}');
-  // Services first, so a folder that both a service and a PATH name keeps its
-  // service.
-  Daemon := ServiceProgram('goz');
-  if Daemon <> '' then
-    AddFound(ExtractFileDir(Daemon), True, Daemon);
-  Daemon := ServiceProgram('{#ServiceName}');
-  if Daemon <> '' then
-    AddFound(ExtractFileDir(Daemon), False, Daemon);
-  FindOnPath(HKLM, EnvironmentKey);
-  FindOnPath(HKCU, 'Environment');
-  if GetArrayLength(Found) = 0 then exit;
-
   CleanupPage := CreateInputOptionPage(wpLicense, CustomMessage('CleanupCaption'),
     CustomMessage('CleanupDescription'), CustomMessage('CleanupText'), False, False);
   for I := 0 to GetArrayLength(Found) - 1 do
@@ -300,6 +379,26 @@ begin
         FmtMessage(CustomMessage('CleanOldGozler'), [Found[I].Folder]));
       CleanupPage.Values[Found[I].Item] := True;
     end;
+end;
+
+procedure InitializeWizard;
+var
+  Daemon: String;
+begin
+  InstallFolder := ExpandConstant('{#AppFolder}');
+  // Services first, so a folder that both a service and a PATH name keeps its
+  // service.
+  Daemon := ServiceProgram('goz');
+  if Daemon <> '' then
+    AddFound(ExtractFileDir(Daemon), True, Daemon);
+  Daemon := ServiceProgram('{#ServiceName}');
+  if Daemon <> '' then
+    AddFound(ExtractFileDir(Daemon), False, Daemon);
+  FindOnPath(HKLM, EnvironmentKey);
+  FindOnPath(HKCU, 'Environment');
+  if GetArrayLength(Found) > 0 then
+    CreateCleanupPage;
+  CreateSeeEveryFilePage;
 end;
 
 // Whether the person chose to remove Found[I]. A silent install removes
@@ -435,13 +534,21 @@ end;
 procedure CurStepChanged(CurStep: TSetupStep);
 var
   Code, I: Integer;
+  Parameters: String;
 begin
   if CurStep <> ssPostInstall then exit;
   AddAppToPath;
   WizardForm.StatusLabel.Caption := CustomMessage('StartService');
   // "install" registers the service, or points an existing one at this
-  // gozlerd.exe, and starts it.
-  if not Exec(ExpandConstant('{app}\gozlerd.exe'), 'install', '', SW_HIDE,
+  // gozlerd.exe, and starts it. With --see-every-file it first stores the
+  // choice made on SeeEveryFilePage, so the first search follows it.
+  Parameters := 'install';
+  if SeeEveryFilePage <> nil then
+    if SeeEveryFilePage.Values[0] then
+      Parameters := Parameters + ' --see-every-file "' + SignedInUser + '"'
+    else
+      Parameters := Parameters + ' --see-every-file none';
+  if not Exec(ExpandConstant('{app}\gozlerd.exe'), Parameters, '', SW_HIDE,
     ewWaitUntilTerminated, Code) or (Code <> 0) then
   begin
     SuppressibleMsgBox(FmtMessage(CustomMessage('ServiceFailed'), [IntToStr(Code)]),

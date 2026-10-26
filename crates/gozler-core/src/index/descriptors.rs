@@ -4,7 +4,9 @@
 //! the entries in it. Volumes have few distinct descriptors, because a folder
 //! usually inherits its parent's permissions, so the entry table keeps a
 //! 4-byte [`DescriptorId`] per folder and this table keeps the bytes. The
-//! index compares descriptors only as bytes; it never parses one.
+//! index compares descriptors only as bytes; it never parses one. Whether a
+//! caller may list a folder is the caller's answer, which a request asks
+//! once per descriptor ([`Listable`]).
 
 use core::num::NonZeroU32;
 
@@ -93,8 +95,12 @@ impl DescriptorTable {
         *self = kept;
     }
 
+    /// Asks `may_list` once for every descriptor of the table.
+    pub(crate) fn listable(&self, may_list: &dyn Fn(&[u8]) -> bool) -> Listable {
+        Listable(self.bytes.iter().map(|bytes| may_list(bytes)).collect())
+    }
+
     /// The bytes of `id`, which this table gave out.
-    #[cfg(test)]
     pub(crate) fn bytes(&self, id: DescriptorId) -> &[u8] {
         &self.bytes[id.slot()]
     }
@@ -111,4 +117,31 @@ impl DescriptorTable {
                 self.by_bytes.capacity(),
             )
     }
+}
+
+/// One request's answers for one volume: whether the caller may list a
+/// folder with each descriptor, made by [`VolumeIndex::listable`]. They hold
+/// for the index instance they were made on, because IDs keep their bytes
+/// there; an ID added after them is hidden.
+///
+/// [`VolumeIndex::listable`]: super::VolumeIndex::listable
+#[derive(Debug)]
+pub struct Listable(Vec<bool>);
+
+impl Listable {
+    /// Whether the caller may list a folder with descriptor `id`.
+    pub(crate) fn lists(&self, id: DescriptorId) -> bool {
+        self.0.get(id.slot()).copied().unwrap_or(false)
+    }
+}
+
+/// What one request sees of one volume's index.
+#[derive(Debug)]
+pub enum SeenBy {
+    /// A user who sees every file: every entry, with folder sizes.
+    Everything,
+    /// A filtered user: the entries in the folders these answers let them
+    /// list, and no folder sizes, because a folder's size would count files
+    /// they cannot see.
+    Caller(Listable),
 }

@@ -21,9 +21,14 @@
 //! leave out is [`SnapshotRow::Gone`] and keeps its place, because a client
 //! holds rows by their place. An index replaced since the search makes the
 //! whole result snapshot gone.
+//!
+//! A result snapshot keeps no answers about who may see what. Each sort and
+//! each read asks its own [`Viewer`] under its first hold of each volume,
+//! because a later request can come from another token of the user, or
+//! after the folders' permissions changed.
 
-use super::{Coverage, IndexedVolume, Reply, ResultRows, RowView, VolumeRows, row_folder};
-use crate::index::VolumeIndex;
+use super::{Coverage, IndexedVolume, Reply, ResultRows, RowView, Viewer, VolumeRows, row_folder};
+use crate::index::{SeenBy, VolumeIndex};
 use crate::query::engine::{IndexChanged, MatchSums, key_found};
 use crate::query::order::SortRecord;
 use crate::query::paths::{FolderCopy, ResultNames};
@@ -164,9 +169,9 @@ impl ResultSnapshot {
     /// volume's rows are keyed under one hold of its read lock, sorted
     /// without it, and become rows under a second hold, as a search's
     /// matches do, so [`ResultRows::into_snapshot`] keeps them as a new
-    /// result snapshot. The rows are this one's: a file made since the
-    /// search is missing, and a file deleted since is left out, because its
-    /// slot has no value to sort by.
+    /// result snapshot. The rows are this one's that `viewer` sees: a file
+    /// made since the search is missing, and a file deleted since is left
+    /// out, because its slot has no value to sort by.
     ///
     /// # Errors
     ///
@@ -180,6 +185,7 @@ impl ResultSnapshot {
         &self,
         volumes: Vec<V>,
         sort: SortSpec,
+        viewer: Viewer<'_>,
     ) -> Result<ResultRows<V>, ResultSnapshotGone> {
         assert_eq!(
             volumes.len(),
@@ -187,36 +193,42 @@ impl ResultSnapshot {
             "a sort gives the volumes of the search"
         );
         let mut answers = Vec::with_capacity(self.answers.len());
+        let mut seen = Vec::with_capacity(self.answers.len());
         for (volume, answer) in volumes.iter().zip(&self.answers) {
-            let matches = {
+            let (matches, seen_by) = {
                 let held = volume.read();
                 let index: &VolumeIndex = &held.index;
                 if index.instance() != answer.instance {
                     return Err(ResultSnapshotGone);
                 }
+                let seen_by = viewer.seen_by(index);
                 let mut records = Vec::with_capacity(answer.rows.len());
                 records.extend(
                     (0..answer.rows.len())
                         .map(|at| answer.rows.get(at))
-                        .filter(|&(idx, frn)| index.holds(idx, frn))
+                        .filter(|&(idx, frn)| index.holds(idx, frn) && index.is_seen(idx, &seen_by))
                         .map(|(idx, _)| SortRecord::new(idx)),
                 );
-                key_found(
+                let matches = key_found(
                     index,
                     &answer.mount_prefix,
                     records,
                     answer.scope,
                     answer.sums,
                     sort,
-                )
+                    &seen_by,
+                );
+                (matches, seen_by)
             };
             // Without a hold, so the journal does not wait for the sort.
             let ordered = matches.order();
-            let rows = ordered.read_rows(&volume.read().index);
+            let rows = ordered.read_rows(&volume.read().index, &seen_by);
             answers.push(rows.map_err(|IndexChanged| ResultSnapshotGone)?);
+            seen.push(seen_by);
         }
         Ok(ResultRows {
             volumes,
+            seen_by: seen,
             reply: Reply::new(answers, 0, None),
             sums: self.sums,
             coverage: Coverage {
@@ -228,17 +240,18 @@ impl ResultSnapshot {
 
     /// Reads the rows from `offset`, at most `limit` of them, from
     /// `volumes`: the volumes [`ResultRows::into_snapshot`] returned, in
-    /// that order.
+    /// that order. A row `viewer` does not see is [`SnapshotRow::Gone`].
     ///
     /// # Panics
     ///
     /// When `volumes` holds another number of volumes.
-    pub fn read<V: IndexedVolume>(
-        &self,
+    pub fn read<'s, V: IndexedVolume>(
+        &'s self,
         volumes: Vec<V>,
         offset: u32,
         limit: Option<u32>,
-    ) -> SnapshotRows<'_, V> {
+        viewer: Viewer<'s>,
+    ) -> SnapshotRows<'s, V> {
         assert_eq!(
             volumes.len(),
             self.answers.len(),
@@ -268,10 +281,12 @@ impl ResultSnapshot {
         SnapshotRows {
             snapshot: self,
             volumes,
+            viewer,
             readers: starts
                 .into_iter()
                 .map(|next| PlaceReader {
                     next,
+                    seen_by: None,
                     folders: None,
                     scope_memo: FxHashMap::default(),
                     scope_gone: false,
@@ -295,6 +310,8 @@ impl ResultSnapshot {
 pub struct SnapshotRows<'s, V> {
     snapshot: &'s ResultSnapshot,
     volumes: Vec<V>,
+    /// Who the rows are read for.
+    viewer: Viewer<'s>,
     readers: Vec<PlaceReader>,
     /// The folders of every row read so far, of every volume.
     names: ResultNames,
@@ -308,6 +325,10 @@ pub struct SnapshotRows<'s, V> {
 struct PlaceReader {
     /// The next row of the volume.
     next: usize,
+    /// What the read sees of the volume; asked at the first page that
+    /// reads it, and kept, because every page checks that the index keeps
+    /// its instance.
+    seen_by: Option<SeenBy>,
     /// The folders of the rows read so far; made with the first page that
     /// reads the volume.
     folders: Option<FolderCopy>,
@@ -370,7 +391,7 @@ impl<V: IndexedVolume> SnapshotRows<'_, V> {
             if index.instance() != answer.instance {
                 return Err(ResultSnapshotGone);
             }
-            reader.begin_page(index, answer, &mut self.names);
+            reader.begin_page(index, answer, self.viewer, &mut self.names);
         }
         while self.next < page_end {
             let v = snapshot.volume_of(self.next);
@@ -378,12 +399,14 @@ impl<V: IndexedVolume> SnapshotRows<'_, V> {
             let reader = &mut self.readers[v];
             let index: &VolumeIndex = held[v].as_deref().expect("the page holds the row's volume");
             let row = answer.rows.get(reader.next);
+            let seen_by = (reader.seen_by.as_ref()).expect("begin_page asked the viewer");
             let folder = if reader.scope_gone {
                 None
             } else {
                 let folders = (reader.folders.as_mut()).expect("begin_page made the copy");
                 row_folder(
                     index,
+                    seen_by,
                     row,
                     answer.scope,
                     &mut reader.scope_memo,
@@ -398,7 +421,7 @@ impl<V: IndexedVolume> SnapshotRows<'_, V> {
                         folder,
                         name: entry.name(),
                         is_dir: entry.is_dir(),
-                        size: entry.size(),
+                        size: entry.size(seen_by),
                         mtime: entry.mtime(),
                         created: entry.created(),
                         attributes: entry.attributes(),
@@ -417,8 +440,16 @@ impl<V: IndexedVolume> SnapshotRows<'_, V> {
 }
 
 impl PlaceReader {
-    /// Starts a page under `index`'s read lock.
-    fn begin_page(&mut self, index: &VolumeIndex, answer: &VolumeRows, names: &mut ResultNames) {
+    /// Starts a page under `index`'s read lock, which holds the instance of
+    /// the search.
+    fn begin_page(
+        &mut self,
+        index: &VolumeIndex,
+        answer: &VolumeRows,
+        viewer: Viewer<'_>,
+        names: &mut ResultNames,
+    ) {
+        self.seen_by.get_or_insert_with(|| viewer.seen_by(index));
         self.scope_memo.clear();
         self.scope_gone = answer
             .scope

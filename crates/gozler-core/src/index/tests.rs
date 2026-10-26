@@ -523,7 +523,9 @@ fn a_renamed_folder_the_index_lacks_is_reported_for_a_walk() {
 /// and never be taken over by another folder. Otherwise a new folder stays
 /// hidden until a rescan, a folder that loses a user's right shows that user
 /// the names added in the same batch, and a folder in a reused or compacted
-/// slot shows its names to every user who could list another one.
+/// slot shows its names to every user who could list another one. NTFS's
+/// metadata folders are never read, or every PC would count their refused
+/// reads in `--status`.
 #[test]
 fn the_descriptor_column_follows_each_folder() {
     use crate::usn::record::USN_REASON_SECURITY_CHANGE;
@@ -577,6 +579,14 @@ fn the_descriptor_column_follows_each_folder() {
     idx.optimize_storage();
     assert_eq!(idx.folder_descriptor(a), Some(&own(a)[..]));
     assert_eq!(idx.folder_descriptor(c), Some(&own(c)[..]));
+
+    let mut idx = new_index();
+    let (extend, metadata) = (frn(11), frn(400));
+    let outcome = idx.apply_batch(&[
+        create(extend, root, "$Extend", true),
+        create(metadata, extend, "$RmMetadata", true),
+    ]);
+    assert!(outcome.needs_descriptor.is_empty(), "{outcome:?}");
 }
 
 /// A user who may change a folder's permissions can change them in a loop,
@@ -718,7 +728,7 @@ fn enrich_builds_hard_link_chain_findable_under_every_name() {
         let mut link_count = 0;
         while cur != crate::types::NIL {
             assert_eq!(
-                idx.entry(cur).size(),
+                idx.entry(cur).size(&SeenBy::Everything),
                 Some(4096),
                 "every hard-link entry must carry the file's size"
             );
@@ -841,7 +851,7 @@ fn a_reconciled_link_gets_the_size_and_date_of_its_file() {
             let e = idx.entry(cur);
             out.push((
                 String::from_utf8_lossy(e.name()).into_owned(),
-                e.size(),
+                e.size(&SeenBy::Everything),
                 e.mtime(),
             ));
             cur = e.next_link();
@@ -1117,6 +1127,10 @@ impl settle::VolumeReads for ModelReads<'_> {
         Ok(self.states[self.now]
             .exists(node)
             .then(|| model_descriptor(node)))
+    }
+
+    fn folder_security(&mut self, _: Frn) -> Result<Option<settle::FolderSecurity>, Self::Error> {
+        unreachable!("the settle and the walk read no folder security")
     }
 
     fn stat(&mut self, _: Frn) -> Result<Option<settle::FileStat>, Self::Error> {

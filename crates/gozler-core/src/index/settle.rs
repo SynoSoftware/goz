@@ -60,6 +60,11 @@ pub trait VolumeReads {
     /// is gone or being deleted.
     fn folder_descriptor(&mut self, frn: Frn) -> Result<Option<Vec<u8>>, Self::Error>;
 
+    /// The security descriptor of folder `frn`, then the USN of its last
+    /// journal record, both from one open; `Ok(None)` when the folder is gone
+    /// or being deleted. Only the NTFS build asks for it.
+    fn folder_security(&mut self, frn: Frn) -> Result<Option<FolderSecurity>, Self::Error>;
+
     /// The size and date of `frn`; `Ok(None)` when there is nothing to
     /// refresh, such as a file that is gone or locked.
     fn stat(&mut self, frn: Frn) -> Result<Option<FileStat>, Self::Error>;
@@ -119,6 +124,14 @@ pub struct FileStat {
     pub size: u64,
     pub mtime: i64,
     pub created: i64,
+}
+
+/// A folder's descriptor and the USN of its last journal record, read in
+/// that order, so a permission change after the descriptor read gives a
+/// later USN.
+pub struct FolderSecurity {
+    pub descriptor: Vec<u8>,
+    pub usn: i64,
 }
 
 /// One hard-link name of a file.
@@ -297,9 +310,11 @@ pub fn settle_batch<R: VolumeReads>(
         .into_iter()
         .filter(|frn| needs_walk.binary_search(frn).is_err())
         .collect();
+    // A new subfolder of a missed folder is read by both steps, so the
+    // failures of both are counted once, after the rules checked the walk.
+    let mut failed = Vec::new();
     if !needs_descriptor.is_empty() {
         let mut descriptors = Vec::with_capacity(needs_descriptor.len());
-        let mut failed = Vec::new();
         for frn in needs_descriptor {
             if cancelled() {
                 return Ok(settled);
@@ -315,7 +330,6 @@ pub fn settle_batch<R: VolumeReads>(
             for (frn, descriptor) in &descriptors {
                 i.set_folder_descriptor(*frn, Some(descriptor));
             }
-            i.note_descriptor_reads_failed(&failed);
         });
     }
 
@@ -335,12 +349,16 @@ pub fn settle_batch<R: VolumeReads>(
             })
             .sum();
         index.write(|i| {
-            let failed: Vec<Frn> = events.iter().filter_map(|event| event.apply(i)).collect();
+            failed.extend(events.iter().filter_map(|event| event.apply(i)));
             i.recheck_listed(&needs_walk);
-            i.note_descriptor_reads_failed(&failed);
         });
         settled.missed_folders = needs_walk.len();
         settled.missed_entries = entries;
+    }
+    if !failed.is_empty() {
+        failed.sort_unstable();
+        failed.dedup();
+        index.write(|i| i.note_descriptor_reads_failed(&failed));
     }
 
     // A file created or changed after the build has no size or date in its
@@ -425,8 +443,8 @@ pub fn settle_batch<R: VolumeReads>(
 #[cfg(test)]
 mod tests {
     use super::{
-        Batch, FileLink, FileStat, Listed, VolumeReads, Walk, WalkFailed, settle_batch,
-        walk_folders,
+        Batch, FileLink, FileStat, FolderSecurity, Listed, VolumeReads, Walk, WalkFailed,
+        settle_batch, walk_folders,
     };
     use crate::index::{NTFS_ROOT_FRN, VolumeIndex};
     use crate::layout::{LayoutFile, LayoutName};
@@ -546,6 +564,10 @@ mod tests {
                 .unwrap_or_else(|| Ok(Some(descriptor(frn))))
         }
 
+        fn folder_security(&mut self, _: Frn) -> Result<Option<FolderSecurity>, Self::Error> {
+            unreachable!("the settle and the walk read no folder security")
+        }
+
         fn stat(&mut self, _: Frn) -> Result<Option<FileStat>, Self::Error> {
             Ok(None)
         }
@@ -653,13 +675,21 @@ mod tests {
     /// good, because the journal records no change to them.
     /// A folder that moves out of a folder the Include rules left out is
     /// listed, and the walk's names that the rules leave out stay out. A
-    /// descriptor read that fails is counted once, and only for a folder the
+    /// descriptor read that fails is counted once, also for a new subfolder
+    /// that the settle and the walk both read, and only for a folder the
     /// index keeps, so `--status` names no hidden folder twice and none that
     /// does not exist.
     #[test]
     fn a_folder_moved_out_of_a_left_out_folder_is_listed_by_the_rules() {
-        let (windows, users, old, file, modules, js) =
-            (id(100), id(101), id(102), id(200), id(103), id(201));
+        let (windows, users, old, file, modules, js, new) = (
+            id(100),
+            id(101),
+            id(102),
+            id(200),
+            id(103),
+            id(201),
+            id(104),
+        );
         let index = index_of(&[
             (windows, ROOT, "Windows", true),
             (users, ROOT, "Users", true),
@@ -690,24 +720,30 @@ mod tests {
             Ok(vec![
                 listed(file, old, "a.txt", false),
                 listed(modules, old, "node_modules", true),
+                listed(new, old, "New", true),
             ]),
         );
         reads
             .listings
             .insert(modules, Ok(vec![listed(js, modules, "m.js", false)]));
-        reads.descriptors.insert(old, Err("access denied"));
-        reads.descriptors.insert(modules, Err("access denied"));
-        let moved = record(old, users, "Old", true, USN_REASON_RENAME_NEW_NAME);
+        reads.listings.insert(new, Ok(vec![]));
+        for folder in [old, modules, new] {
+            reads.descriptors.insert(folder, Err("access denied"));
+        }
+        let records = [
+            record(old, users, "Old", true, USN_REASON_RENAME_NEW_NAME),
+            record(new, old, "New", true, USN_REASON_FILE_CREATE),
+        ];
 
-        settle(&index, &mut reads, &[moved], false).expect("settles");
+        settle(&index, &mut reads, &records, false).expect("settles");
 
         assert_eq!(
             paths(&index),
-            set(&["Users", r"Users\Old", r"Users\Old\a.txt"])
+            set(&["Users", r"Users\Old", r"Users\Old\a.txt", r"Users\Old\New"])
         );
         let stats = index.borrow().stats().clone();
         assert_eq!(stats.placeholders_created, 0);
-        assert_eq!(stats.descriptor_reads_failed, 1, "Old alone");
+        assert_eq!(stats.descriptor_reads_failed, 2, "Old and New, once each");
     }
 
     #[test]

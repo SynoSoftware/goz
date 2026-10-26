@@ -115,7 +115,7 @@ fn search_counts(
         Selection::Files(_) | Selection::Folder { .. } => {
             let files = search.list.selection().files().unwrap_or_default();
             let size = (search.list.chosen_bytes())
-                .map(|bytes| text::bytes(strings, numbers, bytes))
+                .map(|size| counted_size(strings, numbers, size.known, size.unknown))
                 .unwrap_or_default();
             joined(strings, selected(files.len() as u64), size)
         }
@@ -159,9 +159,8 @@ pub(crate) fn panel_list_message(model: &Model, side: Side) -> Option<String> {
 }
 
 /// The status line's counts: "14 items · 5.2 GB" or "3 of 14 selected ·
-/// 4.2 GB". A panel's files always have their size, so it counts the
-/// folders whose size is unknown: "(3.4 GB, 12 unknown)", or "(12
-/// unknown)" when no size is known.
+/// 4.2 GB". A panel's files always have their size, so only folders are
+/// counted as unknown.
 fn panel_counts(strings: &Strings, numbers: &dyn Numbers, counts: Counts) -> String {
     let count = match counts.selected {
         None => strings.count("panel.items", counts.items, numbers, &[]),
@@ -173,16 +172,32 @@ fn panel_counts(strings: &Strings, numbers: &dyn Numbers, counts: Counts) -> Str
         ),
     };
     let counted = counts.selected.unwrap_or(counts.items);
-    let size = match counts.size {
-        None => String::new(),
-        Some(size) if size.unknown == 0 => text::bytes(strings, numbers, size.bytes),
-        Some(size) => {
+    let size = (counts.size)
+        .map(|size| {
             let known = (size.unknown < counted).then_some(size.bytes);
-            let size = size_with_unknown(strings, numbers, known, size.unknown);
+            counted_size(strings, numbers, known, size.unknown)
+        })
+        .unwrap_or_default();
+    joined(strings, count, size)
+}
+
+/// The size of a panel's counted entries, `known` the sum of the known
+/// sizes and `unknown` how many have none: "4.2 GB", "(3.4 GB, 12
+/// unknown)", or "(12 unknown)" when no size is known.
+fn counted_size(
+    strings: &Strings,
+    numbers: &dyn Numbers,
+    known: Option<u64>,
+    unknown: u64,
+) -> String {
+    match known {
+        Some(bytes) if unknown == 0 => text::bytes(strings, numbers, bytes),
+        None if unknown == 0 => String::new(),
+        _ => {
+            let size = size_with_unknown(strings, numbers, known, unknown);
             strings.format("panel.size_with_unknown", &[&size])
         }
-    };
-    joined(strings, count, size)
+    }
 }
 
 /// A cell of `panel`'s `row` (DESIGN.md: A panel), with sizes in the format

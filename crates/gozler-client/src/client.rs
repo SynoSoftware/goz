@@ -17,12 +17,15 @@ use gozler_winfs::ServiceState;
 
 use crate::{CancelToken, ClientError, NotRunning};
 
-/// Opening the pipe with an anonymous impersonation level (`SECURITY_ANONYMOUS`,
-/// value 0, so only the SQOS-present bit is set) prevents a rogue server that
-/// squatted the name from impersonating this client's token. It does NOT
-/// authenticate the server: see [`Client::connect`], which verifies the pipe's
-/// owner is the elevated daemon before any request is sent.
+/// The pipe is opened at the identification level, so gozlerd can tell which
+/// user is searching, and so which entries it may show, but neither gozlerd
+/// nor a rogue server that squatted the name can act as this client. gozlerd
+/// refuses the searches of a client that opens the pipe anonymously. The
+/// level does NOT authenticate the server: see [`Client::connect`], which
+/// verifies the pipe's owner is the elevated daemon before any request is
+/// sent.
 const SECURITY_SQOS_PRESENT: u32 = 0x0010_0000;
+const SECURITY_IDENTIFICATION: u32 = 0x0001_0000;
 
 /// How long the daemon may stay silent while a reply is due before the client
 /// gives up, so a wedged-but-alive daemon cannot hang it forever. It measures
@@ -103,7 +106,7 @@ impl Client {
             match std::fs::OpenOptions::new()
                 .read(true)
                 .write(true)
-                .custom_flags(SECURITY_SQOS_PRESENT)
+                .custom_flags(SECURITY_SQOS_PRESENT | SECURITY_IDENTIFICATION)
                 .open(pipe_name)
             {
                 Ok(pipe) => break pipe,

@@ -27,5 +27,5 @@ pub use paths::{FolderId, ResultNames};
 pub use rows::{
     HeldVolume, IndexedVolume, NotIndexed, PathRow, QueryOutcome, ResultRows, ResultSnapshot,
     ResultSnapshotGone, RowView, RowsSpec, SearchTotals, SnapshotRow, SnapshotRows, TooManyVolumes,
-    TotalsError, run_query, search_totals,
+    TotalsError, Viewer, run_query, search_totals,
 };
