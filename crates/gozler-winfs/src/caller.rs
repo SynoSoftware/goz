@@ -242,7 +242,8 @@ impl ClientToken {
     /// for `FILE_LIST_DIRECTORY` with the file generic mapping. The check
     /// reads every token input itself: the groups, the restricting SIDs, the
     /// integrity level and the security attributes that conditional entries
-    /// test.
+    /// test. It checks the folder's own descriptor only, so on a domain that
+    /// uses central access policies its answer can differ from Explorer's.
     ///
     /// # Errors
     ///
@@ -287,6 +288,9 @@ impl ClientToken {
 
 /// The token of the client of the pipe `pipe`, a server end, for the last
 /// message read from it. `Ok(None)` when the client is anonymous.
+///
+/// Call it for each request, not once for each connection, because Windows
+/// gives the token of the last message read.
 ///
 /// The function impersonates the client, opens the thread's token and
 /// reverts, without yielding, then keeps an identification-level copy, so a

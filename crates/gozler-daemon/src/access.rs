@@ -5,6 +5,12 @@
 //! The decision is made again for each frame, because the pipe gives the
 //! token of the client that sent the last message, and because a change to
 //! the stored list must apply at the next search without a restart.
+//!
+//! Only SYSTEM and the stored list make a request see every entry. Being an
+//! administrator does not, and a restricted token never does (DESIGN.md:
+//! Visibility). Any failure to learn who is asking or to read the list errs
+//! towards showing less: the request is refused, or filtered by its own
+//! token.
 
 use std::os::windows::io::BorrowedHandle;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -50,7 +56,8 @@ impl Refusal {
 /// because clippy's `type_complexity` refuses the boxed form inline.
 pub(crate) type MayList = dyn Fn(&[u8]) -> bool + Send;
 
-/// What an identified caller sees.
+/// What an identified caller sees. `gozler-core` takes it as a [`Viewer`]
+/// holding a closure, not this type, because the core holds no token.
 pub(crate) enum Visibility {
     /// Every entry, with folder sizes.
     Everything,

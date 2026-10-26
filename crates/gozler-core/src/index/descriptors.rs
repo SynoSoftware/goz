@@ -7,6 +7,20 @@
 //! index compares descriptors only as bytes; it never parses one. Whether a
 //! caller may list a folder is the caller's answer, which a request asks
 //! once per descriptor ([`Listable`]).
+//!
+//! Within one index instance the table only gains descriptors, so an ID keeps
+//! its bytes and a request's answers stay valid to its end; an ID past their
+//! end is new and hidden. [`DescriptorTable::collect`] is the one exception.
+//! It drops the descriptors no folder uses, because a user who may change a
+//! folder's permissions could otherwise grow the table without bound by
+//! changing them in a loop, and so the index takes a new instance. The cost
+//! is that running searches and result snapshots on the volume start again;
+//! a descriptor generation beside the instance would avoid that, but every
+//! path that checks the instance would then check it too.
+//!
+//! A volume with explicit permissions on each of millions of folders would
+//! make the table large, and every filtered request slow; collection cannot
+//! help there. No such volume has been measured.
 
 use core::num::NonZeroU32;
 

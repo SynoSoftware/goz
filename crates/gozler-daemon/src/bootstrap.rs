@@ -619,7 +619,9 @@ struct FolderSecurity {
     usn: i64,
 }
 
-/// The reads [`read_build_descriptors`] makes of a volume.
+/// The reads [`read_build_descriptors`] makes of a volume. `folder_security`
+/// stays here, not in [`VolumeReads`], so that only the NTFS build depends on
+/// `FSCTL_READ_FILE_USN_DATA`, which no test runs on ReFS.
 trait DescriptorReads {
     /// The security descriptor of folder `frn`, then the USN of its last
     /// journal record, both from one open; `Ok(None)` when the folder is gone
@@ -661,8 +663,13 @@ impl DescriptorReads for Disk<'_> {
 /// whose read fails stays without a descriptor.
 ///
 /// NTFS gives one `SecurityId` to every file with the same descriptor, so
-/// one read serves all the folders of an ID: when the first folder still has
-/// the pass's USN, its descriptor has not changed since the pass. Otherwise,
+/// one read serves all the folders of an ID. A build then reads one folder
+/// per distinct ID, not every folder (DESIGN.md: Visibility has the measured
+/// gain). When the first folder still has the pass's USN, its descriptor has
+/// not changed since the pass; the descriptor is read before the USN, so a
+/// change before the USN read changes the USN. Without the check, one folder
+/// changed during the build would give its new permissions to every folder
+/// that shared its old `SecurityId`, until the next rescan. Otherwise,
 /// and for `SecurityId` 0, which a folder with its own descriptor has, each
 /// folder is read on its own. A change after a read is in the journal, whose
 /// cursor was taken before the build, so its replay reads the folder again.
