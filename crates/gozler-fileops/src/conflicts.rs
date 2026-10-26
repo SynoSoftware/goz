@@ -100,7 +100,8 @@ pub(crate) enum Clash {
     SameName,
     /// A folder into a folder of its name: they merge, as in File Explorer.
     Merge,
-    /// Continue: the file is already at the destination, at `name`.
+    /// The file is already at the destination, at `name`: found by
+    /// Continue, or unchanged under an update policy.
     Done {
         name: Vec<u16>,
     },
@@ -193,7 +194,15 @@ pub(crate) fn classify(names: &Names, name: &[u16], wanted: Wanted, rule: Rule) 
                         found.last_write,
                     )
                 {
-                    Clash::Skipped
+                    // An unchanged file is an update's success, not a
+                    // skip: a backup that is already current completes.
+                    if (found.size, found.last_write) == (wanted.size, wanted.last_write) {
+                        Clash::Done {
+                            name: name.to_vec(),
+                        }
+                    } else {
+                        Clash::Skipped
+                    }
                 } else {
                     Clash::Conflict
                 }
@@ -405,7 +414,7 @@ mod tests {
         );
         assert_eq!(
             decide(&mut names, &utf16("same.txt"), FILE, rule),
-            Decision::Skip
+            Decision::Done
         );
         assert_eq!(
             decide(&mut names, &utf16("size.txt"), FILE, rule),
@@ -430,6 +439,7 @@ mod tests {
             run: Run::First { started: None },
         };
         let mut names = Names::default();
+        names.insert(&utf16("same.txt"), found(Kind::File, 10, FILE.last_write));
         names.insert(&utf16("equal.txt"), found(Kind::File, 99, FILE.last_write));
         names.insert(
             &utf16("newer.txt"),
@@ -438,6 +448,10 @@ mod tests {
         names.insert(
             &utf16("older.txt"),
             found(Kind::File, 10, FILE.last_write - 1),
+        );
+        assert_eq!(
+            decide(&mut names, &utf16("same.txt"), FILE, rule),
+            Decision::Done
         );
         assert_eq!(
             decide(&mut names, &utf16("equal.txt"), FILE, rule),

@@ -674,7 +674,7 @@ impl Walk<'_> {
             Decision::Resume { name } => (name, Write::Resume),
             Decision::Done if self.copying.moving => {
                 // Equal size and time are a guess, and no hash checks it, so
-                // a continued move never deletes a source on it.
+                // a move never deletes a source on it.
                 self.list_entry(path, Reason::SourceKept, entry.size, folder);
                 return None;
             }

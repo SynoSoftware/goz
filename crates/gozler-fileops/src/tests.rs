@@ -1119,7 +1119,7 @@ fn a_conflict_after_prepare_uses_the_accepted_policy() {
 }
 
 #[test]
-fn policy_skips_keep_move_sources_and_repeated_copies_do_not_duplicate() {
+fn unchanged_files_complete_a_repeated_copy_and_keep_move_sources() {
     let scratch = Scratch::new("policy");
     let source = scratch.write(r"src\a.txt", b"source");
     let destination = scratch.path("out");
@@ -1139,7 +1139,7 @@ fn policy_skips_keep_move_sources_and_repeated_copies_do_not_duplicate() {
         .unwrap();
     set_modified(&source, modified);
     let repeated = watched.run(request(), None);
-    assert_eq!(repeated.listed, [skipped(&source)]);
+    assert!(repeated.succeeded && repeated.listed.is_empty());
     assert_eq!(fs::read(destination.join("a.txt")).unwrap(), b"source");
     assert!(!destination.join("a (2).txt").exists());
     let moved = watched.run(
@@ -1150,7 +1150,11 @@ fn policy_skips_keep_move_sources_and_repeated_copies_do_not_duplicate() {
         },
         None,
     );
-    assert_eq!(moved.listed, [skipped(&source)]);
+    let kept = Listed {
+        path: source.clone(),
+        reason: Reason::SourceKept,
+    };
+    assert_eq!(moved.listed, [kept]);
     assert_eq!(fs::read(source).unwrap(), b"edited");
 }
 

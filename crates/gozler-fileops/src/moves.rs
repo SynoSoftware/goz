@@ -169,7 +169,7 @@ impl Run<'_> {
             Decision::Resume { .. } => unreachable!("only a copied entry is unfinished"),
             Decision::Done => {
                 // Equal size and time are a guess, and no hash checks it, so
-                // a continued move never deletes a source on it.
+                // a move never deletes a source on it.
                 self.list_entry(moved.path, Reason::SourceKept);
                 false
             }
