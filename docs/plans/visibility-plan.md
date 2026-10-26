@@ -101,9 +101,10 @@ Each stage is one or more commits, each of which passes `build.ps1`
   starts at its first child, and `in_scope` is false for the scope root.
 - **The client hides who it is.** `gozler-client/src/client.rs` opens the
   pipe with `SECURITY_SQOS_PRESENT` and the anonymous level. The window
-  opens one connection for each request (`app/requests.rs`).
-- **The daemon serves five requests**: `Hello`, `Status`, `Search`,
-  `SettingsSaved` and `CountIncluded`. `PROTO_VERSION` is 9 and equals
+  opens one connection for each request (`app/work/requests.rs`).
+- **The daemon serves seven requests**: `Hello`, `Status`, `Search`,
+  `SettingsSaved`, `CountIncluded`, `ResultSnapshotRows` and
+  `SortResultSnapshot`. `PROTO_VERSION` is 14 and equals
   `OLDEST_PROTO_VERSION`. `handle_connection` reads a frame, then runs
   `serve(volumes, include, frame, emit)` with `spawn_blocking`.
   `CountIncluded` answers any caller through `count_included` and
@@ -440,8 +441,10 @@ this plan by an owner decision, and their reads do not filter rows yet. This
 plan's stage that filters a page also filters each read of a result
 snapshot: the read is a request, so it builds its own answers from the
 caller's token, tests each row with `VolumeIndex::is_seen` as a page does,
-and reports a row the caller cannot see as gone. Main's protocol is 12, so
-this plan's protocol change raises it from 12, not from 9.
+and reports a row the caller cannot see as gone. A sort of a result
+snapshot (`ResultSnapshot::sort_again`) takes the same input as a search,
+because a size sort reads folder sizes: it builds the sorting caller's
+`Listable` under its first hold, so the new order shows nothing hidden.
 
 `gozler-core/src/index/descriptors.rs`:
 
@@ -710,7 +713,7 @@ Spec `V17`. Two parts, each with one job.
   `VolumeIndex::note_descriptor_reads_failed(n)`.
 - `VolumeStatus` gains `descriptor_reads_failed: u64`, and `VolumeMemory`
   gains `descriptors: MemPair`, the descriptor table's memory. Neither has
-  `#[serde(default)]`, and `PROTO_VERSION` rises from 9 to 10 (spec `V12`).
+  `#[serde(default)]`, and `PROTO_VERSION` rises by one, from 14 to 15 (spec `V12`).
   `VolumeMemory::total` and `IndexMemory::total` add the new component, so
   every reader of the total, including the window's Drives and service page,
   follows. `build_status` in `gozler-daemon/src/server.rs` fills both. The
@@ -803,7 +806,7 @@ and each design point that an answer changes is changed here.
 
 | Stage | Builds | Size | Starts | Done when |
 |---|---|---|---|---|
-| 1a | "Descriptor IDs", "The journal", `read_folder_descriptor` and `Folder::descriptor`, the ReFS build's reads, "Status and memory", `PROTO_VERSION` 10 | about 500 lines | at once | `build.ps1` passes with T2 and T4 |
+| 1a | "Descriptor IDs", "The journal", `read_folder_descriptor` and `Folder::descriptor`, the ReFS build's reads, "Status and memory", `PROTO_VERSION` 15 | about 500 lines | at once | `build.ps1` passes with T2 and T4 |
 | 1b | "The NTFS build", "NTFS metadata folders", and with the sharing `read_folder_security` and `record_usn` | about 350 lines, or 150 without the sharing | after stage 0 item 1, scheduled last in stage 1 | `build.ps1` passes with T1, T3 and T9 when the sharing stays, and with T4's metadata case when the predicate stays |
 | 2a | "The caller" without the account names, "Who sees what", "The filter", "Folder sizes" with the window's empty Size cell, "Logging", the client's identification level, the stored list's reader | about 850 lines | at once | `build.ps1` passes with T5 to T8, T11 and W1 to W3; agent check A4 |
 | 2b | `gozlerd see-every-file`, `install --see-every-file`, the account names, the writer, the setup's page, the help note | about 300 lines | at once | `build.ps1` passes with T10 and the help tests |

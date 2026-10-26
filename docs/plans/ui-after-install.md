@@ -212,7 +212,7 @@ implementation did not mark these visual or environment checks passed.
 These need a second disk, a share, a USB drive, OneDrive or an elevated run.
 `crates/gozler-fileops/examples/measure.rs` runs the measurements, elevated,
 and its rows go into `docs/BENCHMARKS.md`. The decisions named here are those
-of [the engine spec](fast-copy-delete-spec.md).
+of [DESIGN.md](../DESIGN.md), "The copy, move and delete engine".
 
 - The measurement's copy cases between two disks: on a hard disk with two
   partitions, where the ring's hard-disk profile should help most, and to a

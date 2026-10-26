@@ -37,8 +37,8 @@
 //! Windows only, and every Win32 call goes through `gozler-winfs`, so this
 //! crate holds no `unsafe`.
 //!
-//! The design and its evidence are in `docs/plans/fast-copy-delete-spec.md`
-//! and `docs/research/fast-copy-delete.md`.
+//! The design and its evidence are in `docs/DESIGN.md`, "The copy, move and delete
+//! engine", and `docs/research/fast-copy-delete.md`.
 
 #![forbid(unsafe_code)]
 // The decisions are called only by the Windows disk work.

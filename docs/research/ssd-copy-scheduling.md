@@ -52,7 +52,7 @@ These are working-tree findings, not claims inferred from drive specifications:
 | Scope | Current behavior | Authority |
 | --- | --- | --- |
 | Admission | A transfer groups roots for one source/destination volume pair. Every distinct physical device is granted together. Default capacity is one transfer per device; Settings permits 1–3. | [Device admission](../DESIGN.md#device-admission) |
-| Inside an SSD transfer | Automatic selects 16 small-file workers and a separate large-file lane, with a 32 MiB size boundary. Same-physical-SSD and separate-SSD copies both get the lane. | [CopyPlan::new](../../crates/gozler-fileops/src/volumes.rs), [Automatic preset](../plans/fast-copy-delete-spec.md#speed-settings) |
+| Inside an SSD transfer | Automatic selects 16 small-file workers and a separate large-file lane, with a 32 MiB size boundary. Same-physical-SSD and separate-SSD copies both get the lane. | [CopyPlan::new](../../crates/gozler-fileops/src/volumes.rs), [Automatic preset](../DESIGN.md#speed-settings) |
 | Dispatch | The copy walk starts the small workers plus the large lane. A folder's known direct large files enter the separate lane before its subfolders are initialized; small files enter bounded batches on the workers. Plans without a separate lane retain their ordering. | [copy.rs](../../crates/gozler-fileops/src/copy.rs), [pool.rs](../../crates/gozler-fileops/src/pool.rs) |
 | Multiple transfers | Each admitted transfer has its own plan and worker pool. A limit of three can therefore permit up to 48 small workers plus three large lanes on an SSD with Automatic settings. This is a capacity ceiling, not necessarily the active count. | The admission rule and worker creation above |
 

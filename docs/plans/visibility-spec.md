@@ -271,10 +271,10 @@ the pipe anonymously gets this refusal. This breaks third-party programs
 that open the pipe anonymously, until they change how they open it.
 Checked by: plan, tests T7 and W2.
 
-**V12. The protocol version rises to 10.** No request, reply or results
+**V12. The protocol version rises to 15.** No request, reply or results
 page gains or loses a field for filtering. `VolumeStatus` gains the count of
 failed permission reads, and `VolumeMemory` gains the memory that
-permissions use, so `PROTO_VERSION` rises from 9 to 10 and keeps no old
+permissions use, so `PROTO_VERSION` rises from 14 to 15 and keeps no old
 form: gozlerd serves only its own protocol version (`AGENTS.md`, "The wire
 protocol"). A client and a gozlerd from different builds refuse each other
 at `Hello`, as for any version change; `gozler` and `gozlerd` install

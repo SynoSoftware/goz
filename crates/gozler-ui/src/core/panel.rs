@@ -14,7 +14,7 @@
 //!   selection). A change that moves rows takes the list's [`Place`] by row
 //!   and gives it back by row, kept on the same names, so the person never
 //!   loses their place.
-//! - **Taken entries** (fast-copy-delete-spec.md: Taken entries): a panel
+//! - **Taken entries** (DESIGN.md: Taken entries): a panel
 //!   keeps an ended delete or move whose end makes it read its folder
 //!   again, until the first complete listing that it started after the end,
 //!   because the change notifications and the end arrive in no fixed order.

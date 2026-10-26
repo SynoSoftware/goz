@@ -1,8 +1,8 @@
 # Fast copy, move and delete on Windows
 
-The evidence behind [the engine spec](../plans/fast-copy-delete-spec.md):
+The evidence behind [the engine's design](../DESIGN.md#the-copy-move-and-delete-engine):
 which tools and Windows APIs were read, what each one does, what each one
-measured, and how the work got here. The spec holds the decisions; this file
+measured, and how the work got here. DESIGN.md holds the decisions; this file
 holds why a reviewer can trust them.
 
 **How to read this file.** Each fact is marked:

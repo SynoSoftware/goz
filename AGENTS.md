@@ -133,6 +133,12 @@ responsibly resolve yourself.
 
 ## Tests
 
+**Ban on redundant checks:** do not add tests or captures that merely reconfirm
+behavior already clear from the code or guaranteed by the compiler or platform.
+Any additional check must answer a specific unresolved question, stated before
+running it, unless the owner explicitly requests that check. Reuse existing
+evidence when it already answers the question.
+
 Every test adds compile time to each `build.ps1` run and is code the next
 change must keep passing, so a test earns its place by the failure it watches.
 Test lasting behavior and invariants once the implementation settles. Prune

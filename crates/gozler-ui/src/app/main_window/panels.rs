@@ -2381,7 +2381,7 @@ impl Panels {
     }
 
     /// Gives every list the taken entries `taken` and shows the panels
-    /// after them (fast-copy-delete-spec.md: Taken entries). Returns what
+    /// after them (DESIGN.md: Taken entries). Returns what
     /// Search's list shows.
     pub(super) fn show_panels_taken(
         &self,

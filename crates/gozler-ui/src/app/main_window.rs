@@ -3929,7 +3929,7 @@ impl MainWindow {
 
     /// Shows the rows that deletes and moves have taken, `taken`, struck
     /// through in Search's list and blank in a search panel, and takes them
-    /// out of the selections (fast-copy-delete-spec.md: Taken entries).
+    /// out of the selections (DESIGN.md: Taken entries).
     fn show_taken(&self, hwnd: Hwnd, taken: Arc<Taken>) {
         let replaced = Arc::clone(self.model.borrow().panels().taken());
         let shown = self.controls().panels.show_panels_taken(self, taken);

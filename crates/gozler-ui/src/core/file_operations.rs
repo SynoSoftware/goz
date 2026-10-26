@@ -1505,8 +1505,8 @@ fn row(
         State::Interrupted => {
             let interrupted = strings.text("file_operations.interrupted").to_owned();
             // A copy and a move leave unfinished files that Continue
-            // finishes (fast-copy-delete-spec.md: What a stopped operation
-            // leaves).
+            // finishes (DESIGN.md: What a stopped operation
+            // leaves on disk).
             let detail = match &*operation.request {
                 Request::Copy { .. } | Request::Move { .. } => joined_parts(
                     strings,

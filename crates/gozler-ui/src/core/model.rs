@@ -3123,7 +3123,7 @@ pub(crate) mod tests {
     /// The search list keeps an ended delete only when, at its end, the
     /// delete takes one of the list's fetched rows, and then until its next
     /// search; a delete elsewhere would otherwise stay in the queue until
-    /// the next search (fast-copy-delete-spec.md: Taken entries). The
+    /// the next search (DESIGN.md: Taken entries). The
     /// snapshot of the taken entries may be older than the end, so it
     /// still has the delete as running, and a later end must not let go of
     /// the delete while the queue still holds it, or its rows show again.
