@@ -645,6 +645,7 @@
   "settings_include": {
     "preview": "Indexadas ahora: {0} entradas. Después de Aceptar: unas {1}{2}.",
     "preview_added": ", más las carpetas que volviste a marcar, cuando se indexen",
+    "preview_not_counted": "Indexadas ahora: {0} entradas. Solo los usuarios que ven todos los archivos ven el total después de Aceptar.",
     "folders": "Carpetas",
     "folders_label": "&Carpetas indexadas:",
     "folder_column": "Carpeta",
@@ -667,6 +668,11 @@
     "add": "A&gregar…",
     "remove": "&Quitar",
     "empty": "Cada usuario ve solo los archivos de las carpetas que puede abrir.",
+    "seen_every_file": "Ves todos los archivos, con los tamaños de las carpetas.",
+    "seen_filtered": "Ves solo los archivos de las carpetas que puedes abrir, sin los tamaños de las carpetas.",
+    "seen_unidentified": "El servicio no puede saber quién eres, así que no ejecuta tus búsquedas.",
+    "note": "Los usuarios que no están en la lista ven solo los archivos de las carpetas que pueden abrir, sin los tamaños de las carpetas. Pertenecer al grupo Administradores solo cuenta cuando Gozler se ejecuta como administrador; para ver todos los archivos, agrega tu propia cuenta.",
+    "unknown_account": "Cuenta desconocida ({0})",
     "unreadable": "No se pudo leer la lista. {0}",
     "picker_failed": "No se pudo abrir Seleccionar Usuarios o Grupos. {0}"
   },

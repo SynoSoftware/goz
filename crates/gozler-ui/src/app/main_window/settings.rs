@@ -1,5 +1,5 @@
 use super::{
-    Awaited, Cell, Choices, DaemonFailure, DialogId, Elevated, Hwnd, Id, IncludeDrive,
+    AfterOk, Awaited, Cell, Choices, DaemonFailure, DialogId, Elevated, Hwnd, Id, IncludeDrive,
     IndexCaptions, IndexSettings, Instant, JobCaption, MainWindow, NotSaved, PreparedShortcuts,
     RefCell, SettingsDialog, SettingsPage, SettingsValues, ShellTarget, Side, StatusWidest,
     Strings, SummaryRow, Surface, Waiting, captions, connected_drives, connected_volumes,
@@ -7,7 +7,7 @@ use super::{
 };
 use crate::app::work::RegistryRead;
 use crate::core::include::summary_drives_changed;
-use gozler_core::proto::DaemonStatus;
+use gozler_core::proto::{CallerSees, DaemonStatus};
 
 #[derive(Clone, Copy)]
 pub(super) struct OpenSettings {
@@ -19,9 +19,11 @@ pub(super) struct OpenSettings {
 pub(super) enum ElevatedJob {
     Idle,
     /// Runs; once it ran, the window sends `SettingsSaved` when
-    /// `tells_service`.
+    /// `tells_service`, and shows its lists again when
+    /// `changes_visibility`.
     Running {
         tells_service: bool,
+        changes_visibility: bool,
     },
     Answered(Result<(), NotSaved>),
 }
@@ -144,22 +146,38 @@ impl SettingsBridge {
         self.include_preview_dirty.replace(false)
     }
 
-    pub(in crate::app) fn observe_include_status(
+    /// `before` is the model's service state before `after` arrived.
+    pub(in crate::app) fn observe_status(
         &self,
-        before: Option<&DaemonStatus>,
+        (before, failure): (Option<&DaemonStatus>, Option<&DaemonFailure>),
         after: &DaemonStatus,
     ) {
         if self.open.get().is_none() {
             return;
         }
         let drives_changed = summary_drives_changed(before, after);
+        // The Include preview counts only for a person who sees every file.
+        // A status that came with a failure was not shown as current.
+        let sees_changed = failure.is_some()
+            || before.is_none_or(|before| before.caller_sees != after.caller_sees);
         if drives_changed
+            || sees_changed
             || before.is_none_or(|before| indexed_entries(before) != indexed_entries(after))
         {
             self.include_preview_changed();
         }
         if drives_changed {
             self.include_summary_changed();
+        }
+    }
+
+    /// What the person sees in searches, as the service last said; `None`
+    /// while it has not answered, or its last answer is out of date because
+    /// a later request failed.
+    pub(in crate::app) fn caller_sees(&self, window: &MainWindow) -> Option<CallerSees> {
+        match window.model.borrow().service() {
+            (Some(status), None) => Some(status.caller_sees),
+            _ => None,
         }
     }
 
@@ -347,7 +365,9 @@ impl SettingsBridge {
     ) {
         window.model.borrow_mut().show_settings_page(page);
         window.update_poll(hwnd);
-        if page == Some(SettingsPage::Index) {
+        // The Visibility page says what the person sees, which the status
+        // tells.
+        if matches!(page, Some(SettingsPage::Index | SettingsPage::Visibility)) {
             window.ask_status();
         }
     }
@@ -469,7 +489,7 @@ impl SettingsBridge {
         window: &MainWindow,
         strings: &Strings,
         now: u64,
-        after: Option<u64>,
+        after: AfterOk,
         adds: bool,
     ) -> String {
         preview(strings, &*window.numbers.borrow(), now, after, adds)
@@ -510,32 +530,39 @@ impl SettingsBridge {
         job: Elevated,
     ) {
         let tells_service = job.tells_service();
+        let changes_visibility = job.changes_visibility();
         let mut work = window.created().work.borrow_mut();
         if work.elevated.start(job) {
-            self.elevated_job
-                .replace(ElevatedJob::Running { tells_service });
+            self.elevated_job.replace(ElevatedJob::Running {
+                tells_service,
+                changes_visibility,
+            });
         }
         let retired = work.elevated.take_retired();
         work.retire(retired);
     }
 
     /// Takes the job's answer once it arrived: tells the service, which
-    /// applies saved settings and rebuilds when asked, and the Settings
-    /// dialog.
-    pub(in crate::app) fn finish_elevated_job(&self, window: &MainWindow) {
+    /// applies saved settings and rebuilds when asked, the main window,
+    /// whose lists show what the person may see, and the Settings dialog.
+    pub(in crate::app) fn finish_elevated_job(&self, window: &MainWindow, hwnd: Hwnd) {
         let answer = window.created().work.borrow_mut().elevated.take();
         let Some(answer) = answer else {
             return;
         };
-        let tells_service = matches!(
-            *self.elevated_job.borrow(),
+        let (tells_service, changes_visibility) = match *self.elevated_job.borrow() {
             ElevatedJob::Running {
-                tells_service: true
-            }
-        );
+                tells_service,
+                changes_visibility,
+            } => (tells_service, changes_visibility),
+            ElevatedJob::Idle | ElevatedJob::Answered(_) => (false, false),
+        };
         if answer.is_ok() && tells_service {
             let fetch = window.model.borrow_mut().settings_saved();
             window.start(fetch);
+        }
+        if answer.is_ok() && changes_visibility {
+            window.show_again(hwnd);
         }
         self.elevated_job.replace(ElevatedJob::Answered(answer));
         self.post_settings_reply();
@@ -553,15 +580,19 @@ impl SettingsBridge {
         }
     }
 
-    /// The account names of `sids` that are known, `None` for a SID whose
-    /// lookup has not answered or found no name. Asks Windows, off the
+    /// The Visibility list's rows for `sids`, in the language of `strings`:
+    /// each account's name; for a SID that Windows knows no account for, the
+    /// SID marked as unknown, as Windows' permission editor shows it; and
+    /// the line itself while Windows has not answered, or when a hand edit
+    /// stored a line that is not a SID, which the service ignores. Asks Windows, off the
     /// window's thread, for the SIDs never asked about; the answer tells the
     /// open Settings dialog.
-    pub(in crate::app) fn account_names(
+    pub(in crate::app) fn account_rows(
         &self,
         window: &MainWindow,
+        strings: &Strings,
         sids: &[String],
-    ) -> Vec<Option<String>> {
+    ) -> Vec<String> {
         let known = self.account_names.borrow();
         let name = |sid: &String| known.iter().find(|(each, _)| each == sid);
         let unasked: Vec<String> = (sids.iter())
@@ -569,7 +600,14 @@ impl SettingsBridge {
             .cloned()
             .collect();
         let names = (sids.iter())
-            .map(|sid| name(sid).and_then(|(_, name)| name.clone()))
+            .map(|sid| match name(sid) {
+                None => sid.clone(),
+                Some((_, Some(name))) => name.clone(),
+                Some((_, None)) if sid.parse::<gozler_winfs::Sid>().is_ok() => {
+                    strings.format("settings_visibility.unknown_account", &[sid])
+                }
+                Some((_, None)) => sid.clone(),
+            })
             .collect();
         drop(known);
         if !unasked.is_empty() {

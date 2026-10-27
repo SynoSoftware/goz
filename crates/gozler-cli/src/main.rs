@@ -329,7 +329,7 @@ mod win {
     #[cfg(test)]
     mod tests {
         use super::status_warnings;
-        use gozler_core::proto::{DaemonStatus, VolumeStatus};
+        use gozler_core::proto::{CallerSees, DaemonStatus, VolumeStatus};
         use gozler_core::types::VolumePhase;
 
         fn volume(phase: VolumePhase, metadata_pending: bool) -> VolumeStatus {
@@ -364,6 +364,7 @@ mod win {
                     process_private_bytes: 0,
                     include: None,
                     left_out: Vec::new(),
+                    caller_sees: CallerSees::EveryFile,
                 })
                 .len()
             };

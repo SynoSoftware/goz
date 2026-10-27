@@ -22,8 +22,8 @@ use anyhow::{Context, Result};
 use gozler_core::include::IndexSettings;
 use gozler_core::index::VolumeIndex;
 use gozler_core::proto::{
-    DaemonStatus, MAX_CLIENT_FRAME, MemPair, OLDEST_PROTO_VERSION, PIPE_NAME, PROTO_VERSION,
-    ProtoError, Request, Response, ResultSnapshotId, Returns, Rows, SentFolders,
+    CallerSees, DaemonStatus, MAX_CLIENT_FRAME, MemPair, OLDEST_PROTO_VERSION, PIPE_NAME,
+    PROTO_VERSION, ProtoError, Request, Response, ResultSnapshotId, Returns, Rows, SentFolders,
     SnapshotRowsRequest, SortSnapshotRequest, VolumeMemory, VolumeStatus, encode_page,
     encode_response_frame, encode_snapshot_page,
 };
@@ -291,11 +291,11 @@ async fn write_reply(server: &mut NamedPipeServer, bytes: &[u8]) -> std::io::Res
 /// stops.
 ///
 /// `Hello`, `Status` and `SettingsSaved` answer every client, because they
-/// show no name. A request that reads the index's entries is refused when
-/// gozlerd cannot tell who sent it, and the Include count answers only a
-/// user who sees every file: its folder and name rules over the whole index
-/// would let any other user count hidden entries until the counts spell
-/// their names.
+/// show no name; `Status` also tells the client what it sees. A request
+/// that reads the index's entries is refused when gozlerd cannot tell who
+/// sent it, and the Include count answers only a user who sees every file:
+/// its folder and name rules over the whole index would let any other user
+/// count hidden entries until the counts spell their names.
 fn serve(
     volumes: &VolumeSet,
     include: &Include,
@@ -312,7 +312,10 @@ fn serve(
             ..
         }) => return reply(emit, hello(volumes, proto_min, proto_max)),
         Ok(Request::Status) => {
-            return reply(emit, Response::Status(build_status(volumes, include)));
+            return reply(
+                emit,
+                Response::Status(build_status(volumes, include, access.caller_sees())),
+            );
         }
         Ok(Request::SettingsSaved) => {
             include.reload();
@@ -648,7 +651,7 @@ fn count_included(volumes: &VolumeSet, settings: &IndexSettings) -> u64 {
         .sum()
 }
 
-fn build_status(volumes: &VolumeSet, include: &Include) -> DaemonStatus {
+fn build_status(volumes: &VolumeSet, include: &Include, caller_sees: CallerSees) -> DaemonStatus {
     let mut incomplete = false;
     let vols = volumes
         .iter()
@@ -699,6 +702,7 @@ fn build_status(volumes: &VolumeSet, include: &Include) -> DaemonStatus {
         process_private_bytes: self_mem.private_bytes,
         include: Some((*include.applied()).clone()),
         left_out: include.left_out(),
+        caller_sees,
     }
 }
 
@@ -740,8 +744,9 @@ mod tests {
     use gozler_core::include::{DriveChoice, FolderChoice, IndexSettings};
     use gozler_core::index::{NTFS_ROOT_FRN, VolumeIndex};
     use gozler_core::proto::{
-        FrameDecoder, MAX_SERVER_FRAME, PAGE_ROWS, PROTO_VERSION, ProtoError, Request, Response,
-        Returns, Rows, SearchRequest, decode_response_frame, encode_request,
+        CallerSees, DaemonStatus, FrameDecoder, MAX_SERVER_FRAME, PAGE_ROWS, PROTO_VERSION,
+        ProtoError, Request, Response, Returns, Rows, SearchRequest, decode_response_frame,
+        encode_request,
     };
     use gozler_core::query::{ParseOptions, ResultNames, parse_query_with};
     use gozler_core::types::{Frn, SortKey, SortSpec, VolumePhase};
@@ -820,7 +825,7 @@ mod tests {
             volume(r"D:\", windows_index(), VolumePhase::Snapshot),
         ]);
         assert!(
-            !build_status(&vols, &defaults()).volumes_incomplete,
+            !build_status(&vols, &defaults(), CallerSees::EveryFile).volumes_incomplete,
             "a fully indexed journal-less volume must not flag results incomplete"
         );
         assert!(
@@ -839,7 +844,14 @@ mod tests {
     /// it must mark results incomplete, or the user trusts a partial index.
     #[test]
     fn status_is_incomplete_unless_every_volume_is_live() {
-        assert!(!build_status(&set(&[live_volume(r"C:\")]), &defaults()).volumes_incomplete);
+        assert!(
+            !build_status(
+                &set(&[live_volume(r"C:\")]),
+                &defaults(),
+                CallerSees::EveryFile
+            )
+            .volumes_incomplete
+        );
 
         for phase in [
             VolumePhase::Bootstrapping,
@@ -851,7 +863,7 @@ mod tests {
         ] {
             let vols = set(&[live_volume(r"C:\"), volume(r"D:\", windows_index(), phase)]);
             assert!(
-                build_status(&vols, &defaults()).volumes_incomplete,
+                build_status(&vols, &defaults(), CallerSees::EveryFile).volumes_incomplete,
                 "one non-Live volume must taint the whole status"
             );
         }
@@ -980,7 +992,10 @@ mod tests {
         ));
         assert!(matches!(
             answer_as(&vols, &refused, &Request::Status),
-            Response::Status(_)
+            Response::Status(DaemonStatus {
+                caller_sees: CallerSees::Unidentified,
+                ..
+            })
         ));
         assert!(matches!(
             answer_as(&vols, &refused, &Request::SettingsSaved),
@@ -1674,7 +1689,7 @@ mod tests {
             };
             assert_eq!(
                 ready,
-                !build_status(&vols, &defaults()).volumes_incomplete,
+                !build_status(&vols, &defaults(), CallerSees::EveryFile).volumes_incomplete,
                 "ready must track the same bar as volumes_incomplete"
             );
         }

@@ -364,21 +364,24 @@ BEGIN
     PUSHBUTTON      "", IDC_INCLUDE_RESTORE, 259, 280, 50, 14
 END
 
-// Settings > Visibility: the users and groups who see every file, with the
-// check box that adds or removes Everyone, and Add… and Remove beside the
-// list, as on the Keyboard page.
+// Settings > Visibility: what the person sees, the users and groups who see
+// every file, with the check box that adds or removes Everyone, and Add…
+// and Remove beside the list, as on the Keyboard page, and what the list
+// means below it.
 IDD_SETTINGS_VISIBILITY DIALOGEX 0, 0, 309, 294
 STYLE DS_SHELLFONT | DS_CONTROL | WS_CHILD
 FONT 9, "Segoe UI", 400, 0, 0x1
 BEGIN
     LTEXT           "", IDC_VISIBILITY_HEADING, 0, 0, 309, 12, SS_NOPREFIX
     LTEXT           "", IDC_VISIBILITY_ADMIN_NOTE, 0, 16, 309, 16, SS_NOPREFIX
-    CONTROL         "", IDC_VISIBILITY_GROUP_ICON, "Static", SS_ICON | SS_CENTERIMAGE, 0, 36, 10, 10
-    LTEXT           "", IDC_VISIBILITY_GROUP, 12, 36, 297, 10, SS_NOPREFIX | SS_CENTERIMAGE
-    AUTOCHECKBOX    "", IDC_VISIBILITY_EVERYONE, 7, 50, 295, 10, WS_TABSTOP
-    CONTROL         "", IDC_VISIBILITY_LIST, "SysListView32", LVS_REPORT | LVS_NOCOLUMNHEADER | LVS_SINGLESEL | LVS_SHOWSELALWAYS | WS_BORDER | WS_TABSTOP, 7, 64, 238, 100
-    PUSHBUTTON      "", IDC_VISIBILITY_ADD, 252, 64, 50, 14
-    PUSHBUTTON      "", IDC_VISIBILITY_REMOVE, 252, 81, 50, 14
+    LTEXT           "", IDC_VISIBILITY_SEEN, 0, 34, 309, 16, SS_NOPREFIX
+    CONTROL         "", IDC_VISIBILITY_GROUP_ICON, "Static", SS_ICON | SS_CENTERIMAGE, 0, 52, 10, 10
+    LTEXT           "", IDC_VISIBILITY_GROUP, 12, 52, 297, 10, SS_NOPREFIX | SS_CENTERIMAGE
+    AUTOCHECKBOX    "", IDC_VISIBILITY_EVERYONE, 7, 66, 295, 10, WS_TABSTOP
+    CONTROL         "", IDC_VISIBILITY_LIST, "SysListView32", LVS_REPORT | LVS_NOCOLUMNHEADER | LVS_SINGLESEL | LVS_SHOWSELALWAYS | WS_BORDER | WS_TABSTOP, 7, 80, 238, 100
+    PUSHBUTTON      "", IDC_VISIBILITY_ADD, 252, 80, 50, 14
+    PUSHBUTTON      "", IDC_VISIBILITY_REMOVE, 252, 97, 50, 14
+    LTEXT           "", IDC_VISIBILITY_NOTE, 7, 186, 295, 40, SS_NOPREFIX
 END
 
 // Indexed folders: each drive's folders with a check box, and the summary.

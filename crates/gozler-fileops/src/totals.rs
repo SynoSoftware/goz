@@ -159,7 +159,7 @@ mod gozlerd {
 #[cfg(test)]
 mod tests {
     use gozler_core::include::IndexSettings;
-    use gozler_core::proto::{DaemonStatus, VolumeStatus};
+    use gozler_core::proto::{CallerSees, DaemonStatus, VolumeStatus};
     use gozler_core::types::VolumePhase;
 
     use super::scope;
@@ -199,6 +199,7 @@ mod tests {
             process_private_bytes: 0,
             include,
             left_out: Vec::new(),
+            caller_sees: CallerSees::EveryFile,
         }
     }
 

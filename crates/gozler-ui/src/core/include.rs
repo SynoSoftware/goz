@@ -161,18 +161,36 @@ pub(crate) fn connected_drives(drives: &[IncludeDrive]) -> Vec<(String, String)>
         .collect()
 }
 
+/// What Settings > Include's preview says of the entries kept after OK.
+pub(crate) enum AfterOk {
+    /// The service is counting them.
+    Counting,
+    Counted(u64),
+    /// The service counts them only for a user who sees every file,
+    /// because the Include rules could spell the names hidden from others.
+    NotCounted,
+}
+
 /// The preview line: the entries the index holds now, and about how many
-/// it holds after OK, `None` while the service counts them. `adds` is
-/// whether the edited settings check again what the index does not hold,
-/// which the count cannot include.
+/// it holds `after` OK. `adds` is whether the edited settings check again
+/// what the index does not hold, which the count cannot include.
 pub(crate) fn preview(
     strings: &Strings,
     numbers: &dyn Numbers,
     now: u64,
-    after: Option<u64>,
+    after: AfterOk,
     adds: bool,
 ) -> String {
-    let after = after.map_or_else(|| "…".to_owned(), |count| numbers.integer(count));
+    let after = match after {
+        AfterOk::Counting => "…".to_owned(),
+        AfterOk::Counted(count) => numbers.integer(count),
+        AfterOk::NotCounted => {
+            return strings.format(
+                "settings_include.preview_not_counted",
+                &[&numbers.integer(now)],
+            );
+        }
+    };
     let added = if adds {
         strings.text("settings_include.preview_added")
     } else {
@@ -187,7 +205,7 @@ pub(crate) fn preview(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use gozler_core::proto::{LeftOutVolume, VolumeStatus};
+    use gozler_core::proto::{CallerSees, LeftOutVolume, VolumeStatus};
     use gozler_core::types::VolumePhase;
 
     #[test]
@@ -214,6 +232,7 @@ mod tests {
             process_private_bytes: 0,
             include: None,
             left_out: Vec::new(),
+            caller_sees: CallerSees::EveryFile,
         };
         assert!(summary_drives_changed(None, &before));
 

@@ -46,8 +46,8 @@ use crate::core::file_operations::{QueueAction, delete_question, exit_question};
 use crate::core::glyph::Glyph;
 use crate::core::ids::{ControlId, DialogId};
 use crate::core::include::{
-    IncludeDrive, SummaryRow, connected_drives, connected_volumes, include_drives, preview,
-    summary_rows,
+    AfterOk, IncludeDrive, SummaryRow, connected_drives, connected_volumes, include_drives,
+    preview, summary_rows,
 };
 use crate::core::layout::column_sizing::{self, ColumnFit, ColumnSizing};
 use crate::core::layout::{
@@ -2022,6 +2022,22 @@ impl MainWindow {
         }
     }
 
+    /// The list of users and groups who see every file changed: the lists
+    /// read again, as F5 reads them, so that they hold what the person may
+    /// see now, and the status tells the Visibility page. The Search list
+    /// searches again also while Two panels shows, because it keeps its
+    /// results until it shows; the panels read their folders when they show.
+    fn show_again(&self, hwnd: Hwnd) {
+        self.created().work.borrow_mut().lists.refresh_location();
+        self.search(hwnd, List::Search);
+        if self.model.borrow().mode() == Mode::TwoPanels {
+            for side in Side::BOTH {
+                self.controls().panels.refresh_panel(self, hwnd, side);
+            }
+        }
+        self.ask_status();
+    }
+
     /// While the status bar shows memory, reads the app's own working set,
     /// one cheap call, to show beside the service's from the same status
     /// (DESIGN.md: Status bar).
@@ -2584,8 +2600,7 @@ impl MainWindow {
                 let model = self.model.borrow();
                 if model.awaits(fetched.purpose, fetched.generation) {
                     if let crate::core::fetch::Outcome::Status(status, _, _) = &fetched.outcome {
-                        self.settings
-                            .observe_include_status(model.service().0, status);
+                        self.settings.observe_status(model.service(), status);
                     }
                     if fetched.purpose == Purpose::IncludeCount {
                         self.settings.include_preview_changed();
@@ -2621,7 +2636,7 @@ impl MainWindow {
         if !self.update_live() {
             return;
         }
-        self.settings.finish_elevated_job(self);
+        self.settings.finish_elevated_job(self, hwnd);
         if !self.update_live() {
             return;
         }

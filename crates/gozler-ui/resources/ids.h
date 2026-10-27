@@ -305,6 +305,8 @@
 #define IDC_VISIBILITY_LIST 3706
 #define IDC_VISIBILITY_ADD 3707
 #define IDC_VISIBILITY_REMOVE 3708
+#define IDC_VISIBILITY_SEEN 3709
+#define IDC_VISIBILITY_NOTE 3710
 
 // Settings > Include's Modify…: the folder tree and the summary.
 #define IDD_INDEXED_FOLDERS 112

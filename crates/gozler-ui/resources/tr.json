@@ -645,6 +645,7 @@
   "settings_include": {
     "preview": "Şu an dizinde: {0} girdi. Tamam'dan sonra: yaklaşık {1}{2}.",
     "preview_added": ", artı yeniden işaretlediğiniz klasörler, dizinlendiklerinde",
+    "preview_not_counted": "Şu an dizinde: {0} girdi. Tamam'dan sonraki sayıyı yalnızca tüm dosyaları gören kullanıcılar görür.",
     "folders": "Klasörler",
     "folders_label": "Dizinlenen &klasörler:",
     "folder_column": "Klasör",
@@ -667,6 +668,11 @@
     "add": "&Ekle…",
     "remove": "Ka&ldır",
     "empty": "Her kullanıcı yalnızca açabildiği klasörlerdeki dosyaları görür.",
+    "seen_every_file": "Tüm dosyaları, klasör boyutlarıyla birlikte görürsünüz.",
+    "seen_filtered": "Yalnızca açabildiğiniz klasörlerdeki dosyaları görürsünüz; klasör boyutlarını görmezsiniz.",
+    "seen_unidentified": "Hizmet kim olduğunuzu anlayamıyor, bu yüzden aramalarınızı çalıştırmıyor.",
+    "note": "Listede olmayan kullanıcılar yalnızca açabildikleri klasörlerdeki dosyaları görür ve klasör boyutlarını görmez. Yöneticiler grubunda olmak yalnızca Gozler yönetici olarak çalıştığında geçerlidir; tüm dosyaları görmek için kendi hesabınızı ekleyin.",
+    "unknown_account": "Bilinmeyen hesap ({0})",
     "unreadable": "Liste okunamadı. {0}",
     "picker_failed": "Kullanıcıları veya Grupları Seç açılamadı. {0}"
   },

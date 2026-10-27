@@ -645,6 +645,7 @@
   "settings_include": {
     "preview": "Indexed now: {0} entries. After OK: about {1}{2}.",
     "preview_added": ", plus the folders you checked again, once they're indexed",
+    "preview_not_counted": "Indexed now: {0} entries. Only users who see every file see the count after OK.",
     "folders": "Folders",
     "folders_label": "Indexed &folders:",
     "folder_column": "Folder",
@@ -667,6 +668,11 @@
     "add": "A&dd…",
     "remove": "Re&move",
     "empty": "Each user sees only the files in folders they can open.",
+    "seen_every_file": "You see every file, with folder sizes.",
+    "seen_filtered": "You see only the files in folders you can open, and no folder sizes.",
+    "seen_unidentified": "The service can't tell who you are, so it doesn't run your searches.",
+    "note": "Users who aren't on the list see only the files in folders they can open, and no folder sizes. Being in the Administrators group counts only while Gozler runs as administrator, so to see every file, add your own account.",
+    "unknown_account": "Account unknown ({0})",
     "unreadable": "Couldn't read the list. {0}",
     "picker_failed": "Couldn't open Select Users or Groups. {0}"
   },

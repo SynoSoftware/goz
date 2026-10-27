@@ -17,6 +17,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use anyhow::Context;
 use gozler_core::include::{SEE_EVERY_FILE_VALUE, SETTINGS_KEY};
+use gozler_core::proto::CallerSees;
 use gozler_core::query::Viewer;
 use gozler_winfs::{
     ClientToken, Sid, WinError, machine_strings, pipe_client_token, set_machine_strings,
@@ -28,6 +29,17 @@ pub(crate) enum Access {
     /// still answer.
     Refused(Refusal),
     Sees(Visibility),
+}
+
+impl Access {
+    /// What a status reply tells the client it sees.
+    pub(crate) fn caller_sees(&self) -> CallerSees {
+        match self {
+            Access::Refused(_) => CallerSees::Unidentified,
+            Access::Sees(Visibility::Everything) => CallerSees::EveryFile,
+            Access::Sees(Visibility::Filtered(_)) => CallerSees::Filtered,
+        }
+    }
 }
 
 /// Why gozlerd cannot tell who sent a request.

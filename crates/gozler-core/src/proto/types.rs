@@ -19,7 +19,7 @@ use crate::types::{IndexProgress, SortSpec, VolumePhase};
 /// refuses any other with [`ProtoError::Unsupported`], rather than agreeing on
 /// a version one side cannot actually speak. The client asks for this version
 /// alone, so a daemon of another build refuses it.
-pub const PROTO_VERSION: u16 = 15;
+pub const PROTO_VERSION: u16 = 16;
 
 /// The oldest protocol version a daemon of this build serves. **Owner
 /// ruling:** gozler serves no older protocol, of gozler or of goz, because
@@ -378,6 +378,22 @@ pub struct DaemonStatus {
     /// which [`Self::volumes`] does not list.
     #[serde(default)]
     pub left_out: Vec<LeftOutVolume>,
+    /// What the client that asked sees in its searches.
+    pub caller_sees: CallerSees,
+}
+
+/// What a client sees in its searches, which gozlerd decides from the
+/// client's token for each request.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CallerSees {
+    /// Every entry, with folder sizes: the client runs as SYSTEM or holds an
+    /// account on the list of users and groups who see every file.
+    EveryFile,
+    /// The entries in folders the client may list, and no folder sizes.
+    Filtered,
+    /// Nothing: gozlerd could not tell who the client is, so it refuses the
+    /// client's searches.
+    Unidentified,
 }
 
 /// A volume that the Include settings leave out.
@@ -681,6 +697,7 @@ mod tests {
                 guid: r"\\?\Volume{d}\".into(),
                 mounts: vec![r"D:\".into()],
             }],
+            caller_sees: CallerSees::Filtered,
         }));
     }
 

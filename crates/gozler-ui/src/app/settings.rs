@@ -19,7 +19,7 @@ use crate::core::dates::DateFormat;
 use crate::core::fetch::Purpose;
 use crate::core::glyph::Glyph;
 use crate::core::ids::{ControlId, DialogId};
-use crate::core::include::SummaryRow;
+use crate::core::include::{AfterOk, SummaryRow};
 use crate::core::layout::{Px, Rect, StatusLayout, StatusWidths};
 use crate::core::model::Model;
 use crate::core::open::browse_command;
@@ -42,6 +42,7 @@ use crate::win::gdi::{Font, TextMeter};
 use crate::win::shortcut::{self, Capture};
 use crate::win::{self, Hwnd};
 use gozler_core::include::IndexSettings;
+use gozler_core::proto::CallerSees;
 use gozler_fileops::{DeleteWorkers, Engine, RingBlock, SpeedSettings};
 use std::cell::{Cell, OnceCell, RefCell};
 use std::time::Instant;
@@ -325,6 +326,9 @@ pub(super) struct SettingsDialog<'a> {
     /// The rows that Folders Gozler indexes shows, whose tooltips list the
     /// full paths of the folders left out.
     include_rows: RefCell<Vec<SummaryRow>>,
+    /// What the Visibility page's line says, so a refresh sets it only when
+    /// it changed.
+    seen: RefCell<String>,
     /// Whether the dialog is setting its controls, whose notifications then
     /// change nothing.
     filling: Cell<bool>,
@@ -373,6 +377,7 @@ impl<'a> SettingsDialog<'a> {
             commands: RefCell::new(Vec::new()),
             index: RefCell::new(None),
             include_rows: RefCell::new(Vec::new()),
+            seen: RefCell::new(String::new()),
             filling: Cell::new(false),
             balloon: OnceCell::new(),
             capture: Cell::new(None),
@@ -760,15 +765,17 @@ impl<'a> SettingsDialog<'a> {
         };
         let now = self.main.settings.indexed_entries(self.main);
         let after = if edited == applied {
-            Some(now)
+            AfterOk::Counted(now)
+        } else if !self.counts_included() {
+            AfterOk::NotCounted
         } else {
             match self.main.settings.included_count(self.main) {
-                Some(Ok(entries)) => Some(entries),
+                Some(Ok(entries)) => AfterOk::Counted(entries),
                 Some(Err(failure)) => {
                     label.set_text(&failure_text(&self.strings, &failure));
                     return;
                 }
-                None => None,
+                None => AfterOk::Counting,
             }
         };
         let volumes = self.main.settings.connected_volumes(self.main);
@@ -804,9 +811,17 @@ impl<'a> SettingsDialog<'a> {
         };
         if let Some(edited) = edited
             && Some(&edited) != applied.as_ref()
+            && self.counts_included()
         {
             self.main.settings.count_included(self.main, edited);
         }
+    }
+
+    /// Whether to ask the service to count the entries that edited Include
+    /// settings keep: not for a filtered user, whom it refuses. Any other
+    /// refusal or failure shows as the count's failure.
+    fn counts_included(&self) -> bool {
+        self.main.settings.caller_sees(self.main) != Some(CallerSees::Filtered)
     }
 
     /// Modify… opens Indexed folders, whose OK puts its choices on the page.
@@ -868,10 +883,10 @@ impl<'a> SettingsDialog<'a> {
             self.filling(|| check.set_checked(everyone));
         }
         let sids = sids.unwrap_or_default();
-        // A SID shows as its string while Windows has not named it.
-        let names = self.main.settings.account_names(self.main, &sids);
-        let rows: Vec<[String; 1]> = (sids.into_iter().zip(names))
-            .map(|(sid, name)| [name.unwrap_or(sid)])
+        let rows: Vec<[String; 1]> = (self.main.settings)
+            .account_rows(self.main, &self.strings, &sids)
+            .into_iter()
+            .map(|row| [row])
             .collect();
         if let Some(list) = self.visibility_list() {
             self.filling(|| list.set_rows(&rows, selected));
@@ -887,7 +902,40 @@ impl<'a> SettingsDialog<'a> {
             .is_some();
         let readable = self.draft.borrow().edited.see_every_file.is_ok();
         if let Some(remove) = self.control(SettingsPage::Visibility, ControlId::VisibilityRemove) {
-            remove.set_enabled(selected && readable);
+            let enabled = selected && readable;
+            // A disabled button keeps the focus but takes no key. Add… is
+            // what the person does next once the last entry is removed.
+            if !enabled
+                && Hwnd::focused() == Some(remove)
+                && let Some(add) = self.control(SettingsPage::Visibility, ControlId::VisibilityAdd)
+            {
+                add.focus();
+            }
+            remove.set_enabled(enabled);
+        }
+    }
+
+    /// Says what the person sees in searches, as the service last said, or
+    /// the service's state while it has not answered or a later request
+    /// failed (DESIGN.md: The Visibility page). Each reply runs it, because
+    /// a failed request changes it too.
+    fn show_seen(&self) {
+        let Some(label) = self.control(SettingsPage::Visibility, ControlId::VisibilitySeen) else {
+            return;
+        };
+        let key = match self.main.settings.caller_sees(self.main) {
+            Some(CallerSees::EveryFile) => Some("settings_visibility.seen_every_file"),
+            Some(CallerSees::Filtered) => Some("settings_visibility.seen_filtered"),
+            Some(CallerSees::Unidentified) => Some("settings_visibility.seen_unidentified"),
+            None => None,
+        };
+        let text = match key {
+            Some(key) => self.strings.text(key).to_owned(),
+            None => self.main.settings.index_captions(self.main).service,
+        };
+        if *self.seen.borrow() != text {
+            label.set_text(&text);
+            self.seen.replace(text);
         }
     }
 
@@ -1717,6 +1765,9 @@ impl<'a> SettingsDialog<'a> {
         if page == Some(SettingsPage::Include) {
             // The index changes while the dialog is open.
             self.show_preview();
+        }
+        if page == Some(SettingsPage::Visibility) {
+            self.show_seen();
         }
         self.main
             .settings
@@ -2669,6 +2720,7 @@ impl DialogProc for SettingsDialog<'_> {
                     let selected = self.visibility_list().and_then(ReportList::selected);
                     self.fill_visibility(selected);
                 }
+                self.show_seen();
                 if self.main.settings.take_include_summary_changed()
                     && self.include_folders().is_some()
                 {

@@ -3115,7 +3115,7 @@ pub(crate) mod tests {
     use gozler_client::NotRunning;
     use gozler_client::Repair;
     use gozler_core::escompat::{Command, parse_argv};
-    use gozler_core::proto::{ResultSnapshotId, VolumeStatus};
+    use gozler_core::proto::{CallerSees, ResultSnapshotId, VolumeStatus};
     use gozler_fileops::{Request, State};
     use std::collections::HashSet;
     use std::io;
@@ -3626,6 +3626,7 @@ pub(crate) mod tests {
                     process_private_bytes: 0,
                     include: None,
                     left_out: Vec::new(),
+                    caller_sees: CallerSees::EveryFile,
                 },
                 "0.4.0".to_owned(),
                 Programs::UNKNOWN,

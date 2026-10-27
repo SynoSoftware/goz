@@ -534,6 +534,7 @@ impl CaptionTable {
                     (Control(C::VisibilityHeading), "settings.visibility"),
                     (Control(C::VisibilityAdminNote), "settings.admin_note"),
                     (Control(C::VisibilityGroup), "settings_visibility.list"),
+                    (Control(C::VisibilityNote), "settings_visibility.note"),
                 ],
             },
             DialogId::SettingsFileOperations => CaptionTable {

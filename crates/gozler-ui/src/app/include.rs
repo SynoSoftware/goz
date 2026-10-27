@@ -77,6 +77,12 @@ impl Elevated {
             Elevated::Rebuild => true,
         }
     }
+
+    /// Whether the job saves the list of users and groups who see every
+    /// file, which can change what the person sees.
+    pub(super) fn changes_visibility(&self) -> bool {
+        matches!(self, Elevated::Save(changes) if changes.see_every_file.is_some())
+    }
 }
 
 /// Why an [`Elevated`] job did not run.

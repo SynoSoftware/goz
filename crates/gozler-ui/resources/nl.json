@@ -645,6 +645,7 @@
   "settings_include": {
     "preview": "Nu geïndexeerd: {0} items. Na OK: ongeveer {1}{2}.",
     "preview_added": ", plus de mappen die u opnieuw hebt aangevinkt, zodra ze zijn geïndexeerd",
+    "preview_not_counted": "Nu geïndexeerd: {0} items. Alleen gebruikers die alle bestanden zien, zien het aantal na OK.",
     "folders": "Mappen",
     "folders_label": "Geïndexeerde &mappen:",
     "folder_column": "Map",
@@ -667,6 +668,11 @@
     "add": "Toe&voegen…",
     "remove": "Ve&rwijderen",
     "empty": "Gebruikers zien alleen de bestanden in mappen die ze kunnen openen.",
+    "seen_every_file": "U ziet alle bestanden, met mapgrootten.",
+    "seen_filtered": "U ziet alleen de bestanden in mappen die u kunt openen, zonder mapgrootten.",
+    "seen_unidentified": "De service kan niet zien wie u bent en voert uw zoekopdrachten daarom niet uit.",
+    "note": "Gebruikers die niet in de lijst staan, zien alleen de bestanden in mappen die ze kunnen openen, zonder mapgrootten. Lid zijn van de groep Administrators telt alleen als Gozler als administrator wordt uitgevoerd. Voeg daarom uw eigen account toe om alle bestanden te zien.",
+    "unknown_account": "Account onbekend ({0})",
     "unreadable": "Kan de lijst niet lezen. {0}",
     "picker_failed": "Kan Gebruikers of groepen selecteren niet openen. {0}"
   },

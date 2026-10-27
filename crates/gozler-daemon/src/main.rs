@@ -229,9 +229,24 @@ fn show_list() -> anyhow::Result<()> {
     }
     if !everyone {
         println!("To show every file to every user, open a terminal as administrator and run:");
-        println!("  gozlerd see-every-file add Everyone");
+        println!("{}", list_commands("add Everyone"));
     }
     Ok(())
+}
+
+/// The lines that run `gozlerd see-every-file {change}` when pasted into an
+/// administrator terminal, which opens in System32: from this gozlerd.exe's
+/// folder, which is not always on `PATH` (docs/WRITING.md).
+#[cfg(windows)]
+fn list_commands(change: &str) -> String {
+    let exe = std::env::current_exe().ok();
+    match exe.as_deref().and_then(std::path::Path::parent) {
+        Some(folder) => format!(
+            "  pushd \"{}\"\n  .\\gozlerd.exe see-every-file {change}",
+            folder.display()
+        ),
+        None => format!("  gozlerd see-every-file {change}"),
+    }
 }
 
 /// `see-every-file add` and `remove`. Elevation is checked before the name
@@ -239,10 +254,20 @@ fn show_list() -> anyhow::Result<()> {
 /// theirs. A line that is not a SID stays as it is.
 #[cfg(windows)]
 fn change_list(change: &ListChange) -> anyhow::Result<()> {
-    if !gozler_winfs::is_elevated() {
-        anyhow::bail!("changing who sees every file needs an elevated terminal");
-    }
     let (ListChange::Add { account } | ListChange::Remove { account }) = change;
+    if !gozler_winfs::is_elevated() {
+        let verb = match change {
+            ListChange::Add { .. } => "add",
+            ListChange::Remove { .. } => "remove",
+        };
+        // Quoted, because an account name may hold a space, an & or a ',
+        // which cmd or PowerShell would read.
+        anyhow::bail!(
+            "changing who sees every file needs an elevated terminal\n\
+             To change it, open a terminal as administrator and run:\n{}",
+            list_commands(&format!("{verb} \"{account}\""))
+        );
+    }
     let sid = resolve(account)?;
     let name = display_name(&sid);
     let mut lines = access::stored_lines()?.unwrap_or_default();
