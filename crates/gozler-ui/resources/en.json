@@ -590,6 +590,8 @@
     "copying": "Copying",
     "large_file_limit": "Large &files start at:",
     "mib": "MiB",
+    "block_kib": "{0} KiB",
+    "block_mib": "{0} MiB",
     "large_between_ssds": "Lar&ge files between SSDs:",
     "hard_disk": "When a hard disk &is at either end:",
     "engine_windows": "Windows copy function",

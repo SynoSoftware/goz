@@ -1674,9 +1674,13 @@ impl<'a> SettingsDialog<'a> {
                     .map(|block| {
                         let kib = block.bytes() / 1024;
                         if kib < 1024 {
-                            self.strings.format("size.kb", &[&kib.to_string()])
+                            self.strings
+                                .format("settings_file_operations.block_kib", &[&kib.to_string()])
                         } else {
-                            self.strings.format("size.mb", &[&(kib / 1024).to_string()])
+                            self.strings.format(
+                                "settings_file_operations.block_mib",
+                                &[&(kib / 1024).to_string()],
+                            )
                         }
                     })
                     .collect();

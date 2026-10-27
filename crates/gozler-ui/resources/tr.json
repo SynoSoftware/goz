@@ -590,6 +590,8 @@
     "copying": "Kopyalama",
     "large_file_limit": "Büyü&k dosya başlangıcı:",
     "mib": "MiB",
+    "block_kib": "{0} KiB",
+    "block_mib": "{0} MiB",
     "large_between_ssds": "SSD'&ler arasında büyük dosyalar:",
     "hard_disk": "Bir uçta sabit disk &olduğunda:",
     "engine_windows": "Windows kopyalama işlevi",

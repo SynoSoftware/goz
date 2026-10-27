@@ -590,6 +590,8 @@
     "copying": "Kopiëren",
     "large_file_limit": "Grote &bestanden vanaf:",
     "mib": "MiB",
+    "block_kib": "{0} KiB",
+    "block_mib": "{0} MiB",
     "large_between_ssds": "&Grote bestanden tussen SSD's:",
     "hard_disk": "Met een harde schijf aan één &kant:",
     "engine_windows": "Windows-kopieerfunctie",
