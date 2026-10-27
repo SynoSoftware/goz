@@ -33,7 +33,7 @@ use crate::attributes::{Attributes, PackedAttributes};
 use crate::include::VolumeRules;
 use crate::layout::LayoutFile;
 use crate::types::{EntryIdx, Frn, NIL};
-use crate::usn::record::USN_REASON_RENAME_NEW_NAME;
+use crate::usn::record::{FILE_ATTRIBUTE_REPARSE_POINT, USN_REASON_RENAME_NEW_NAME};
 use crate::usn::{ParsedUsnRecord, UsnOp, ops_for};
 use rustc_hash::{FxHashMap, FxHashSet};
 use smallvec::SmallVec;
@@ -559,21 +559,25 @@ impl VolumeIndex {
                     UsnOp::SecurityDirty => security_changed = true,
                 }
             }
-            if let Some(head) = self.head_of(frn)
-                && (security_changed || self.entries.descriptor(head).is_none())
-                && self.reads_descriptor(head)
-            {
-                // Until the new descriptor is read, the folder's entries are
-                // hidden; the old one would show a user who lost the right
-                // to list it the names added after the change.
-                self.entries.set_descriptor(head, None);
-                outcome.needs_descriptor.push(frn);
-            }
             // Every record carries the file's attributes as of the record, so
             // the last record of a batch leaves the current ones, whatever its
             // reason bits: an attribute change, a compression or encryption
-            // change and a reparse point change each write one.
+            // change and a reparse point change each write one. They are set
+            // before the descriptor test, which reads them: a ReFS junction
+            // whose reparse point is removed becomes a folder to read.
             self.set_attributes(frn, rec.attributes);
+            if let Some(head) = self.head_of(frn)
+                && (security_changed || self.entries.descriptor(head).is_none())
+            {
+                // Until the new descriptor is read, the folder's entries are
+                // hidden; the old one would show a user who lost the right
+                // to list it the names added after the change. A folder whose
+                // descriptor is not read keeps none, so it stays hidden.
+                self.entries.set_descriptor(head, None);
+                if self.reads_descriptor(head) {
+                    outcome.needs_descriptor.push(frn);
+                }
+            }
         }
         // Reason bits accumulate, so one change reaches a batch in several
         // records, and each FRN reported costs the daemon a link walk.
@@ -597,17 +601,17 @@ impl VolumeIndex {
         self.stats.link_reconciles_dropped += n;
     }
 
-    /// Sets the security descriptor of folder `frn`, or takes it away with
-    /// `None`. This is the one way a folder gets a descriptor; a journal
-    /// record only takes one away until it is read again. A `frn` that is not
-    /// a folder, or not in the index, is ignored.
-    pub fn set_folder_descriptor(&mut self, frn: Frn, descriptor: Option<&[u8]>) {
+    /// Sets the security descriptor of folder `frn`. This is the one way a
+    /// folder gets a descriptor; a journal record only takes one away until
+    /// it is read again. A `frn` that is not a folder, or not in the index,
+    /// is ignored.
+    pub fn set_folder_descriptor(&mut self, frn: Frn, descriptor: &[u8]) {
         let Some(head) = self.head_of(frn) else {
             return;
         };
         if self.entries.flags(head).contains(EntryFlags::DIR) {
-            let id = descriptor.map(|d| self.descriptors.id_of(d));
-            self.entries.set_descriptor(head, id);
+            let id = self.descriptors.id_of(descriptor);
+            self.entries.set_descriptor(head, Some(id));
             if self.descriptors.wants_collection() {
                 self.collect_descriptors();
             }
@@ -652,7 +656,8 @@ impl VolumeIndex {
     }
 
     /// Whether the descriptor of `frn` is to be read: `frn` is a folder in
-    /// the index, other than lost+found and NTFS's metadata folders.
+    /// the index, other than lost+found, NTFS's metadata folders and a
+    /// reparse folder on ReFS.
     pub fn wants_descriptor(&self, frn: Frn) -> bool {
         self.head_of(frn)
             .is_some_and(|head| self.reads_descriptor(head))
@@ -683,11 +688,18 @@ impl VolumeIndex {
     /// lost+found, which no volume holds, and not one of NTFS's metadata
     /// folders. Windows refuses some of those to gozlerd's backup privilege,
     /// and they hold only NTFS's own files, so without this rule every PC
-    /// would show their failed reads in `--status`.
+    /// would show their failed reads in `--status`. Nor a reparse point,
+    /// such as a junction, on a volume whose IDs are wide: the walk that
+    /// indexes such a volume lists it but never enters it, so it holds no
+    /// entry and would count as unread for good. On NTFS a reparse folder
+    /// can hold entries, as OneDrive's folders do, so it is read there.
     fn reads_descriptor(&self, idx: EntryIdx) -> bool {
         idx != self.lost_found
             && self.entries.flags(idx).contains(EntryFlags::DIR)
             && !self.is_metadata_folder(idx)
+            && !(self.entries.frn(self.root).is_wide()
+                && (self.entries.attributes(idx))
+                    .contains(PackedAttributes::from_record(FILE_ATTRIBUTE_REPARSE_POINT)))
     }
 
     /// Whether folder `idx` is `$Extend`, the root's child in MFT record 11,

@@ -7,8 +7,9 @@
 use super::*;
 use crate::types::Frn;
 use crate::usn::record::{
-    FILE_ATTRIBUTE_DIRECTORY, ParsedUsnRecord, USN_REASON_BASIC_INFO_CHANGE,
-    USN_REASON_FILE_CREATE, USN_REASON_FILE_DELETE, USN_REASON_RENAME_NEW_NAME,
+    FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_REPARSE_POINT, ParsedUsnRecord,
+    USN_REASON_BASIC_INFO_CHANGE, USN_REASON_FILE_CREATE, USN_REASON_FILE_DELETE,
+    USN_REASON_RENAME_NEW_NAME,
 };
 use std::cell::RefCell;
 use std::collections::{BTreeSet, HashMap, HashSet};
@@ -538,7 +539,7 @@ fn the_descriptor_column_follows_each_folder() {
         create(file, root, "f.txt", false),
         create(becomes_dir, root, "x", false),
     ]);
-    idx.set_folder_descriptor(changed, Some(b"changed"));
+    idx.set_folder_descriptor(changed, b"changed");
     let outcome = idx.apply_batch(&[
         create(new, root, "new", true),
         security(changed, true),
@@ -552,7 +553,7 @@ fn the_descriptor_column_follows_each_folder() {
     let mut idx = new_index();
     let (gone, reborn) = (frn(200), frn(201));
     idx.apply_batch(&[create(gone, root, "gone", true)]);
-    idx.set_folder_descriptor(gone, Some(b"gone"));
+    idx.set_folder_descriptor(gone, b"gone");
     let slot = idx.head_of(gone);
     let outcome = idx.apply_batch(&[delete(gone), create(reborn, root, "reborn", true)]);
     assert_eq!(
@@ -572,7 +573,7 @@ fn the_descriptor_column_follows_each_folder() {
     ]);
     let own = |f: Frn| f.0.to_le_bytes();
     for f in [a, b, c] {
-        idx.set_folder_descriptor(f, Some(&own(f)));
+        idx.set_folder_descriptor(f, &own(f));
     }
     idx.apply_batch(&[delete(b)]);
     idx.optimize_storage();
@@ -602,7 +603,7 @@ fn changed_descriptors_keep_the_table_bounded() {
         create(changing, root, "changing", true),
         create(steady, root, "steady", true),
     ]);
-    idx.set_folder_descriptor(steady, Some(b"steady"));
+    idx.set_folder_descriptor(steady, b"steady");
     let instance = idx.instance();
     let changed = |n: u32| {
         let mut descriptor = vec![0u8; 8 * 1024];
@@ -612,7 +613,7 @@ fn changed_descriptors_keep_the_table_bounded() {
 
     // 8 MiB of descriptors, each used only until the next change.
     for n in 0..1_000 {
-        idx.set_folder_descriptor(changing, Some(&changed(n)));
+        idx.set_folder_descriptor(changing, &changed(n));
     }
 
     let held = idx.memory().descriptors.used;
@@ -1099,7 +1100,7 @@ impl settle::VolumeReads for ModelReads<'_> {
     fn list_folder(
         &mut self,
         folder: Frn,
-        listed: &mut dyn FnMut(settle::Listed<Self::Error>),
+        listed: &mut dyn FnMut(settle::Listed),
     ) -> Result<bool, Self::Error> {
         self.assert_unlocked();
         if let Some(changes) = &mut self.listing_changes {
@@ -1113,7 +1114,7 @@ impl settle::VolumeReads for ModelReads<'_> {
         }
         listed(settle::Listed::Folder {
             frn: folder,
-            descriptor: Ok(model_descriptor(node)),
+            descriptor: Some(model_descriptor(node)),
         });
         listed(settle::Listed::Page(model.listing(self.ids, node)));
         Ok(true)
@@ -2037,5 +2038,39 @@ proptest! {
                 }
             }
         }
+    }
+}
+
+/// A walk lists a reparse folder, such as a junction, but never enters it, so
+/// on a volume the walk indexes it holds no entry and needs no descriptor;
+/// read anyway, it would count in `--status` as unread for good. On NTFS a
+/// reparse folder can hold entries, as a OneDrive folder does, and without
+/// its descriptor a filtered user would never see them.
+#[test]
+fn a_reparse_folder_is_read_on_ntfs_and_not_on_refs() {
+    for (ids, width, reads_reparse) in [
+        (Ids::Ntfs, IdWidth::Narrow, true),
+        (Ids::Refs, IdWidth::Wide, false),
+    ] {
+        let mut idx = VolumeIndex::with_ids(ids.root(), width);
+        let (plain, junction) = (ids.id(100), ids.id(101));
+        idx.insert_listed(&listed(plain, ids.root(), "plain", true));
+        idx.insert_listed(&LayoutFile {
+            attributes: FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT,
+            ..listed(junction, ids.root(), "junction", true)
+        });
+        assert!(idx.wants_descriptor(plain), "{width:?}");
+        assert_eq!(idx.wants_descriptor(junction), reads_reparse, "{width:?}");
+
+        // A record whose attributes no longer hold the reparse point makes it
+        // a plain folder, which files can now be created in, so it is read.
+        let outcome = idx.apply_batch(&[record(
+            junction,
+            ids.root(),
+            "junction",
+            true,
+            USN_REASON_BASIC_INFO_CHANGE,
+        )]);
+        assert!(outcome.needs_descriptor.contains(&junction), "{width:?}");
     }
 }

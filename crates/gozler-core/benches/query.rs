@@ -59,7 +59,7 @@ const CLOSED: &[u8] = b"closed";
 /// descriptor [`CLOSED`], and every other folder [`OPEN`].
 fn build_index() -> (VolumeIndex, usize) {
     let mut idx = VolumeIndex::new(NTFS_ROOT_FRN);
-    idx.set_folder_descriptor(NTFS_ROOT_FRN, Some(OPEN));
+    idx.set_folder_descriptor(NTFS_ROOT_FRN, OPEN);
     let mut next: u64 = 1000;
     let mut count = 0usize;
 
@@ -67,7 +67,7 @@ fn build_index() -> (VolumeIndex, usize) {
         let d1 = frn(next);
         next += 1;
         idx.insert_enum(&enum_rec(d1, NTFS_ROOT_FRN, &format!("amd64_microsoft-windows-component-{a:03}_31bf3856ad364e35_10.0.26100.1_none_deadbeef"), true));
-        idx.set_folder_descriptor(d1, Some(OPEN));
+        idx.set_folder_descriptor(d1, OPEN);
         for b in 0..L2 {
             let d2 = frn(next);
             next += 1;
@@ -77,18 +77,18 @@ fn build_index() -> (VolumeIndex, usize) {
                 &format!("subcomponent_{b:03}_none_cafef00dbaadf00d"),
                 true,
             ));
-            idx.set_folder_descriptor(d2, Some(OPEN));
+            idx.set_folder_descriptor(d2, OPEN);
             for cc in 0..L3 {
                 let d3 = frn(next);
                 next += 1;
                 idx.insert_enum(&enum_rec(d3, d2, &format!("module_group_{cc:03}"), true));
-                idx.set_folder_descriptor(d3, Some(OPEN));
+                idx.set_folder_descriptor(d3, OPEN);
                 for e in 0..L4 {
                     let d4 = frn(next);
                     next += 1;
                     idx.insert_enum(&enum_rec(d4, d3, &format!("bin_x64_{e:02}"), true));
                     let leaf = if e % 2 == 0 { OPEN } else { CLOSED };
-                    idx.set_folder_descriptor(d4, Some(leaf));
+                    idx.set_folder_descriptor(d4, leaf);
                     for fidx in 0..FILES_PER_LEAF {
                         let file = frn(next);
                         let seq = next;

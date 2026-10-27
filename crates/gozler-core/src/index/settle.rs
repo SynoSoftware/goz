@@ -53,7 +53,7 @@ pub trait VolumeReads {
     fn list_folder(
         &mut self,
         folder: Frn,
-        listed: &mut dyn FnMut(Listed<Self::Error>),
+        listed: &mut dyn FnMut(Listed),
     ) -> Result<bool, Self::Error>;
 
     /// The security descriptor of folder `frn`; `Ok(None)` when the folder
@@ -70,19 +70,20 @@ pub trait VolumeReads {
 }
 
 /// What a folder listing hands its caller, in the order the walk reads it.
-pub enum Listed<E> {
+pub enum Listed {
     /// Once per folder the walk opens, before its first page. The folder
     /// comes from the walk, not from a listing, because an empty folder
-    /// lists no page.
+    /// lists no page. `descriptor` is `None` when its read failed, which the
+    /// reader logs.
     Folder {
         frn: Frn,
-        descriptor: Result<Vec<u8>, E>,
+        descriptor: Option<Vec<u8>>,
     },
     /// Each page of that folder's listing.
     Page(Vec<LayoutFile>),
 }
 
-impl<E> Listed<E> {
+impl Listed {
     /// Applies one event of a walk: a folder's descriptor, or a page's names.
     /// A descriptor read that failed changes nothing, so the folder stays
     /// without one.
@@ -95,10 +96,10 @@ impl<E> Listed<E> {
         match self {
             Listed::Folder {
                 frn,
-                descriptor: Ok(descriptor),
-            } => index.set_folder_descriptor(*frn, Some(descriptor)),
+                descriptor: Some(descriptor),
+            } => index.set_folder_descriptor(*frn, descriptor),
             Listed::Folder {
-                descriptor: Err(_), ..
+                descriptor: None, ..
             } => {}
             Listed::Page(files) => {
                 for file in files {
@@ -201,7 +202,7 @@ pub fn walk_folders<R: VolumeReads>(
     reads: &mut R,
     tops: &[Frn],
     mut cancelled: impl FnMut() -> bool,
-    mut insert: impl FnMut(Listed<R::Error>),
+    mut insert: impl FnMut(Listed),
 ) -> Result<Walk, WalkFailed<R::Error>> {
     let mut folders: VecDeque<Frn> = tops.iter().copied().collect();
     let mut listed: HashSet<Frn> = HashSet::new();
@@ -305,7 +306,7 @@ pub fn settle_batch<R: VolumeReads>(
         }
         index.write(|i| {
             for (frn, descriptor) in &descriptors {
-                i.set_folder_descriptor(*frn, Some(descriptor));
+                i.set_folder_descriptor(*frn, descriptor);
             }
         });
     }
@@ -510,14 +511,14 @@ mod tests {
         fn list_folder(
             &mut self,
             folder: Frn,
-            listed: &mut dyn FnMut(Listed<Self::Error>),
+            listed: &mut dyn FnMut(Listed),
         ) -> Result<bool, Self::Error> {
             match self.listings.get(&folder) {
                 None => Ok(false),
                 Some(Ok(files)) => {
                     let descriptor = match self.descriptors.get(&folder) {
-                        Some(Err(e)) => Err(*e),
-                        _ => Ok(descriptor(folder)),
+                        Some(Err(_)) => None,
+                        _ => Some(descriptor(folder)),
                     };
                     listed(Listed::Folder {
                         frn: folder,
@@ -683,7 +684,7 @@ mod tests {
         for folder in [ROOT, users] {
             index
                 .borrow_mut()
-                .set_folder_descriptor(folder, Some(&descriptor(folder)));
+                .set_folder_descriptor(folder, &descriptor(folder));
         }
         let mut reads = Fake::default();
         reads.listings.insert(

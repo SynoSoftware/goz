@@ -901,7 +901,7 @@ impl<'a> SettingsDialog<'a> {
                     "settings_visibility.picker_failed",
                     &[&win::error_text(&error)],
                 );
-                win::dialog::error_box(Some(dialog), &text, self.strings.text("window.title"));
+                win::dialog::error_box(Some(dialog), &text, self.strings.text("settings.title"));
                 return;
             }
         };
@@ -991,7 +991,7 @@ impl<'a> SettingsDialog<'a> {
                     }
                 };
                 let text = self.strings.format(key, &[&reason]);
-                win::dialog::error_box(Some(dialog), &text, self.strings.text("window.title"));
+                win::dialog::error_box(Some(dialog), &text, self.strings.text("settings.title"));
             }
         }
         self.show_preview();
@@ -1071,7 +1071,7 @@ impl<'a> SettingsDialog<'a> {
                     &win::error_text(&error),
                 ],
             );
-            win::dialog::error_box(Some(dialog), &text, self.strings.text("window.title"));
+            win::dialog::error_box(Some(dialog), &text, self.strings.text("settings.title"));
         }
         if !self.main.settings.sign_in_is_current(self.main, id) || win::window::quit_pending() {
             return;

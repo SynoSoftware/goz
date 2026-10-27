@@ -1711,7 +1711,7 @@ mod tests {
             (frn(101), OPEN),
             (frn(102), &b"hidden"[..]),
         ] {
-            index.set_folder_descriptor(folder, Some(descriptor));
+            index.set_folder_descriptor(folder, descriptor);
         }
         index.compute_folder_sizes();
         index.rank_names();
@@ -1925,7 +1925,7 @@ mod tests {
         assert_eq!(rows.total(), 2, "a.txt and b.txt");
         {
             let mut index = volume.index.write().expect("no test panics holding it");
-            index.set_folder_descriptor(Frn::ntfs(101, 1), Some(b"changed"));
+            index.set_folder_descriptor(Frn::ntfs(101, 1), b"changed");
             index.apply_batch(&[ParsedUsnRecord {
                 frn: Frn::ntfs(200, 1),
                 parent_frn: Frn::ntfs(102, 1),

@@ -212,16 +212,13 @@ async fn handle_connection(
                 Ok(None) => break,
                 Err(e) => return Err(anyhow::anyhow!("frame error: {e}")),
             };
-            // Asked for each frame, because the pipe gives the token of the
-            // last message read, and a change to the stored list applies at
-            // the next search.
-            let access = access::of_pipe_client(server.as_handle());
-            if let Access::Refused(Refusal::Unidentified(error)) = &access
-                && !unidentified_logged
-            {
-                tracing::warn!(%error, "could not tell which user sent a request; its searches are refused");
-                unidentified_logged = true;
-            }
+            // The blocking task reads the client's token through its own
+            // handle to the pipe, because this task keeps the pipe, and no
+            // further frame is read until that task ends.
+            let pipe = server
+                .as_handle()
+                .try_clone_to_owned()
+                .context("duplicating the pipe handle")?;
             // Query execution plus result serialization is the heaviest CPU
             // work in the process and holds a read lock, so every request runs
             // on the blocking pool rather than stalling an async worker (and
@@ -235,6 +232,11 @@ async fn handle_connection(
             let user = user.clone();
             let (tx, mut rx) = tokio::sync::mpsc::channel::<Vec<u8>>(QUERY_PAGE_BACKLOG);
             let encoder = tokio::task::spawn_blocking(move || {
+                // Asked for each frame, because the pipe gives the token of
+                // the last message read, and a change to the stored list
+                // applies at the next search. It reads the registry, so it
+                // runs here, off the async workers.
+                let access = access::of_pipe_client(pipe.as_handle());
                 // A failed send means the receiver is gone (client vanished or
                 // write error): stop encoding.
                 serve(
@@ -246,6 +248,10 @@ async fn handle_connection(
                     &frame,
                     &mut |reply| tx.blocking_send(reply).is_ok(),
                 );
+                match access {
+                    Access::Refused(Refusal::Unidentified(error)) => Some(error),
+                    _ => None,
+                }
             });
             let mut write_err: Option<std::io::Error> = None;
             while let Some(reply) = rx.recv().await {
@@ -257,7 +263,13 @@ async fn handle_connection(
             // Closing the channel unblocks a still-encoding task; it aborts at
             // its next emit.
             drop(rx);
-            encoder.await.context("request task panicked")?;
+            let unidentified = encoder.await.context("request task panicked")?;
+            if let Some(error) = unidentified
+                && !unidentified_logged
+            {
+                tracing::warn!(%error, "could not tell which user sent a request; its searches are refused");
+                unidentified_logged = true;
+            }
             if let Some(e) = write_err {
                 return Err(e.into());
             }
@@ -992,7 +1004,7 @@ mod tests {
             (Frn(100), b"hidden"),
             (Frn(102), b"open"),
         ] {
-            index.set_folder_descriptor(folder, Some(descriptor));
+            index.set_folder_descriptor(folder, descriptor);
         }
         let vols = set(&[volume(r"C:\", index, VolumePhase::Live)]);
         let caller = Access::Sees(Visibility::Filtered(Box::new(|descriptor: &[u8]| {

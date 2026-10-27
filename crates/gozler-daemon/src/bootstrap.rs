@@ -526,16 +526,18 @@ impl<'a> Disk<'a> {
         }
     }
 
-    fn list(&mut self, folder: Frn, listed: &mut dyn FnMut(Listed<anyhow::Error>)) -> Result<bool> {
+    fn list(&mut self, folder: Frn, listed: &mut dyn FnMut(Listed)) -> Result<bool> {
         let Some(listing) =
             open_folder(self.handle, folder.0).map_err(|e| anyhow!("opening it: {e}"))?
         else {
             return Ok(false);
         };
-        let descriptor = listing.descriptor().map_err(|e| {
-            tracing::debug!(volume = %self.volume, ?folder, error = %e, "folder descriptor read failed");
-            anyhow::Error::new(e)
-        });
+        let descriptor = listing
+            .descriptor()
+            .inspect_err(|e| {
+                tracing::debug!(volume = %self.volume, ?folder, error = %e, "folder descriptor read failed");
+            })
+            .ok();
         listed(Listed::Folder {
             frn: folder,
             descriptor,
@@ -555,11 +557,7 @@ impl<'a> Disk<'a> {
 impl VolumeReads for Disk<'_> {
     type Error = anyhow::Error;
 
-    fn list_folder(
-        &mut self,
-        folder: Frn,
-        listed: &mut dyn FnMut(Listed<anyhow::Error>),
-    ) -> Result<bool> {
+    fn list_folder(&mut self, folder: Frn, listed: &mut dyn FnMut(Listed)) -> Result<bool> {
         let result = self.list(folder, listed);
         if let Err(e) = &result {
             tracing::debug!(volume = %self.volume, ?folder, error = %e, "folder listing failed");
@@ -700,13 +698,13 @@ fn read_build_descriptors(
             match reads.folder_security(first) {
                 Ok(Some(read)) if read.usn == usn => {
                     for &(frn, _) in &folders {
-                        index.set_folder_descriptor(frn, Some(&read.descriptor));
+                        index.set_folder_descriptor(frn, &read.descriptor);
                     }
                     continue;
                 }
                 // The first folder's own descriptor, which the others may
                 // not share any more.
-                Ok(Some(read)) => index.set_folder_descriptor(first, Some(&read.descriptor)),
+                Ok(Some(read)) => index.set_folder_descriptor(first, &read.descriptor),
                 Ok(None) => left.push(first),
                 Err(_) => alone.push(first),
             }
@@ -721,7 +719,7 @@ fn read_build_descriptors(
         let Ok(Some(descriptor)) = reads.folder_descriptor(frn) else {
             return false;
         };
-        index.set_folder_descriptor(frn, Some(&descriptor));
+        index.set_folder_descriptor(frn, &descriptor);
         true
     };
     for frn in alone {
