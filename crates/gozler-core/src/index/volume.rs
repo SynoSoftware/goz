@@ -604,7 +604,9 @@ impl VolumeIndex {
     /// Sets the security descriptor of folder `frn`. This is the one way a
     /// folder gets a descriptor; a journal record only takes one away until
     /// it is read again. A `frn` that is not a folder, or not in the index,
-    /// is ignored.
+    /// is ignored. When the table has grown, it also collects it, which gives
+    /// the index a new instance, so running searches and result snapshots on
+    /// the volume start again.
     pub fn set_folder_descriptor(&mut self, frn: Frn, descriptor: &[u8]) {
         let Some(head) = self.head_of(frn) else {
             return;
@@ -630,8 +632,9 @@ impl VolumeIndex {
     }
 
     /// Asks `may_list` once for every descriptor of the index, for one
-    /// request that reads it. A request asks before it scans, so the time a
-    /// search takes does not depend on whether a hidden name matches it.
+    /// request that reads it. A request asks before it scans, so the cost of
+    /// the access checks does not depend on which names match; the scan
+    /// still tests hidden names (DESIGN.md: Visibility).
     pub fn listable(&self, may_list: &dyn Fn(&[u8]) -> bool) -> Listable {
         self.descriptors.listable(may_list)
     }
@@ -697,17 +700,18 @@ impl VolumeIndex {
         idx != self.lost_found
             && self.entries.flags(idx).contains(EntryFlags::DIR)
             && !self.is_metadata_folder(idx)
-            && !(self.entries.frn(self.root).is_wide()
+            && !(self.has_wide_ids()
                 && (self.entries.attributes(idx))
                     .contains(PackedAttributes::from_record(FILE_ATTRIBUTE_REPARSE_POINT)))
     }
 
     /// Whether folder `idx` is `$Extend`, the root's child in MFT record 11,
-    /// or a folder below it, on a volume whose root ID is not wide, as an
-    /// NTFS root's is.
+    /// or a folder below it, on a volume whose IDs are not wide, as NTFS's
+    /// are. The daemon sets the width from the filesystem, so the test does
+    /// not depend on the value of a root ID.
     fn is_metadata_folder(&self, idx: EntryIdx) -> bool {
         const EXTEND_RECORD: u64 = 11;
-        !self.entries.frn(self.root).is_wide()
+        !self.has_wide_ids()
             && self.chain_up(idx).iter().any(|&e| {
                 self.entries.parent(e) == self.root
                     && self.entries.frn(e).record_number() == EXTEND_RECORD

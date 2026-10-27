@@ -240,7 +240,7 @@ fn show_list() -> anyhow::Result<()> {
 #[cfg(windows)]
 fn change_list(change: &ListChange) -> anyhow::Result<()> {
     if !gozler_winfs::is_elevated() {
-        anyhow::bail!("changing who sees every file needs an administrator terminal");
+        anyhow::bail!("changing who sees every file needs an elevated terminal");
     }
     let (ListChange::Add { account } | ListChange::Remove { account }) = change;
     let sid = resolve(account)?;

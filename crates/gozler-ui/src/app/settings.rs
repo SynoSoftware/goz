@@ -2433,10 +2433,18 @@ impl<'a> SettingsDialog<'a> {
             let checked = self
                 .check_box(SettingsPage::Visibility, ControlId::VisibilityEveryone)
                 .is_some_and(CheckBox::is_checked);
-            if let Ok(list) = &mut self.draft.borrow_mut().edited.see_every_file {
-                list.set_everyone(checked);
-            }
             let selected = self.visibility_list().and_then(ReportList::selected);
+            let selected = match &mut self.draft.borrow_mut().edited.see_every_file {
+                // Everyone may sit above the selected row, so the selection
+                // follows its account, not its row, or Remove would act on
+                // another account.
+                Ok(list) => {
+                    let line = selected.and_then(|row| list.lines().get(row).cloned());
+                    list.set_everyone(checked);
+                    line.and_then(|line| list.lines().iter().position(|each| *each == line))
+                }
+                Err(_) => selected,
+            };
             self.fill_visibility(selected);
         } else if is(id, ControlId::VisibilityAdd) {
             self.add_accounts(dialog);

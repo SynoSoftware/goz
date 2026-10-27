@@ -20,7 +20,8 @@ use windows_sys::Win32::Security::{
     AccessCheck, DuplicateTokenEx, GENERIC_MAPPING, GetLengthSid, GetTokenInformation, IsValidSid,
     LookupAccountNameW, LookupAccountSidW, PRIVILEGE_SET, PSID, RevertToSelf,
     SECURITY_IMPERSONATION_LEVEL, SID_AND_ATTRIBUTES, SID_NAME_USE, SecurityAnonymous,
-    SecurityIdentification, TOKEN_DUPLICATE, TOKEN_GROUPS, TOKEN_INFORMATION_CLASS, TOKEN_QUERY,
+    SecurityIdentification, SidTypeAlias, SidTypeComputer, SidTypeGroup, SidTypeUser,
+    SidTypeWellKnownGroup, TOKEN_DUPLICATE, TOKEN_GROUPS, TOKEN_INFORMATION_CLASS, TOKEN_QUERY,
     TOKEN_USER, TokenGroups, TokenImpersonation, TokenImpersonationLevel, TokenRestrictedSids,
     TokenUser,
 };
@@ -342,7 +343,10 @@ pub fn pipe_client_token(pipe: BorrowedHandle<'_>) -> Result<Option<ClientToken>
     ClientToken::identification_copy(token.as_raw_handle()).map(Some)
 }
 
-/// The SID of the account `name`, or `None` when no account has that name.
+/// The SID of the account `name`, or `None` when no user, group or computer
+/// account has that name. A name that Windows maps to another kind of account, such as the
+/// computer's own name, which maps to a domain, counts as unknown, because no
+/// token holds that SID and an entry for it would let nobody see anything.
 ///
 /// A name that starts with `S-1-` is read as a SID string, and `Everyone`, in
 /// any case, is `S-1-1-0`, without asking `LookupAccountNameW`: Windows names
@@ -415,6 +419,17 @@ pub fn account_sid(name: &str) -> Result<Option<Sid>, WinError> {
         } else {
             Err(error)
         };
+    }
+    if ![
+        SidTypeUser,
+        SidTypeGroup,
+        SidTypeAlias,
+        SidTypeWellKnownGroup,
+        SidTypeComputer,
+    ]
+    .contains(&kind)
+    {
+        return Ok(None);
     }
     // SAFETY: on success `sid` holds a valid SID, and it lives here.
     Ok(Some(unsafe { Sid::copy_from(sid.as_mut_ptr().cast()) }))
@@ -1017,6 +1032,15 @@ mod tests {
             let sid = account_sid(name).expect("no error").expect("a SID");
             assert_eq!(sid.to_string(), name);
         }
+    }
+
+    /// The computer's own name, such as `PC` typed for `PC\ana`, maps to a
+    /// domain SID that no token holds, so it must not be added as an entry
+    /// that lets nobody see anything.
+    #[test]
+    fn account_sid_refuses_the_computer_name() {
+        let computer = std::env::var("COMPUTERNAME").expect("Windows sets COMPUTERNAME");
+        assert_eq!(account_sid(&computer).expect("no error"), None);
     }
 
     /// The cost of one `may_list` over the distinct descriptors of folders
