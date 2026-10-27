@@ -171,7 +171,7 @@ calls it "UI", as TinyTorrent2 does (owner ruling).
 _Avoid_: GUI
 
 **Window**:
-The app's main window, which shows one of two modes: Search or Two panels.
+The app's main window, which shows one of two modes: Search or Commander mode.
 _Avoid_: UI, app (for the window)
 
 **Service**:
@@ -189,7 +189,8 @@ _Avoid_: form, window (for a dialog)
 
 **Pane**:
 A side area of Search: the filter pane at the left and the inspector below
-the results list. Not a panel: a panel is one of the two lists of Two panels.
+the results list. Not a panel: a panel is one of the two lists of Commander
+mode.
 _Avoid_: sidebar
 
 **Results list**:
@@ -237,22 +238,22 @@ _Avoid_: quit
 
 **Search**:
 The mode of the window with the search box, the results list and the panes.
-The other mode is Two panels.
+It behaves as Everything does. The other mode is Commander mode.
 
-**Two panels**:
+**Commander mode**:
 The mode of the window with two panels, the key bar and Norton Commander's
-keys, which View > Two panels switches on and off.
-
-**Commander**:
-The window's Two panels mode, as named by the Show Commander command.
+keys, which View > Commander switches on and off. It behaves as Total
+Commander does. "Commander" alone names it in commands such as Show
+Commander and Show in Commander.
+_Avoid_: Two panels, SynapseCommander
 
 **Open**:
-Opening an entry with its configured program in either mode. Without one,
-Windows uses its default program. Show in Commander is a separate navigation
-command that shows a folder, or a file's containing folder with the file focused.
+In Search, running the entry's command from Settings > Context menu, or
+without one showing it in Commander mode. In Commander mode, showing one
+folder in its panel, or opening files as Windows does.
 
 **Panel**:
-One of the two lists of Two panels, with its path box and its status line. It
+One of the two lists of Commander mode, with its path box and its status line. It
 shows a folder, or the results of a search (a search panel).
 
 **Active panel**:

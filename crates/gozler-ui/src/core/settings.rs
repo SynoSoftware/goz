@@ -682,7 +682,7 @@ impl SettingsDraft {
 }
 
 /// What the window shows: Search's results list, or Norton Commander's two
-/// panels (DESIGN.md: Two panels). The window opens in the mode it closed in.
+/// panels (DESIGN.md: Commander mode). The window opens in the mode it closed in.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum Mode {

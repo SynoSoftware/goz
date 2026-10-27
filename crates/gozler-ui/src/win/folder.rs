@@ -5,7 +5,7 @@ use super::Hwnd;
 use super::wake::OpenWaker;
 use crate::core::panel::{FolderChange, ReadAsk, ReadEvent, Side};
 use crate::core::work::{INLINE_ITEMS, Retirement};
-use gozler_winfs::{Signal, WinError};
+use gozler_winfs::{Access, Reparse, Signal, WinError, open_entry};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicIsize, Ordering};
 use std::sync::mpsc::{Receiver, SyncSender, sync_channel};
@@ -237,6 +237,24 @@ pub(super) fn verbatim_wide(path: &[u16]) -> Vec<u16> {
     } else {
         [&wide(r"\\?\")[..], path].concat()
     }
+}
+
+/// Opens `folder` for listing as a panel does, so a check made before a
+/// panel shows it gets the panel's answer.
+pub(crate) fn lists(folder: &[u16]) -> std::io::Result<()> {
+    open_wide(folder, Access::List, Reparse::Follow)
+}
+
+/// Opens the entry `path` names, a link itself rather than its target, so
+/// it fails with `NotFound` only when the name is gone.
+pub(crate) fn names(path: &[u16]) -> std::io::Result<()> {
+    open_wide(path, Access::Inspect, Reparse::Open)
+}
+
+fn open_wide(path: &[u16], access: Access, reparse: Reparse) -> std::io::Result<()> {
+    open_entry(&verbatim_wide(path), access, reparse)
+        .map(drop)
+        .map_err(|error| std::io::Error::from_raw_os_error(error.code as i32))
 }
 
 pub(super) fn reason(error: &WinError) -> String {

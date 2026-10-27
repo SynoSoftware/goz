@@ -142,14 +142,14 @@ pub(crate) struct StatusWidest {
     pub(crate) running: Vec<String>,
     /// A job's results, which have the middle group to themselves.
     pub(crate) done: Vec<String>,
-    /// The right group's texts in Two panels, which the layout sizes the
+    /// The right group's texts in Commander mode, which the layout sizes the
     /// group for at the bar's right end, so the middle group has the rest
-    /// (DESIGN.md: The status bar in Two panels).
+    /// (DESIGN.md: The status bar in Commander mode).
     pub(crate) panel_index: Vec<String>,
 }
 
 impl StatusCaptions {
-    /// Two panels shows no results, so it leaves out their counts and
+    /// Commander mode shows no results, so it leaves out their counts and
     /// totals.
     pub(crate) fn new(model: &Model, numbers: &dyn Numbers) -> StatusCaptions {
         let service = index_status(model);
@@ -383,7 +383,7 @@ pub(super) fn status_widest(strings: &Strings, numbers: &dyn Numbers) -> StatusW
 
 /// The list whose search the status bar describes: Search's, or in Two
 /// panels the active panel's while it searches (DESIGN.md: The status bar in
-/// Two panels).
+/// Commander mode).
 fn status_list(model: &Model) -> Option<List> {
     match model.mode() {
         Mode::Search => Some(List::Search),
@@ -756,7 +756,7 @@ pub(crate) fn index_status(model: &Model) -> String {
 }
 
 /// Why the active panel's folder sizes may be unknown, as the status bar's
-/// right group says it in Two panels (DESIGN.md: Folder sizes).
+/// right group says it in Commander mode (DESIGN.md: Folder sizes).
 fn panel_index_status(model: &Model) -> Option<String> {
     let strings = model.strings();
     let coverage = model.panel_coverage()?;

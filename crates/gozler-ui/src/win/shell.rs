@@ -3,6 +3,7 @@
 //! run as administrator, dragging entries out, and the person's registry settings.
 
 use super::Hwnd;
+use crate::core::clipboard::folder_of;
 use crate::core::selection::wide_path;
 use gozler_core::proto::ResultItem;
 use std::cell::Cell;
@@ -290,6 +291,7 @@ impl Session {
             w!("open"),
             &HSTRING::from(target),
             &HSTRING::new(),
+            None,
             SEE_MASK_NOASYNC,
             SW_SHOWNORMAL,
         )
@@ -304,6 +306,7 @@ impl Session {
             w!("open"),
             &HSTRING::from_wide(&program),
             &HSTRING::new(),
+            None,
             SEE_MASK_NOASYNC,
             SW_SHOWNORMAL,
         )
@@ -312,11 +315,15 @@ impl Session {
 
     pub(crate) fn open_entry(&self, path: &[u16]) -> io::Result<()> {
         self.ready()?;
+        // A program starts in its own folder, as File Explorer and Total
+        // Commander start it, so it finds the files beside it.
+        let folder = HSTRING::from_wide(folder_of(path));
         execute(
             HWND::default(),
             PCWSTR::null(),
             &HSTRING::from_wide(path),
             &HSTRING::new(),
+            Some(&folder),
             SEE_MASK_NOASYNC,
             SW_SHOWNORMAL,
         )
@@ -338,6 +345,7 @@ impl Session {
             PCWSTR::null(),
             &HSTRING::from("explorer.exe"),
             &HSTRING::from_wide(&parameters),
+            None,
             SEE_MASK_NOASYNC,
             SW_SHOWNORMAL,
         )
@@ -375,6 +383,7 @@ impl Session {
             PCWSTR::null(),
             &HSTRING::from(program),
             &HSTRING::from(parameters),
+            None,
             SEE_MASK_NOASYNC,
             SW_SHOWNORMAL,
         )
@@ -782,6 +791,7 @@ impl Session {
             w!("runas"),
             &HSTRING::from(program),
             &HSTRING::from(parameters),
+            None,
             SEE_MASK_NOCLOSEPROCESS | SEE_MASK_NOASYNC,
             SW_HIDE,
         )?;
@@ -818,6 +828,7 @@ fn execute(
     verb: PCWSTR,
     program: &HSTRING,
     parameters: &HSTRING,
+    directory: Option<&HSTRING>,
     mask: u32,
     show: SHOW_WINDOW_CMD,
 ) -> io::Result<HANDLE> {
@@ -832,6 +843,7 @@ fn execute(
         } else {
             PCWSTR(parameters.as_ptr())
         },
+        lpDirectory: directory.map_or(PCWSTR::null(), |folder| PCWSTR(folder.as_ptr())),
         nShow: show.0,
         ..Default::default()
     };

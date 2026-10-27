@@ -58,7 +58,7 @@ use crate::core::model::{
     Accepted, Areas, Column, Effect, ExportError, ExportFormat, Instance, Job, Model, SaveScope,
     ScopeCheck, SearchBoxEnter,
 };
-use crate::core::open::{Commands, Entries, EntryAction, Selected};
+use crate::core::open::{Commands, Entries, EntryAction, OpenRoute, Selected};
 use crate::core::operations::{
     OperationDialog, OperationProgress, OperationSteps, PreparedFailure, QueueStep, Reporting,
     SourceStep,
@@ -1754,14 +1754,37 @@ impl MainWindow {
                     self.open_dialog(hwnd, DialogId::About, &about);
                     return;
                 }
-                CommandId::Open => return self.act_on_selected(list, EntryAction::Open),
+                CommandId::Open => {
+                    let Some(entries) = self.selected_source(list) else {
+                        return;
+                    };
+                    // The row menu's bold Open does what a double-click
+                    // does, as Windows' guidelines ask, so one folder shows
+                    // in its panel.
+                    if let List::Panel(side) = list
+                        && let Some(folder) = entries.one().filter(|entry| entry.is_folder)
+                    {
+                        let folder = String::from_utf16_lossy(&folder.path);
+                        self.controls().panels.show_folder(self, side, folder);
+                        return;
+                    }
+                    match self.open_commands(list).open_route(list, &entries) {
+                        OpenRoute::Run => self.open_entries(list, EntryAction::Open, entries),
+                        OpenRoute::Commander { entry, commanded } => {
+                            if !commanded.is_empty() {
+                                let commanded = Entries::Ready(commanded);
+                                self.open_entries(list, EntryAction::Open, commanded);
+                            }
+                            self.show_in_commander(list, entry);
+                        }
+                    }
+                    return;
+                }
                 CommandId::ShowInCommander => {
                     if let Some(entry) =
                         self.selected_source(list).and_then(|entries| entries.one())
                     {
-                        self.controls()
-                            .panels
-                            .show_entry_in_commander(self, hwnd, entry);
+                        self.show_in_commander(list, entry);
                     }
                     return;
                 }
@@ -2025,7 +2048,7 @@ impl MainWindow {
     /// The list of users and groups who see every file changed: the lists
     /// read again, as F5 reads them, so that they hold what the person may
     /// see now, and the status tells the Visibility page. The Search list
-    /// searches again also while Two panels shows, because it keeps its
+    /// searches again also while Commander mode shows, because it keeps its
     /// results until it shows; the panels read their folders when they show.
     fn show_again(&self, hwnd: Hwnd) {
         self.created().work.borrow_mut().lists.refresh_location();
@@ -2238,6 +2261,12 @@ impl MainWindow {
                 }
                 ModalStep::Opened(purpose, id, opened) => {
                     if !self.created().work.borrow().shell.is_current(purpose, id) {
+                        continue;
+                    }
+                    if let Some(entry) = opened.commander {
+                        self.controls()
+                            .panels
+                            .show_entry_in_commander(self, hwnd, entry);
                         continue;
                     }
                     if purpose == ShellPurpose::Setup {
@@ -2985,7 +3014,7 @@ impl MainWindow {
     /// Whether `point`, in screen coordinates, is on the list's header.
     fn on_header(&self, point: (i32, i32)) -> bool {
         // A hidden list keeps its header's rectangle, which a panel covers
-        // in Two panels.
+        // in Commander mode.
         let list = self.controls().search.list;
         list.hwnd().is_visible() && list.header().screen_rect().contains(point)
     }
@@ -3009,16 +3038,30 @@ impl MainWindow {
         self.open_entries(list, action, entries);
     }
 
+    /// Shows `entry` in Commander once its folder opens (DESIGN.md:
+    /// Searching, "where Open goes").
+    fn show_in_commander(&self, list: List, entry: Selected) {
+        self.created()
+            .work
+            .borrow_mut()
+            .shell
+            .show_in_commander(list, entry);
+    }
+
+    /// The open commands of Settings > Context menu that `list` runs.
+    fn open_commands(&self, list: List) -> Commands {
+        let model = self.model.borrow();
+        let choices = model.choices();
+        Commands {
+            folders: choices.open_folders.clone(),
+            files: choices.open_files.clone(),
+            location: choices.open_file_location.clone(),
+        }
+        .for_list(list)
+    }
+
     fn open_entries(&self, list: List, action: EntryAction, entries: Entries) {
-        let commands = {
-            let model = self.model.borrow();
-            let choices = model.choices();
-            Commands {
-                folders: choices.open_folders.clone(),
-                files: choices.open_files.clone(),
-                location: choices.open_file_location.clone(),
-            }
-        };
+        let commands = self.open_commands(list);
         self.created()
             .work
             .borrow_mut()
@@ -4061,8 +4104,8 @@ impl MainWindow {
 
     /// Brings the window forward with the search box focused and its text
     /// selected, so the person types the next search at once (DESIGN.md: Window
-    /// lifetime, C24), or in Two panels with the active panel's list focused
-    /// (DESIGN.md: Two panels' window). While a dialog is open, the dialog
+    /// lifetime, C24), or in Commander mode with the active panel's list focused
+    /// (DESIGN.md: Commander mode's window). While a dialog is open, the dialog
     /// keeps the focus.
     fn show_window(&self, hwnd: Hwnd) {
         // The columns fill when the window shows (DESIGN.md: Results list),
@@ -4760,7 +4803,7 @@ impl WindowProc for MainWindow {
             }
             // A second start with `--location`, such as from Total Commander
             // or a script (DESIGN.md: Window lifetime), shows Search, whose
-            // filter Location is (DESIGN.md: Two panels' window).
+            // filter Location is (DESIGN.md: Commander mode's window).
             Message::CopyData { tag, text } if tag == self.show_message as usize => {
                 let accepted = self.model.borrow_mut().show_mode(Mode::Search);
                 self.apply(hwnd, accepted);

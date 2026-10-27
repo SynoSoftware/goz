@@ -1,10 +1,10 @@
 //! The open commands of Settings > Context menu (DESIGN.md: The Context
 //! menu page): Open folders, Open files and Open file location, in which
 //! `%1` is the entry's full path, as in Everything and in Windows' own
-//! commands. Enter, double-click and menu Open share these commands in both
-//! modes; an empty command uses Windows' default. Navigation into Commander
-//! is a separate command.
+//! commands. Enter, double-click and menu Open are one command, and
+//! [`Commands::open_route`] decides where it goes.
 
+use super::fetch::List;
 use super::text::name_of;
 use gozler_core::proto::ResultItem;
 use std::sync::Arc;
@@ -87,7 +87,58 @@ pub(crate) struct Commands {
     pub(crate) location: String,
 }
 
+/// Where Open goes for the selected entries.
+pub(crate) enum OpenRoute {
+    /// Each entry's command from Settings > Context menu, or Windows' default
+    /// when its command is empty.
+    Run,
+    /// The entry in Commander: its folder, or its containing folder with
+    /// the file focused; `commanded` are the entries that have a command,
+    /// which runs.
+    Commander {
+        entry: Selected,
+        commanded: Vec<Selected>,
+    },
+}
+
 impl Commands {
+    /// The commands that `list` runs. **Owner ruling (DESIGN.md: Searching,
+    /// "where Open goes"):** they serve Search, which behaves as Everything;
+    /// Commander mode behaves as Total Commander, so its entries open as
+    /// Windows opens them.
+    pub(crate) fn for_list(self, list: List) -> Commands {
+        match list {
+            List::Search => self,
+            List::Panel(_) => Commands {
+                folders: String::new(),
+                files: String::new(),
+                location: String::new(),
+            },
+        }
+    }
+
+    /// **Owner ruling (DESIGN.md: Searching, "where Open goes").** A command
+    /// set in Settings > Context menu always runs. In Search, a result
+    /// without one shows in Commander, so Open from Search never opens
+    /// Explorer; in Commander mode, whose `self` is [`Commands::for_list`]'s,
+    /// an entry opens as Windows opens it.
+    pub(crate) fn open_route(&self, list: List, entries: &Entries) -> OpenRoute {
+        let selected: Vec<Selected> = match (list, entries) {
+            (List::Search, Entries::Ready(entries)) => entries.clone(),
+            (List::Search, Entries::Results(items)) => {
+                items.iter().map(Selected::of_result).collect()
+            }
+            _ => return OpenRoute::Run,
+        };
+        let (commanded, uncommanded): (Vec<_>, Vec<_>) = selected
+            .into_iter()
+            .partition(|entry| self.expand(EntryAction::Open, entry).is_some());
+        match uncommanded.into_iter().next() {
+            Some(entry) => OpenRoute::Commander { entry, commanded },
+            None => OpenRoute::Run,
+        }
+    }
+
     pub(crate) fn expand(&self, action: EntryAction, entry: &Selected) -> Option<CommandLine> {
         let command = match action {
             EntryAction::Open if entry.is_folder => &self.folders,
@@ -162,6 +213,7 @@ fn expand(command: &str, path: &str) -> Option<CommandLine> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::panel::Side;
     use crate::core::results::tests::chunk;
 
     /// A program path with spaces that is not quoted runs another program,
@@ -210,5 +262,52 @@ mod tests {
             Some(r"C:\Old\TOTALCMD.EXE")
         );
         assert_eq!(newest_total_commander(&rows[3..]), None);
+    }
+
+    /// Making Open one rule for both modes sends Enter in Search to Explorer
+    /// instead of Commander, which the owner's ruling forbids, also with
+    /// several results selected.
+    #[test]
+    fn open_goes_to_commander_only_from_search_without_a_command() {
+        let folder = |path: &str| Selected {
+            path: path.encode_utf16().collect(),
+            is_folder: true,
+        };
+        let folders = Entries::Ready(vec![folder(r"D:\Music"), folder(r"D:\Photos")]);
+        let commands = |folders: &str| Commands {
+            folders: folders.into(),
+            files: String::new(),
+            location: String::new(),
+        };
+        let none = commands("");
+        let set = commands(r#""C:\tc\TOTALCMD64.EXE" "%1""#);
+        let in_panel = commands(r#""C:\tc\TOTALCMD64.EXE" "%1""#).for_list(List::Panel(Side::Left));
+        assert_eq!(
+            in_panel.expand(EntryAction::Open, &folder(r"D:\Music")),
+            None,
+            "Commander mode never runs the Open with commands"
+        );
+        let commander = |route| matches!(route, OpenRoute::Commander { .. });
+        assert!(matches!(
+            none.open_route(List::Search, &folders),
+            OpenRoute::Commander { entry, commanded }
+                if entry == folder(r"D:\Music") && commanded.is_empty()
+        ));
+        assert!(!commander(set.open_route(List::Search, &folders)));
+        assert!(!commander(
+            none.open_route(List::Panel(Side::Left), &folders)
+        ));
+        // A folder and a file with only Open folders set: the folder's
+        // command still runs.
+        let file = Selected {
+            path: r"D:\Music\song.mp3".encode_utf16().collect(),
+            is_folder: false,
+        };
+        let mixed = Entries::Ready(vec![folder(r"D:\Music"), file.clone()]);
+        assert!(matches!(
+            set.open_route(List::Search, &mixed),
+            OpenRoute::Commander { entry, commanded }
+                if entry == file && commanded == [folder(r"D:\Music")]
+        ));
     }
 }

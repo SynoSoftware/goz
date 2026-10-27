@@ -1,4 +1,4 @@
-//! Two panels' controls and handlers (DESIGN.md: Two panels). `core::panel`
+//! Commander mode's controls and handlers (DESIGN.md: Commander mode). `core::panel`
 //! decides what each panel shows; these handlers read each list's [`Place`],
 //! submit folder work through the work owner, and show what the model says.
 //! The list owns the focus and the selection, as Search's list does (DESIGN.md:
@@ -14,10 +14,11 @@ use crate::core::ids::DialogId;
 use crate::core::layout::column_sizing::{self, ColumnFit};
 use crate::core::layout::{Body, PanelLayout, Px, Rect};
 use crate::core::model::{Accepted, Areas, Column, Effect, TakenShown};
+use crate::core::open::{Entries, EntryAction};
 use crate::core::panel::{
-    self, Entry, FolderChange, LookIn, PanelColumn, PanelFollow, PanelUpdate, Panels as PanelState,
-    Place, QuickAction, ReadAsk, ReadChange, ReadEvent, ReadFailure, Row, Side, TakenRows,
-    UpdatedKind, View,
+    self, Entered, Entry, FolderChange, LookIn, PanelColumn, PanelFollow, PanelUpdate,
+    Panels as PanelState, Place, QuickAction, ReadAsk, ReadChange, ReadEvent, ReadFailure, Row,
+    Side, TakenRows, UpdatedKind, View,
 };
 use crate::core::selection::SELECTION_LIMIT;
 use crate::core::settings::Mode;
@@ -178,7 +179,7 @@ impl PanelControls {
         Ok(controls)
     }
 
-    /// Every control, which the window shows only in Two panels.
+    /// Every control, which the window shows only in Commander mode.
     pub(super) fn hwnds(&self) -> [Hwnd; 12] {
         [
             self.drive.hwnd(),
@@ -422,7 +423,7 @@ impl Panels {
             .find(|side| self.panel(*side).look_in.hwnd() == control)
     }
 
-    /// `side`'s place in the window's layout, while Two panels shows.
+    /// `side`'s place in the window's layout, while Commander mode shows.
     pub(super) fn panel_layout(&self, window: &MainWindow, side: Side) -> Option<PanelLayout> {
         match &window.created().layout.borrow().as_ref()?.body {
             Body::TwoPanels { panels, .. } => Some(panels[side.index()]),
@@ -894,7 +895,7 @@ impl Panels {
     }
 
     /// Starts reading both panels' folders, or a search panel's search,
-    /// when Two panels shows (DESIGN.md: Two panels' window).
+    /// when Commander mode shows (DESIGN.md: Commander mode's window).
     pub(super) fn start_panels(&self, window: &MainWindow, hwnd: Hwnd) -> Accepted {
         let mut accepted = Accepted {
             touched: Areas::LEFT_PANEL | Areas::RIGHT_PANEL | Areas::STATUS | Areas::KEY_BAR,
@@ -926,7 +927,7 @@ impl Panels {
     /// a watched folder on a USB drive blocks its removal and nobody sees
     /// the changes. A search panel lets go of its rows, its selection and
     /// its kept operations, but keeps its text and Look in, because it
-    /// searches again when Two panels shows.
+    /// searches again when Commander mode shows.
     pub(super) fn stop_panels(&self, window: &MainWindow, hwnd: Hwnd) -> Accepted {
         let mut accepted = Accepted {
             touched: Areas::LEFT_PANEL | Areas::RIGHT_PANEL | Areas::STATUS | Areas::KEY_BAR,
@@ -1403,7 +1404,7 @@ impl Panels {
         self.read(window, side, ask);
     }
 
-    /// Find in Two panels: the panel becomes a search panel of its
+    /// Find in Commander mode: the panel becomes a search panel of its
     /// folder, which ends its reading and its folder's requests, and its
     /// search box takes the focus with its text selected
     /// (DESIGN.md: Search in a panel).
@@ -1533,7 +1534,7 @@ impl Panels {
             }
         }
         match key {
-            PanelKey::Enter => self.enter_row(window, hwnd, side),
+            PanelKey::Enter => self.enter_row(window, side),
             PanelKey::Back => {
                 let mut model = window.model.borrow_mut();
                 let panels = model.panels_mut();
@@ -1625,18 +1626,32 @@ impl Panels {
         self.read_selection(window, side, false);
     }
 
-    /// `Enter` or a double-click on the focused row of `side`.
-    pub(super) fn enter_row(&self, window: &MainWindow, hwnd: Hwnd, side: Side) {
+    /// `Enter` or a double-click on the focused row of `side`, which acts
+    /// on that row alone, as in Total Commander ([`PanelState::enter`]).
+    pub(super) fn enter_row(&self, window: &MainWindow, side: Side) {
         let Some(row) = self.panel(side).list.focused() else {
             return;
         };
-        let up = matches!(window.model.borrow().panels().row(side, row), Some(Row::Up));
-        if up {
-            let ask = window.model.borrow_mut().panels_mut().go_up(side);
-            self.read(window, side, ask);
-        } else {
-            window.run(hwnd, MenuItem::Run(CommandId::Open));
+        let entered = window.model.borrow_mut().panels_mut().enter(side, row);
+        match entered {
+            Entered::Read(ask) => self.read(window, side, Some(ask)),
+            Entered::Open(entry) => window.open_entries(
+                List::Panel(side),
+                EntryAction::Open,
+                Entries::Ready(vec![entry]),
+            ),
+            Entered::Nothing => {}
         }
+    }
+
+    /// Shows `folder` in `side`, as `Enter` on a folder row does.
+    pub(super) fn show_folder(&self, window: &MainWindow, side: Side, folder: String) {
+        let ask = window
+            .model
+            .borrow_mut()
+            .panels_mut()
+            .go(side, folder, None);
+        self.read(window, side, Some(ask));
     }
 
     /// Show the mode before navigating: its initial folder reads must not
@@ -1695,7 +1710,7 @@ impl Panels {
         true
     }
 
-    /// Two panels' fixed keys that run no command.
+    /// Commander mode's fixed keys that run no command.
     pub(super) fn run_panel_action(&self, window: &MainWindow, hwnd: Hwnd, action: PanelAction) {
         match action {
             // A search panel's search box stands in its path box's place
@@ -1863,7 +1878,7 @@ impl Panels {
                 None
             }
             ListNotify::Activated => {
-                self.enter_row(window, hwnd, side);
+                self.enter_row(window, side);
                 None
             }
             ListNotify::Focused => {
@@ -1997,7 +2012,7 @@ impl Panels {
         true
     }
 
-    /// The context menu of `side`'s list (DESIGN.md: Menus in Two panels): an
+    /// The context menu of `side`'s list (DESIGN.md: Menus in Commander mode): an
     /// entry's, at the row the person right-clicked or at the focused row for
     /// the Menu key, else the empty area's. The header shows none.
     pub(super) fn panel_menu(

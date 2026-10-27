@@ -143,7 +143,7 @@ pub(crate) fn run() {
     let mut model = Model::new(Strings::load(language), settings, instance);
     if let Some(folder) = arguments.location {
         // The window's first search runs with it, in Search, whose filter
-        // Location is (DESIGN.md: Two panels' window).
+        // Location is (DESIGN.md: Commander mode's window).
         let _ = model.show_mode(Mode::Search);
         let _ = model.choose_folder(folder);
     }

@@ -1193,7 +1193,7 @@ impl Model {
     }
 
     /// Shows `mode`. Each mode keeps its state while the other shows
-    /// (DESIGN.md: Two panels' window).
+    /// (DESIGN.md: Commander mode's window).
     pub(crate) fn show_mode(&mut self, mode: Mode) -> Accepted {
         let window = &mut self.settings.window;
         if window.mode == mode {

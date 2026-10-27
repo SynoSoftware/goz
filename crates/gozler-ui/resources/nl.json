@@ -56,7 +56,7 @@
     "copy_to_folder": "Kopië&ren naar map…",
     "move_to_folder": "Verplaa&tsen naar map…",
     "file_operations": "Bestandsoverd&rachten",
-    "two_panels": "&Twee panelen",
+    "two_panels": "&Commander",
     "clear_selection": "Selectie &wissen",
     "view": "&Weergeven",
     "edit": "&Bewerken",
@@ -516,8 +516,8 @@
     "open_file_location": "Bestandslo&catie:",
     "browse": "Bladeren…",
     "cue_explorer": "Verkenner",
-    "cue_default_program": "Het standaardprogramma van het bestand",
-    "command_hint": "%1 is de map of het bestand. Laat een vak leeg om het te openen zoals Verkenner dat doet.",
+    "cue_commander": "Commandermodus",
+    "command_hint": "%1 is de map of het bestand. Alleen Zoeken voert deze opdrachten uit.",
     "total_commander": "<a>Total Commander gebruiken</a>",
     "total_commander_tooltip": "Open mappen en bestanden met Total Commander.",
     "total_commander_set": "Total Commander is al ingesteld.",
@@ -532,7 +532,7 @@
     "select_on_click": "De tekst selecteren als ik in het vak &klik",
     "select_on_activate": "De tekst selecteren als het venster wordt geacti&veerd",
     "results": "Resultaten",
-    "open_note": "Enter, dubbelklikken en Openen gebruiken de opdrachten op Contextmenu. Gebruik Weergeven in Commander om naar een resultaat te gaan."
+    "open_note": "Enter, dubbelklikken en Openen voeren de opdracht op Contextmenu uit. Zonder opdracht wordt het resultaat in Commander weergegeven."
   },
   "settings_keyboard": {
     "global_shortcuts": "Vanuit elk programma",
@@ -562,7 +562,7 @@
     "unsupported": "Deze toets kan niet in een sneltoets worden gebruikt. Kies een letter, een cijfer of een functietoets, zoals Ctrl+K of F3.",
     "shortcut_taken": "Een ander programma gebruikt {0}. Kies een andere sneltoets.",
     "shortcut_failed": "Kan {0} niet gebruiken. {1}",
-    "two_panels": "Twee panelen reserveert F3 tot en met F9, Alt+F1, Alt+F2, Alt+F7, Ctrl+F, Ctrl+L, Ctrl+R en Alt met een letter, cijfer, komma of punt. Een sneltoets op een van deze toetsen werkt alleen in Zoeken."
+    "two_panels": "Commandermodus reserveert F3 t/m F9, Alt+F1, Alt+F2, Alt+F7, Ctrl+F, Ctrl+L, Ctrl+R en Alt met letter, cijfer, komma of punt. Een sneltoets op deze toetsen werkt alleen in Zoeken."
   },
   "windows_shortcut": {
     "desktop": "het bureaublad",

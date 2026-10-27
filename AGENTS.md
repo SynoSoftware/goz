@@ -37,6 +37,15 @@ lost. This holds for a wait that was measured and for one found or suspected
 while reading code, such as in a review. The issue names the slow step and
 what it reads, and says whether its cost was measured or is suspected.
 
+**Owner ruling: established behavior first.** Search behaves as Everything
+does, and Commander mode as Total Commander and Norton Commander do. Where they
+say nothing, the window behaves as File Explorer does and as Nielsen's
+usability heuristics and Microsoft's Windows design guidelines say. People
+already know that behavior; a different design names what the person
+gains. For example, a command that takes the person to another mode, folder
+or dialog first checks that the destination opens; when it does not, the
+person stays where they were and is told why.
+
 **Owner ruling: window text.** Write it in the Fluent 2 tone of
 `docs/WRITING.md`, and judge each string in its dialog or page, which reads
 top to bottom without saying anything twice. A dialog's title bar names its

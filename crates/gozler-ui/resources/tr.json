@@ -56,7 +56,7 @@
     "copy_to_folder": "Klas&öre kopyala…",
     "move_to_folder": "Klasöre ta&şı…",
     "file_operations": "Dosya a&ktarımları",
-    "two_panels": "İki &panel",
+    "two_panels": "&Commander",
     "clear_selection": "Seçimi &kaldır",
     "view": "&Görüntüle",
     "edit": "&Düzenle",
@@ -516,8 +516,8 @@
     "open_file_location": "Dosya ko&numu:",
     "browse": "Gözat…",
     "cue_explorer": "Dosya Gezgini",
-    "cue_default_program": "Dosyanın varsayılan programı",
-    "command_hint": "%1 klasör veya dosyadır. Dosya Gezgini'nin açtığı gibi açmak için kutuyu boş bırakın.",
+    "cue_commander": "Commander modu",
+    "command_hint": "%1 klasör veya dosyadır. Bu komutları yalnızca Arama çalıştırır.",
     "total_commander": "<a>Total Commander'ı kullan</a>",
     "total_commander_tooltip": "Klasörleri ve dosyaları Total Commander ile açın.",
     "total_commander_set": "Total Commander zaten ayarlı.",
@@ -532,7 +532,7 @@
     "select_on_click": "Kutuya tı&kladığımda metni seç",
     "select_on_activate": "Pencere etkinleştirildiğinde &metni seç",
     "results": "Sonuçlar",
-    "open_note": "Enter, çift tıklama ve Aç, Bağlam menüsündeki komutları kullanır. Bir sonuca gitmek için Commander içinde göster komutunu kullanın."
+    "open_note": "Enter, çift tıklama ve Aç, Bağlam menüsündeki komutu çalıştırır. Komut yoksa sonuç Commander içinde gösterilir."
   },
   "settings_keyboard": {
     "global_shortcuts": "Herhangi bir programdan",
@@ -562,7 +562,7 @@
     "unsupported": "Bu tuş bir kısayolda kullanılamaz. Ctrl+K veya F3 gibi bir harf, rakam veya işlev tuşu seçin.",
     "shortcut_taken": "{0} kısayolunu başka bir program kullanıyor. Başka bir kısayol seçin.",
     "shortcut_failed": "{0} kullanılamadı. {1}",
-    "two_panels": "İki panel F3–F9, Alt+F1, Alt+F2, Alt+F7, Ctrl+F, Ctrl+L ve Ctrl+R tuşlarını ve Alt ile bir harf, rakam, virgül ya da noktayı kendine ayırır. Bu tuşlardan birindeki kısayol yalnızca Arama'da çalışır."
+    "two_panels": "Commander modu F3–F9, Alt+F1, Alt+F2, Alt+F7, Ctrl+F, Ctrl+L, Ctrl+R ve Alt ile harf, rakam, virgül ya da noktayı ayırır. Bu tuşlardaki kısayol yalnızca Arama'da çalışır."
   },
   "windows_shortcut": {
     "desktop": "masaüstü",

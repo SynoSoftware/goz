@@ -22,7 +22,7 @@ pub(crate) fn header(strings: &Strings, column: Column) -> Text {
     }
 }
 
-/// What the list's empty area says instead of rows, if anything. Two panels
+/// What the list's empty area says instead of rows, if anything. Commander mode
 /// hides the list, and its message with it.
 pub(crate) fn list_message(model: &Model) -> Option<ListCaption> {
     if model.mode() == Mode::TwoPanels {

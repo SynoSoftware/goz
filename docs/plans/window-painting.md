@@ -23,7 +23,7 @@ A frame showing a cleared, half-drawn or doubled control fails that recording.
 Correct settled controls, a green build and native invalidation alone do not
 pass it. This is not a frame-rate target or an atomic-publication guarantee.
 
-Cover Search and Two panels resizing, splitter movement, typing/status updates,
+Cover Search and Commander mode resizing, splitter movement, typing/status updates,
 scrolling, mode changes and revealing/changing transfer content. Reuse the
 recording actions and coordinates in the saved fixture rather than inventing
 an easier workload. Theme, high contrast, uncommon fonts and mixed-monitor DPI
@@ -75,7 +75,7 @@ supported distinction:
   override retained counterexamples. Existing structural parent redraw scopes
   also did not make independent child publication atomic.
 - Whole-window `WS_EX_COMPOSITED` was explicitly tested and rejected: about five
-  times the measured UI cycles overall, a Two panels resize over 200 ms and a
+  times the measured UI cycles overall, a Commander mode resize over 200 ms and a
   remaining toolbar counterexample. See
   [the native buffering evaluation](../research/native-window-buffering.md).
 - Child `SWP_NOCOPYBITS`, native clipping and structural descendant restoration

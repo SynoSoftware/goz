@@ -458,7 +458,7 @@ BEGIN
     PUSHBUTTON      "", IDCANCEL, 367, 299, 56, 14
 END
 
-// Two panels' New folder: the new folder's name (DESIGN.md: New folder).
+// Commander mode's New folder: the new folder's name (DESIGN.md: New folder).
 IDD_NEW_FOLDER DIALOGEX 0, 0, 220, 58
 STYLE DS_SHELLFONT | DS_MODALFRAME | DS_CENTER | WS_POPUP | WS_CAPTION | WS_SYSMENU
 FONT 9, "Segoe UI", 400, 0, 0x1

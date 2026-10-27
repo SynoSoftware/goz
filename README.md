@@ -18,8 +18,8 @@ Free and open source, for Windows 10 and 11.
   move and delete.*
 
 Search your Windows drives, then act on what you find. Copy, move or delete
-directly from results, or use two panels to keep the source and destination
-in view.
+directly from results, or use Commander mode's two panels to keep the source
+and destination in view.
 
 **[Download Gozler for Windows x64](https://github.com/SynoSoftware/goz/releases/latest)**
 · [What's new](https://github.com/SynoSoftware/goz/releases)
@@ -79,8 +79,8 @@ Deletes are permanent: Gozler does not use the Recycle Bin.
 
 ## Keep source and destination side by side
 
-The two panels provide a familiar Norton Commander layout for Gozler's
-fast file operations. Copy and Move suggest the other panel's folder
+Commander mode's two panels provide a familiar Norton Commander layout for
+Gozler's fast file operations. Copy and Move suggest the other panel's folder
 automatically. Folder changes appear live, and slow network folders load
 without freezing the window.
 

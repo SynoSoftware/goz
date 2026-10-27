@@ -884,8 +884,8 @@ pub(crate) struct Narrow {
 
 /// The window's title: the typed search and the product's name, as Windows
 /// titles a document window, or the name alone while the search is empty or
-/// Two panels shows, because a title that named one panel's folder would be
-/// wrong for the other (DESIGN.md: Two panels' window).
+/// Commander mode shows, because a title that named one panel's folder would be
+/// wrong for the other (DESIGN.md: Commander mode's window).
 pub(crate) fn title(model: &Model) -> String {
     let strings = model.strings();
     let text = model.search_list().text().trim();

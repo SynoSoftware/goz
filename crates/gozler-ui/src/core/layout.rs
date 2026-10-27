@@ -1233,7 +1233,7 @@ impl InspectorLayout {
     }
 }
 
-/// The most dividers a layout has: in Two panels, the line between the
+/// The most dividers a layout has: in Commander mode, the line between the
 /// panels, the line above the key bar and the line above each panel's
 /// status line. The window makes a control for each.
 pub(crate) const DIVIDERS: usize = 4;
@@ -1257,7 +1257,7 @@ pub(crate) enum Body {
     /// Boxed, because Search's controls take far more room than two lists.
     Search(Box<SearchLayout>),
     /// The left and the right panel, each half of the window, and the key
-    /// bar under them (DESIGN.md: Two panels' window). The panels are boxed, as
+    /// bar under them (DESIGN.md: Commander mode's window). The panels are boxed, as
     /// Search is, so the two variants take about the same room.
     TwoPanels {
         panels: Box<[PanelLayout; 2]>,
@@ -1374,7 +1374,7 @@ impl Layout {
         layout
     }
 
-    /// Search's controls, or `None` while Two panels shows.
+    /// Search's controls, or `None` while Commander mode shows.
     pub(crate) fn search(&self) -> Option<&SearchLayout> {
         match &self.body {
             Body::Search(search) => Some(search.as_ref()),
@@ -1388,7 +1388,7 @@ impl Layout {
     }
 
     /// The two panels side by side from the menu bar to the key bar, with a
-    /// divider between them and no splitter (DESIGN.md: Two panels' window),
+    /// divider between them and no splitter (DESIGN.md: Commander mode's window),
     /// and the key bar's buttons sharing its width. The status bar has no left
     /// group, because each panel's status line shows its drive's free space.
     fn compute_two_panels(
@@ -1415,7 +1415,7 @@ impl Layout {
                 + related,
         );
         // The memory group shows as in Search; Show details does not,
-        // because Two panels has no inspector.
+        // because Commander mode has no inspector.
         let mut status = StatusLayout::compute(
             &captions.status,
             captions.status_cancel.width(dpi),
@@ -2065,7 +2065,7 @@ impl StatusLayout {
         }
     }
 
-    /// Leaves out the left group, which Two panels does not have, by giving
+    /// Leaves out the left group, which Commander mode does not have, by giving
     /// it no width.
     fn drop_view_group(&mut self) {
         let width = self.groups[0];
@@ -2076,7 +2076,7 @@ impl StatusLayout {
     }
 
     /// Widens the middle group of a bar `width` wide so the right group
-    /// keeps only `right`, as Two panels draws it. The right group ends
+    /// keeps only `right`, as Commander mode draws it. The right group ends
     /// where the memory group starts, or before the size grip when it is
     /// the last part. The running job's progress bar and Cancel stay beside
     /// its text.
@@ -2611,7 +2611,7 @@ mod tests {
         }
     }
 
-    /// Two panels' controls split the window between them, so a control
+    /// Commander mode's controls split the window between them, so a control
     /// that left the client area or overlapped another, a list that took
     /// more than its half, or a key bar button too narrow for its caption
     /// and icon would show only when a person looks: at the minimum size, at

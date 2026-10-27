@@ -1,4 +1,4 @@
-//! The panels of Two panels (DESIGN.md: A panel): what each panel's list shows,
+//! The panels of Commander mode (DESIGN.md: A panel): what each panel's list shows,
 //! and every decision about it that needs no window.
 //!
 //! A panel lists the disk itself, because gozlerd does not index USB,
@@ -260,6 +260,16 @@ impl LookIn {
 }
 
 pub(crate) use super::open::Selected as ChosenEntry;
+
+/// What `Enter` on a panel row does ([`Panels::enter`]).
+pub(crate) enum Entered {
+    /// `..` or a folder, which the panel reads.
+    Read(ReadAsk),
+    /// A file, which the window opens as Windows does, so an `.exe` runs.
+    Open(ChosenEntry),
+    /// A blank row, or `..` of a drive's root.
+    Nothing,
+}
 
 #[derive(Clone, Copy)]
 pub(crate) struct CommandPlace {
@@ -1682,7 +1692,7 @@ impl Panels {
         true
     }
 
-    /// The reading of `side` when Two panels shows: its folder again, or
+    /// The reading of `side` when Commander mode shows: its folder again, or
     /// the first time its saved folder, or the nearest folder above it that
     /// exists; `first` is the folder of a panel that saved none, Documents
     /// or Downloads. `None` for a search panel, whose search runs again
@@ -1793,6 +1803,38 @@ impl Panels {
         }
         let name: Box<[u16]> = last_name(&folder).encode_utf16().collect();
         Some(self.go(side, parent_of(&folder), Some(name)))
+    }
+
+    /// `Enter` or a double-click on `row` of `side`, as in Total Commander:
+    /// `..` shows the parent folder with the folder the panel came from
+    /// focused, and a folder, also a search panel's, shows that folder.
+    /// Settings > Context menu's open commands do not apply (DESIGN.md:
+    /// Searching, "where Open goes").
+    pub(crate) fn enter(&mut self, side: Side, row: u64) -> Entered {
+        enum Target {
+            Up,
+            Folder(String),
+            File(ChosenEntry),
+        }
+        let panel = self.panel(side);
+        let target = match self.row(side, row) {
+            None => return Entered::Nothing,
+            Some(Row::Up) => Target::Up,
+            Some(Row::Entry(entry)) if entry.is_folder() => {
+                Target::Folder(panel.path_of(&entry.name))
+            }
+            Some(Row::Entry(entry)) => Target::File(ChosenEntry {
+                path: panel.wide_path_of(&entry.name),
+                is_folder: false,
+            }),
+            Some(Row::Result(item)) if item.is_dir => Target::Folder(item.path.clone()),
+            Some(Row::Result(item)) => Target::File(ChosenEntry::of_result(item)),
+        };
+        match target {
+            Target::Up => self.go_up(side).map_or(Entered::Nothing, Entered::Read),
+            Target::Folder(path) => Entered::Read(self.go(side, path, None)),
+            Target::File(entry) => Entered::Open(entry),
+        }
     }
 
     /// `Ctrl+Left` or `Ctrl+Right` on `row` of `side`, as in Total

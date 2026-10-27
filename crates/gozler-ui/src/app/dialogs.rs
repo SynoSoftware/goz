@@ -698,7 +698,7 @@ fn refusal_text(refusal: &Refusal, characters: &str, reserved: &str) -> String {
     }
 }
 
-/// Two panels' New folder…: the new folder's name (DESIGN.md: New folder).
+/// Commander mode's New folder…: the new folder's name (DESIGN.md: New folder).
 pub(super) struct NewFolder<'a> {
     /// The name of the panel's row that shows a name, without regard to
     /// case.

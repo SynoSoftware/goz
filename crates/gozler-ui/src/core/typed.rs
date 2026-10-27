@@ -1,4 +1,4 @@
-//! The names and the destinations the person types in Two panels' dialogs
+//! The names and the destinations the person types in Commander mode's dialogs
 //! (DESIGN.md: Copy and Move, New folder). The engine opens paths with `\\?\`,
 //! which turns off Windows' own trimming and its reserved names, so the dialogs
 //! apply those rules here, as File Explorer does: each name loses its trailing

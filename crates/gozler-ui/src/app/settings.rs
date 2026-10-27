@@ -149,13 +149,13 @@ const OPEN_COMMANDS: [(ControlId, ControlId, &str, Field<String>); 3] = [
     (
         ControlId::ContextMenuOpenFolders,
         ControlId::ContextMenuOpenFoldersBrowse,
-        "settings_context_menu.cue_explorer",
+        "settings_context_menu.cue_commander",
         |v| &mut v.choices.open_folders,
     ),
     (
         ControlId::ContextMenuOpenFiles,
         ControlId::ContextMenuOpenFilesBrowse,
-        "settings_context_menu.cue_default_program",
+        "settings_context_menu.cue_commander",
         |v| &mut v.choices.open_files,
     ),
     (

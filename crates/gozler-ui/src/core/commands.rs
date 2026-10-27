@@ -191,7 +191,7 @@ impl CommandId {
                     searched,
                     None,
                 ),
-                // `Alt+F7` reaches Find in Search only; Two panels keeps it
+                // `Alt+F7` reaches Find in Search only; Commander mode keeps it
                 // to show Search (`PanelAction::SearchBox`).
                 C::Find => (
                     "command.find",
@@ -419,7 +419,7 @@ fn never(_: &State) -> bool {
     false
 }
 
-/// Refresh runs the shown search again (DESIGN.md: C17); in Two panels it
+/// Refresh runs the shown search again (DESIGN.md: C17); in Commander mode it
 /// reads the active panel's folder again.
 fn searched(state: &State) -> bool {
     state.model.mode() == Mode::TwoPanels || state.model.search_list().results().has_searched()
@@ -432,7 +432,7 @@ fn files(state: &State) -> bool {
 
 /// How many entries a file command acts on: Search's selected files, once
 /// read, or the active panel's selected entries, else its focused entry
-/// (DESIGN.md: Commands in Two panels).
+/// (DESIGN.md: Commands in Commander mode).
 fn chosen(state: &State) -> usize {
     match state.list {
         List::Search => (state.model.search_list().selection().files()).map_or(0, <[_]>::len),
@@ -457,12 +457,12 @@ fn operations_available(state: &State) -> bool {
 
 /// Copy to folder…, Move to folder…, Delete and Cut act on the chosen
 /// entries, in the window that owns the file operations
-/// (DESIGN.md: Commands, Commands in Two panels).
+/// (DESIGN.md: Commands, Commands in Commander mode).
 fn file_operation(state: &State) -> bool {
     operations_available(state) && chosen(state) > 0
 }
 
-/// Copy to folder… and Move to folder…, which in Two panels also need a
+/// Copy to folder… and Move to folder…, which in Commander mode also need a
 /// folder to go to, so not while both panels search
 /// (DESIGN.md: Search in a panel).
 fn transfer(state: &State) -> bool {
@@ -762,8 +762,8 @@ pub(crate) enum KeyAction {
     /// `Enter` in the search box: the search runs, or the result takes
     /// `Enter` ([`Model::enter_in_search_box`]).
     SearchBoxEnter,
-    /// `Enter` in the results list: Two panels shows the focused result, or
-    /// Open opens the selection, as Settings chooses (DESIGN.md: Searching).
+    /// `Enter` in the results list, which runs Open (DESIGN.md: Searching,
+    /// "where Open goes").
     ResultEnter,
     /// `Esc` in the search box: the box is emptied.
     ClearSearch,
@@ -960,7 +960,7 @@ const PANEL_KEYS: &[(Keystroke, KeyAction)] = {
     ]
 };
 
-/// Two panels' fixed keys that run no command (DESIGN.md: Keys).
+/// Commander mode's fixed keys that run no command (DESIGN.md: Keys).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum PanelAction {
     /// `Ctrl+L`: the active panel's path box, or a search panel's search
@@ -985,7 +985,7 @@ impl PanelAction {
     ];
 }
 
-/// Two panels' fixed keys, which win over the person's shortcuts on the
+/// Commander mode's fixed keys, which win over the person's shortcuts on the
 /// same keys.
 const TWO_PANEL_KEYS: &[(Keystroke, MenuItem)] = &[
     (
@@ -1054,7 +1054,7 @@ pub(crate) fn key_bar_command(index: usize) -> CommandId {
         .expect("F3 to F8 run the key bar's commands")
 }
 
-/// Whether Two panels keeps `keystroke` from the person's shortcuts: its
+/// Whether Commander mode keeps `keystroke` from the person's shortcuts: its
 /// fixed keys, `F3` to `F8` among them, which the key bar's commands take;
 /// and `Alt` with a character, which is quick search.
 fn kept_by_two_panels(keystroke: Keystroke) -> bool {
@@ -1080,7 +1080,7 @@ pub(crate) enum MenuItem {
     SortDirection(SortDir),
     /// `None` is Windows default, else an index into [`LANGUAGES`].
     Language(Option<usize>),
-    /// A fixed key of Two panels, which no menu shows.
+    /// A fixed key of Commander mode, which no menu shows.
     Panel(PanelAction),
 }
 
@@ -1200,9 +1200,9 @@ impl MenuItem {
 
     /// The shortcut the menu shows after the label: the first key that
     /// runs it while `mode` shows, from the table its accelerators come
-    /// from. In Two panels, Clear selection shows `Esc`, the key of a
+    /// from. In Commander mode, Clear selection shows `Esc`, the key of a
     /// panel's list, because the menus there teach the keys
-    /// (DESIGN.md: Menus in Two panels).
+    /// (DESIGN.md: Menus in Commander mode).
     pub(crate) fn shortcut(self, shortcuts: &CommandShortcuts, mode: Mode) -> Option<Keystroke> {
         let MenuItem::Run(command) = self else {
             return None;
@@ -1231,7 +1231,7 @@ impl MenuItem {
     }
 
     /// Whether the item shows while `mode` shows: Sort by > Path has no
-    /// column in Two panels.
+    /// column in Commander mode.
     fn belongs_to(self, mode: Mode) -> bool {
         match self {
             MenuItem::SortKey(SortKey::Path) => mode == Mode::Search,
@@ -1517,8 +1517,9 @@ pub(crate) fn shown_row_menu(menu: ContextMenu, folder: bool, shift: bool) -> Ve
         .collect()
 }
 
-/// A panel row's context menu (DESIGN.md: Menus in Two panels). Its first item,
-/// Open, is the default, which `Enter` also runs.
+/// A panel row's context menu (DESIGN.md: Menus in Commander mode). Its first
+/// item, Open, is the default, which does what a double-click does on one
+/// entry and acts on every chosen entry.
 pub(crate) fn panel_row_menu() -> Vec<Vec<MenuItem>> {
     use CommandId as C;
     let run = |commands: &[CommandId]| commands.iter().map(|c| MenuItem::Run(*c)).collect();
@@ -1706,7 +1707,7 @@ pub(crate) fn items(menus: &[Menu]) -> Vec<MenuItem> {
         .collect()
 }
 
-/// The accelerator table of `mode`: in Two panels its fixed keys first,
+/// The accelerator table of `mode`: in Commander mode its fixed keys first,
 /// then every command shortcut of `shortcuts` whose command belongs to
 /// `mode` and whose key the mode leaves free, with the item it runs.
 pub(crate) fn accelerators(shortcuts: &CommandShortcuts, mode: Mode) -> Vec<(Keystroke, MenuItem)> {
@@ -1783,7 +1784,7 @@ mod tests {
         }
     }
 
-    /// Two panels hides Search's list, so a Search command that ran there,
+    /// Commander mode hides Search's list, so a Search command that ran there,
     /// such as `F5` Refresh or `Ctrl+A` Select all, would act on results the
     /// person cannot see; `F5` there is Copy to folder… (DESIGN.md: Keys).
     #[test]
@@ -1824,7 +1825,7 @@ mod tests {
         for mode in Mode::ALL {
             assert_eq!(takes(mode, ctrl_f), find);
         }
-        // Two panels keeps `Ctrl+F` for Find when the person's shortcut
+        // Commander mode keeps `Ctrl+F` for Find when the person's shortcut
         // for Find moves elsewhere, as the Keyboard page says.
         let mut moved = shortcuts.clone();
         moved.remove(CommandId::Find, ctrl_f);
@@ -1992,7 +1993,7 @@ mod tests {
     /// something: Copy, Move and Delete on the selected entries, or the
     /// focused row but never `..`; New folder on a folder that shows; none
     /// of them in a second window, which owns no file operations
-    /// (DESIGN.md: Commands in Two panels).
+    /// (DESIGN.md: Commands in Commander mode).
     #[test]
     fn two_panels_file_commands_follow_the_chosen_entries() {
         use crate::core::model::{Instance, tests::model_for};
