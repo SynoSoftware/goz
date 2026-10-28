@@ -19,8 +19,10 @@ pub(crate) mod keys;
 pub(crate) mod locale;
 pub(crate) mod menu;
 pub(crate) mod notify;
+mod painting;
 pub(crate) mod pairing;
 pub(crate) mod pane;
+pub(crate) mod present;
 pub(crate) mod shell;
 pub(crate) mod shortcut;
 pub(crate) mod status_transfer;
@@ -38,7 +40,7 @@ use crate::core::settings::Placement;
 use windows::Win32::Foundation::{HWND, LPARAM, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::{
     InvalidateRect, MapWindowPoints, RDW_ALLCHILDREN, RDW_ERASE, RDW_FRAME, RDW_INVALIDATE,
-    RDW_UPDATENOW, REDRAW_WINDOW_FLAGS, RedrawWindow,
+    REDRAW_WINDOW_FLAGS, RedrawWindow,
 };
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     GetActiveWindow, GetFocus, IsWindowEnabled, SetFocus,
@@ -48,7 +50,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
     GetClassNameW, GetClientRect, GetParent, GetWindowLongPtrW, GetWindowPlacement, GetWindowRect,
     GetWindowTextLengthW, GetWindowTextW, IsChild, IsIconic, IsWindowVisible, PostMessageW,
     SET_WINDOW_POS_FLAGS, SW_HIDE, SW_RESTORE, SW_SHOW, SW_SHOWDEFAULT, SW_SHOWMINNOACTIVE,
-    SW_SHOWNA, SW_SHOWNORMAL, SWP_HIDEWINDOW, SWP_NOACTIVATE, SWP_NOCOPYBITS, SWP_NOMOVE,
+    SW_SHOWNORMAL, SWP_HIDEWINDOW, SWP_NOACTIVATE, SWP_NOCOPYBITS, SWP_NOMOVE, SWP_NOREDRAW,
     SWP_NOSIZE, SWP_NOZORDER, SWP_SHOWWINDOW, SendMessageW, SetForegroundWindow, SetWindowPos,
     SetWindowTextW, ShowWindow, UIS_CLEAR, UISF_HIDEFOCUS, WINDOW_EX_STYLE, WINDOW_STYLE,
     WINDOWPLACEMENT, WM_CHANGEUISTATE, WM_SETREDRAW, WPF_RESTORETOMAXIMIZED, WS_VISIBLE,
@@ -87,8 +89,10 @@ impl Hwnd {
         if self.text() == text {
             return;
         }
-        // SAFETY: the text is a NUL-terminated copy that outlives the call.
-        let _ = unsafe { SetWindowTextW(self.0, &HSTRING::from(text)) };
+        present::mark_after(self, || {
+            // SAFETY: the text is a NUL-terminated copy that outlives the call.
+            let _ = unsafe { SetWindowTextW(self.0, &HSTRING::from(text)) };
+        });
     }
 
     pub(crate) fn text(self) -> String {
@@ -132,16 +136,23 @@ impl Hwnd {
         };
     }
 
-    /// Shows or hides a control without activating it. A control already
-    /// shown or hidden is left alone, because `ShowWindow` takes the window
-    /// manager's lock even when nothing changes, and layout calls this for
-    /// every control on each resize.
+    /// Shows or hides a control without activating it, as
+    /// [`place_children`] does. A control already shown or hidden is left
+    /// alone, because a show or hide takes the window manager's lock even
+    /// when nothing changes, and layout calls this for every control on
+    /// each resize.
     pub(crate) fn set_visible(self, visible: bool) {
-        if self.styles().0.contains(WS_VISIBLE) == visible {
-            return;
-        }
-        // SAFETY: plain values.
-        let _ = unsafe { ShowWindow(self.0, if visible { SW_SHOWNA } else { SW_HIDE }) };
+        place_children(&[], &[(self, visible)]);
+    }
+
+    /// Whether the window's class is `class`, such as "#32770", a dialog's,
+    /// which a page of a dialog has.
+    fn is_class(self, class: &str) -> bool {
+        let mut name = [0u16; 16];
+        // SAFETY: `name` is a local whose length the call is given.
+        let length = unsafe { GetClassNameW(self.0, &mut name) };
+        usize::try_from(length)
+            .is_ok_and(|n| String::from_utf16_lossy(&name[..n]).eq_ignore_ascii_case(class))
     }
 
     /// Whether the window already stands at `rect`, in its parent's client
@@ -149,15 +160,8 @@ impl Hwnd {
     /// `rect` includes its open list, which the themed combo box sizes
     /// from its items instead, so only its position and width count.
     fn is_placed_at(self, rect: Rect) -> bool {
-        let mut class = [0u16; 16];
-        // SAFETY: `class` is a local whose length the call is given.
-        let length = unsafe { GetClassNameW(self.0, &mut class) };
-        let is_combo_box = usize::try_from(length)
-            .is_ok_and(|n| String::from_utf16_lossy(&class[..n]).eq_ignore_ascii_case("ComboBox"));
-        // SAFETY: plain values.
-        let parent = Hwnd(unsafe { GetParent(self.0) }.unwrap_or_default());
-        let placed = self.rect_in(parent);
-        if is_combo_box {
+        let placed = self.rect_in(self.parent());
+        if self.is_class("ComboBox") {
             (placed.x, placed.y, placed.width) == (rect.x, rect.y, rect.width)
         } else {
             placed == rect
@@ -292,16 +296,9 @@ impl Hwnd {
     /// its client, frame and descendants for native repainting. Descendants
     /// paint independently. A hidden window only runs `change`, because
     /// `DefWindowProc` answers `WM_SETREDRAW` TRUE by making the window
-    /// visible, as a regional-format change would make the main window
-    /// while it is hidden in the notification area.
+    /// visible.
     pub(crate) fn draw_once_after(self, change: impl FnOnce()) {
         self.redraw_after(change, RDW_ERASE);
-    }
-
-    /// As [`Self::draw_once_after`], but processes pending native paints
-    /// before returning.
-    pub(crate) fn draw_now_after(self, change: impl FnOnce()) {
-        self.redraw_after(change, RDW_ERASE | RDW_UPDATENOW);
     }
 
     fn redraw_after(self, change: impl FnOnce(), flags: REDRAW_WINDOW_FLAGS) {
@@ -324,9 +321,28 @@ impl Hwnd {
         }
     }
 
+    /// Gives the window the keyboard focus. The control that loses it and
+    /// the one that gets it paint their focus cue inside the message, so
+    /// both are marked instead; a list view marks only its focused and
+    /// selected rows itself.
     pub(crate) fn focus(self) {
-        // SAFETY: plain values.
-        let _ = unsafe { SetFocus(Some(self.0)) };
+        let losing = Hwnd::focused();
+        let marks = |window: Hwnd| losing != Some(self) && !window.is_class("SysListView32");
+        let take = || {
+            // SAFETY: plain values.
+            let _ = unsafe { SetFocus(Some(self.0)) };
+        };
+        let gain = || {
+            if marks(self) {
+                present::mark_after(self, take);
+            } else {
+                take();
+            }
+        };
+        match losing.filter(|&losing| marks(losing)) {
+            Some(losing) => present::mark_after(losing, gain),
+            None => gain(),
+        }
     }
 
     pub(crate) fn is_active(self) -> bool {
@@ -362,10 +378,10 @@ impl Hwnd {
         (!hwnd.is_invalid()).then_some(Hwnd(hwnd))
     }
 
-    /// Posts `message` with no parameters.
-    pub(crate) fn post(self, message: u32) {
+    /// Posts `message` with no parameters; whether Windows took it.
+    pub(crate) fn post(self, message: u32) -> bool {
         // SAFETY: the message carries no pointer.
-        let _ = unsafe { PostMessageW(Some(self.0), message, WPARAM(0), LPARAM(0)) };
+        unsafe { PostMessageW(Some(self.0), message, WPARAM(0), LPARAM(0)) }.is_ok()
     }
 
     /// The restored rectangle and whether the window is or returns
@@ -416,6 +432,11 @@ pub(crate) fn move_children(moves: &[(Hwnd, Rect)]) {
 
 /// Places and shows children in one native batch. All children must have
 /// the same parent; a child omitted from `moves` keeps its rectangle.
+///
+/// Nothing paints here: each child that moves, resizes or shows is marked,
+/// with its frame and its own children, and so is the place in the parent
+/// that a child leaves, and they paint when the update ends
+/// ([`present`]). `SWP_NOREDRAW` leaves that marking to the caller.
 pub(crate) fn place_children(moves: &[(Hwnd, Rect)], shown: &[(Hwnd, bool)]) {
     let visibility = |child: Hwnd, visible| {
         if child.styles().0.contains(WS_VISIBLE) == visible {
@@ -425,6 +446,13 @@ pub(crate) fn place_children(moves: &[(Hwnd, Rect)], shown: &[(Hwnd, bool)]) {
         } else {
             SWP_HIDEWINDOW
         }
+    };
+    // The rectangle that a shown child leaves when `change` moves or hides
+    // it.
+    let leaves = |child: Hwnd, change: SET_WINDOW_POS_FLAGS| {
+        let leaving = change.contains(SWP_HIDEWINDOW)
+            || (!change.contains(SWP_NOMOVE) && child.styles().0.contains(WS_VISIBLE));
+        leaving.then(|| child.rect_in(child.parent()))
     };
     let mut placements = Vec::new();
     for &(child, rect) in moves {
@@ -442,7 +470,8 @@ pub(crate) fn place_children(moves: &[(Hwnd, Rect)], shown: &[(Hwnd, bool)]) {
             } else {
                 SWP_NOMOVE | SWP_NOSIZE
             };
-            placements.push((child, rect, geometry | show));
+            let change = geometry | show;
+            placements.push((child, rect, change, leaves(child, change)));
         }
     }
     for &(child, visible) in shown {
@@ -451,19 +480,34 @@ pub(crate) fn place_children(moves: &[(Hwnd, Rect)], shown: &[(Hwnd, bool)]) {
         }
         let show = visibility(child, visible);
         if show.0 != 0 {
-            placements.push((child, Rect::default(), SWP_NOMOVE | SWP_NOSIZE | show));
+            let change = SWP_NOMOVE | SWP_NOSIZE | show;
+            placements.push((child, Rect::default(), change, leaves(child, change)));
         }
     }
-    if placements.is_empty() {
+    let Some(parent) = placements.first().map(|&(child, ..)| child.parent()) else {
         return;
-    }
-    let flags = SWP_NOZORDER | SWP_NOACTIVATE;
+    };
+    let flags = SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOREDRAW;
+    // Inside EndDeferWindowPos a combo box that moves or shows calls
+    // UpdateWindow on itself, so the cover goes up first.
+    let area = placements
+        .iter()
+        .map(|(child, rect, change, _)| {
+            let size = if change.contains(SWP_NOSIZE) {
+                child.screen_rect()
+            } else {
+                *rect
+            };
+            i64::from(size.width.0) * i64::from(size.height.0)
+        })
+        .sum();
+    present::cover_now(parent, area);
     // SAFETY: plain values. Each DeferWindowPos takes the batch handle and
     // returns the next one; EndDeferWindowPos, or a failed DeferWindowPos,
     // frees it.
     let applied = unsafe {
         let mut batch = BeginDeferWindowPos(placements.len() as i32).ok();
-        for (child, rect, change) in &placements {
+        for (child, rect, change, _) in &placements {
             batch = batch.and_then(|b| {
                 DeferWindowPos(
                     b,
@@ -481,8 +525,30 @@ pub(crate) fn place_children(moves: &[(Hwnd, Rect)], shown: &[(Hwnd, bool)]) {
         batch.is_some_and(|b| EndDeferWindowPos(b).is_ok())
     };
     if !applied {
-        for (child, rect, change) in placements {
+        for &(child, rect, change, _) in &placements {
             child.position(rect, flags | change);
+        }
+    }
+    for (child, _, _, left) in placements {
+        // SAFETY: plain values; `left` outlives the call that reads it.
+        unsafe {
+            if let Some(left) = left.filter(|_| !parent.0.is_invalid()) {
+                let left = to_rect(left);
+                let _ = RedrawWindow(
+                    Some(parent.0),
+                    Some(&raw const left),
+                    None,
+                    RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN,
+                );
+            }
+            if child.styles().0.contains(WS_VISIBLE) {
+                let _ = RedrawWindow(
+                    Some(child.0),
+                    None,
+                    None,
+                    RDW_INVALIDATE | RDW_ERASE | RDW_FRAME | RDW_ALLCHILDREN,
+                );
+            }
         }
     }
 }

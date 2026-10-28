@@ -73,7 +73,9 @@ impl PathLabel {
 pub(crate) fn show_paused(bar: ProgressBar, paused: bool) {
     let state = if paused { PBST_PAUSED } else { PBST_NORMAL };
     if send(bar.hwnd(), PBM_GETSTATE, 0, 0) != state as isize {
-        send(bar.hwnd(), PBM_SETSTATE, state as usize, 0);
+        super::present::mark_after(bar.hwnd(), || {
+            send(bar.hwnd(), PBM_SETSTATE, state as usize, 0)
+        });
     }
 }
 
@@ -377,9 +379,19 @@ impl QueueList {
         .ok()
     }
 
-    /// Scrolls the row `index` into view.
+    /// Scrolls the row `index` into view, unless it shows whole. A list in
+    /// tile view has no top row to ask for, so the row's rectangle tells.
     pub(crate) fn ensure_visible(self, index: usize) {
-        send(self.0, LVM_ENSUREVISIBLE, index, 0);
+        let client = self.0.client_size();
+        let whole = self.item_rect(index, LVIR_BOUNDS).is_some_and(|row| {
+            row.left >= 0
+                && row.top >= 0
+                && row.right <= client.width.0
+                && row.bottom <= client.height.0
+        });
+        if !whole {
+            super::present::scroll_now(self.0, || send(self.0, LVM_ENSUREVISIBLE, index, 0));
+        }
     }
 
     /// The row at `point`, in screen coordinates, as a context menu gives
@@ -470,7 +482,7 @@ impl QueueList {
             return false;
         };
         // In pixels in tile view.
-        send(self.0, LVM_SCROLL, 0, dy as isize);
+        super::present::scroll_now(self.0, || send(self.0, LVM_SCROLL, 0, dy as isize));
         true
     }
 

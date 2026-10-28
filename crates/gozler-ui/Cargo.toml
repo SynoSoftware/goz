@@ -30,9 +30,13 @@ serde_json.workspace = true
 [target.'cfg(windows)'.dependencies]
 gozler-winfs = { path = "../gozler-winfs" }
 # Settings > Visibility's Select Users or Groups dialog, and the VARIANT
-# that brings each chosen account's SID.
+# that brings each chosen account's SID; QueryPerformanceCounter for the
+# times in ui-frames.log, which align with a screen recording's frames; the
+# cloak of the presenter's cover.
 windows = { workspace = true, features = [
+    "Win32_Graphics_Dwm",
     "Win32_Networking_ActiveDirectory",
+    "Win32_System_Performance",
     "Win32_System_Variant",
 ] }
 windows-core.workspace = true

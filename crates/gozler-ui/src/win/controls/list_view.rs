@@ -18,14 +18,13 @@ use windows::Win32::UI::Controls::{
     LVM_SETCOLUMNWIDTH, LVM_SETEXTENDEDLISTVIEWSTYLE, LVM_SETIMAGELIST, LVM_SETITEMCOUNT,
     LVM_SETITEMSTATE, LVM_SETSELECTIONMARK, LVNI_FOCUSED, LVNI_SELECTED, LVS_EX_DOUBLEBUFFER,
     LVS_EX_FULLROWSELECT, LVS_EX_HEADERDRAGDROP, LVS_EX_INFOTIP, LVS_EX_LABELTIP, LVS_OWNERDATA,
-    LVS_REPORT, LVS_SHAREIMAGELISTS, LVS_SHOWSELALWAYS, LVSICF_NOSCROLL, LVSIL_SMALL,
-    SetWindowTheme, WC_LISTVIEWW,
+    LVS_REPORT, LVS_SHAREIMAGELISTS, LVS_SHOWSELALWAYS, LVSICF_NOSCROLL, LVSIL_SMALL, WC_LISTVIEWW,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     GWL_STYLE, GetWindowLongPtrW, SB_LINEDOWN, SB_LINEUP, WINDOW_EX_STYLE, WM_VSCROLL, WS_TABSTOP,
     WS_VSCROLL,
 };
-use windows::core::{PCWSTR, PWSTR, w};
+use windows::core::PWSTR;
 
 /// The results list: a list view in report and virtual mode, drawn as File
 /// Explorer draws its virtual list (DESIGN.md: Look).
@@ -90,8 +89,6 @@ impl ListView {
         // A virtual list keeps only the selection and the focus, so it asks
         // the window which row a drop would go to (DispInfo::set_drop_target).
         send(list, LVM_SETCALLBACKMASK, LVIS_DROPHILITED.0 as usize, 0);
-        // SAFETY: plain values; a missing theme leaves the classic look.
-        let _ = unsafe { SetWindowTheme(list.0, w!("Explorer"), PCWSTR::null()) };
     }
 
     pub(crate) fn hwnd(self) -> Hwnd {
@@ -213,8 +210,10 @@ impl ListView {
             // The window shows the sort after every reply, and a header
             // given its own format still repaints.
             if item.fmt.0 != shown {
-                // SAFETY: as above.
-                unsafe { send_pointer(header, HDM_SETITEMW, index, &raw const item) };
+                crate::win::present::mark_after(header, || {
+                    // SAFETY: as above.
+                    unsafe { send_pointer(header, HDM_SETITEMW, index, &raw const item) }
+                });
             }
         }
     }
@@ -229,14 +228,22 @@ impl ListView {
     }
 
     /// Sets the number of rows and redraws them, keeping the scroll
-    /// position.
+    /// position. An unchanged count redraws only the rows in view, because
+    /// the full redraw also repaints the frame, and its scroll bars flash. An
+    /// empty list redraws whole, because its empty-list text may change.
     pub(crate) fn set_count(self, count: u64) {
-        send(
-            self.0,
-            LVM_SETITEMCOUNT,
-            usize::try_from(count).unwrap_or(usize::MAX),
-            LVSICF_NOSCROLL as isize,
-        );
+        if count != 0 && count == self.count() {
+            self.redraw_rows(self.visible_rows());
+            return;
+        }
+        crate::win::present::mark_after(self.0, || {
+            send(
+                self.0,
+                LVM_SETITEMCOUNT,
+                usize::try_from(count).unwrap_or(usize::MAX),
+                LVSICF_NOSCROLL as isize,
+            )
+        });
     }
 
     pub(crate) fn count(self) -> u64 {
@@ -248,8 +255,15 @@ impl ListView {
         send(self.0, LVM_GETSELECTEDCOUNT, 0, 0).max(0) as u64
     }
 
+    /// Scrolls `row` into view, unless it shows whole; a row already in
+    /// view leaves the marks to the rows that changed.
     pub(crate) fn ensure_visible(self, row: u64) {
-        send(self.0, LVM_ENSUREVISIBLE, row as usize, 0);
+        if self.whole_rows().contains(&row) {
+            return;
+        }
+        crate::win::present::scroll_now(self.0, || {
+            send(self.0, LVM_ENSUREVISIBLE, row as usize, 0)
+        });
     }
 
     /// Sets the states `mask` of the row `index`, or of every row for
@@ -319,9 +333,13 @@ impl ListView {
     /// where the person sees them.
     pub(crate) fn focus_in_place(self, row: Option<u64>) {
         // A virtual list does not draw again the row that loses the focus
-        // to another row, which keeps its focus rectangle on the screen;
-        // taking the focus from every row first draws it again.
-        self.set_state(usize::MAX, LVIS_FOCUSED, LIST_VIEW_ITEM_STATE_FLAGS(0));
+        // to another row, which keeps its focus rectangle on the screen, so
+        // that row alone is drawn again. Taking the focus from every row
+        // would draw every row again on each cursor key.
+        if let Some(old) = self.focused().filter(|&old| Some(old) != row) {
+            self.set_state(old as usize, LVIS_FOCUSED, LIST_VIEW_ITEM_STATE_FLAGS(0));
+            self.redraw_rows(old..old + 1);
+        }
         if let Some(row) = row {
             self.set_state(row as usize, LVIS_FOCUSED, LVIS_FOCUSED);
             send(self.0, LVM_SETSELECTIONMARK, 0, row as isize);
@@ -414,26 +432,20 @@ impl ListView {
             ScrollEdge::Top => SB_LINEUP,
             ScrollEdge::Bottom => SB_LINEDOWN,
         };
-        send(self.0, WM_VSCROLL, code.0 as usize, 0);
+        crate::win::present::scroll_now(self.0, || send(self.0, WM_VSCROLL, code.0 as usize, 0));
     }
 
     /// Takes the focus for the row the person left in this list of `count`
     /// rows: the focused row, else the first selected one, else the first
-    /// row. With no row selected, that row is selected too, so the row with
-    /// the focus shows filled (DESIGN.md: window rule 8).
+    /// row. Only the focus moves there; the selection stays as the person
+    /// made it (DESIGN.md: Selecting entries, window rule 8).
     pub(crate) fn focus_left_row(self, count: u64) {
         self.hwnd().focus();
-        let Some(row) = self
+        let row = self
             .focused_or_first_selected()
-            .or((count > 0).then_some(0))
-        else {
-            return;
-        };
-        if self.selected_count() == 0 {
-            self.select_only(Some(row));
-            self.ensure_visible(row);
-        } else {
-            self.set_focused(Some(row));
+            .or((count > 0).then_some(0));
+        if row.is_some() {
+            self.set_focused(row);
         }
     }
 
@@ -486,9 +498,15 @@ impl ListView {
 
     /// The rows the list shows now, a partly shown last row included.
     pub(crate) fn visible_rows(self) -> Range<u64> {
+        let whole = self.whole_rows();
+        whole.start..whole.end + 1
+    }
+
+    /// The rows the list shows whole, which a page key moves through.
+    pub(crate) fn whole_rows(self) -> Range<u64> {
         let top = send(self.0, LVM_GETTOPINDEX, 0, 0).max(0) as u64;
         let page = send(self.0, LVM_GETCOUNTPERPAGE, 0, 0).max(0) as u64;
-        top..top + page + 1
+        top..top + page
     }
 
     /// Whether the last of [`Self::visible_rows`] shows in part, and is not

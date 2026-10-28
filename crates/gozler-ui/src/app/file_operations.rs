@@ -1187,22 +1187,7 @@ impl Pane {
         if previous.as_ref().is_some_and(|old| Arc::ptr_eq(old, &view)) {
             return;
         }
-        let shape = |view: &View| {
-            (
-                view.card.as_ref().map(|card| card.id),
-                view.report.is_some(),
-                view.rows.is_empty(),
-                view.rows.len() > 1,
-            )
-        };
-        if previous
-            .as_ref()
-            .is_none_or(|old| shape(old) != shape(&view))
-        {
-            hwnd.draw_now_after(|| self.apply_view(hwnd, view, previous));
-        } else {
-            self.apply_view(hwnd, view, previous);
-        }
+        self.apply_view(hwnd, view, previous);
     }
 
     fn apply_view(&self, hwnd: Hwnd, view: Arc<View>, previous: Option<Arc<View>>) {

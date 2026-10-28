@@ -268,54 +268,51 @@ impl SettingsBridge {
             window.shortcuts.commit(registration);
             window.shortcuts.update_windows_shortcut(window);
         }
-        // The window draws once after every refresh below.
-        hwnd.draw_once_after(|| {
-            let accepted = window.model.borrow_mut().set_choices(edited.clone());
-            window.apply(hwnd, accepted);
-            if edited.language != last.language {
-                window.set_language(hwnd, edited.language.clone());
+        let accepted = window.model.borrow_mut().set_choices(edited.clone());
+        window.apply(hwnd, accepted);
+        if edited.language != last.language {
+            window.set_language(hwnd, edited.language.clone());
+        }
+        if edited.show_icons != last.show_icons {
+            win::gdi::show_icons(edited.show_icons);
+            window.apply_glyphs(hwnd.dpi());
+            window.viewers.apply_glyphs();
+            // The menus, the button widths and the Kind list follow.
+            window.refresh_text(hwnd);
+        }
+        if edited.show_memory != last.show_memory {
+            // The group first shows the app's figure, read now, and the
+            // service's from the latest status; the reply to this request
+            // brings both current ones.
+            if edited.show_memory {
+                let accepted = window.read_app_memory();
+                window.apply(hwnd, accepted);
+                window.ask_status();
             }
-            if edited.show_icons != last.show_icons {
-                win::gdi::show_icons(edited.show_icons);
-                window.apply_glyphs(hwnd.dpi());
-                window.viewers.apply_glyphs();
-                // The menus, the button widths and the Kind list follow.
-                window.refresh_text(hwnd);
+            window.refresh_text(hwnd);
+        }
+        if edited.size_format != last.size_format || edited.date_format != last.date_format {
+            window.dates.borrow_mut().format = edited.date_format;
+            window.follow_dates(hwnd);
+            if edited.size_format != last.size_format {
+                let width = window.controls().search.fill_width();
+                let widths = (window.controls().search.column_sizing.borrow_mut())
+                    .window_shown(width, || window.controls().search.column_fits(window));
+                window
+                    .controls()
+                    .search
+                    .list
+                    .hwnd()
+                    .draw_once_after(|| window.controls().search.set_column_widths(widths));
             }
-            if edited.show_memory != last.show_memory {
-                // The group first shows the app's figure, read now, and the
-                // service's from the latest status; the reply to this request
-                // brings both current ones.
-                if edited.show_memory {
-                    let accepted = window.read_app_memory();
-                    window.apply(hwnd, accepted);
-                    window.ask_status();
-                }
-                window.refresh_text(hwnd);
-            }
-            if edited.size_format != last.size_format || edited.date_format != last.date_format {
-                window.dates.borrow_mut().format = edited.date_format;
-                window.follow_dates(hwnd);
-                if edited.size_format != last.size_format {
-                    let width = window.controls().search.fill_width();
-                    let widths = (window.controls().search.column_sizing.borrow_mut())
-                        .window_shown(width, || window.controls().search.column_fits(window));
-                    window
-                        .controls()
-                        .search
-                        .list
-                        .hwnd()
-                        .draw_once_after(|| window.controls().search.set_column_widths(widths));
-                }
-                window.controls().panels.fill_panel_columns(window);
-                let list = window.controls().search.list;
+            window.controls().panels.fill_panel_columns(window);
+            let list = window.controls().search.list;
+            list.redraw_rows(list.visible_rows());
+            for side in Side::BOTH {
+                let list = window.panel(side).list;
                 list.redraw_rows(list.visible_rows());
-                for side in Side::BOTH {
-                    let list = window.panel(side).list;
-                    list.redraw_rows(list.visible_rows());
-                }
             }
-        });
+        }
         window.save_settings(true);
         if edited.transfers_per_device != last.transfers_per_device
             && let Some(operations) = window.file_operations.get()

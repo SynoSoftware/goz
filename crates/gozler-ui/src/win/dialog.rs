@@ -31,10 +31,9 @@ use windows::Win32::UI::Controls::{
 use windows::Win32::UI::WindowsAndMessaging::{
     BN_CLICKED, BS_DEFPUSHBUTTON, BS_PUSHBUTTON, BS_TYPEMASK, CBN_SELCHANGE, CreateDialogParamW,
     DialogBoxParamW, EN_CHANGE, EN_KILLFOCUS, EN_SETFOCUS, EndDialog, EnumChildWindows, GWL_STYLE,
-    GetClassNameW, GetDlgCtrlID, GetDlgItem, GetParent, GetWindowLongPtrW, IDCANCEL, IDOK,
-    MB_ICONERROR, MB_OK, MINMAXINFO, MapDialogRect, MessageBoxW, SendMessageW, SetWindowLongPtrW,
-    WINDOW_LONG_PTR_INDEX, WM_COMMAND, WM_DESTROY, WM_GETMINMAXINFO, WM_INITDIALOG, WM_NOTIFY,
-    WM_SIZE, WM_TIMER,
+    GetDlgCtrlID, GetDlgItem, GetParent, GetWindowLongPtrW, IDCANCEL, IDOK, MB_ICONERROR, MB_OK,
+    MINMAXINFO, MapDialogRect, MessageBoxW, SendMessageW, SetWindowLongPtrW, WINDOW_LONG_PTR_INDEX,
+    WM_COMMAND, WM_DESTROY, WM_GETMINMAXINFO, WM_INITDIALOG, WM_NOTIFY, WM_SIZE, WM_TIMER,
 };
 use windows::core::{BOOL, HSTRING, PCWSTR};
 
@@ -192,6 +191,7 @@ pub(crate) fn run_modal<D: DialogProc>(
         captions,
         fonts: RefCell::new(Vec::new()),
     };
+    let _modal = super::present::modal_loop();
     // SAFETY: WM_INITDIALOG stores the pointer to `running`, which outlives
     // the modal loop that this call runs, and its fonts outlive the
     // dialog's controls.
@@ -225,6 +225,8 @@ unsafe extern "system" fn procedure<D: DialogProc>(
 ) -> isize {
     // SAFETY: these are the original parameters of this native message.
     let _context = unsafe { super::watchdog::enter(msg, wparam, lparam) };
+    // SAFETY: as above.
+    let _update = unsafe { super::present::enter(hwnd, msg, lparam) };
     if msg == WM_INITDIALOG {
         // SAFETY: lparam is the pointer to the `Running` that run_modal
         // passed.
@@ -464,6 +466,8 @@ unsafe extern "system" fn page_procedure(
 ) -> isize {
     // SAFETY: these are the original parameters of this native page message.
     let _context = unsafe { super::watchdog::enter(msg, wparam, lparam) };
+    // SAFETY: as above.
+    let _update = unsafe { super::present::enter(hwnd, msg, lparam) };
     match msg {
         // False: the hidden page takes no focus when it is created.
         WM_INITDIALOG => 0,
@@ -571,7 +575,7 @@ pub(crate) fn size_buttons<D: DialogProc>(dialog: Hwnd, state: &D) -> Px {
             children
                 .iter()
                 .copied()
-                .filter(|child| child.parent() == dialog && is_class(*child, "#32770")),
+                .filter(|child| child.parent() == dialog && child.is_class("#32770")),
         )
         .collect();
     let children = Children::of(children, &parents, state);
@@ -710,26 +714,22 @@ fn control_id(control: Hwnd) -> u16 {
 
 /// Every window inside `dialog`, at any depth.
 fn descendants(dialog: Hwnd) -> Vec<Hwnd> {
+    let mut found = Vec::new();
+    add_descendants(dialog, &mut found);
+    found
+}
+
+/// Adds every window inside `window`, at any depth, to `found`.
+pub(super) fn add_descendants(window: Hwnd, found: &mut Vec<Hwnd>) {
     unsafe extern "system" fn add(child: HWND, found: LPARAM) -> BOOL {
-        // SAFETY: `found` is the vector that `descendants` passed, alive
+        // SAFETY: `found` is the vector that `add_descendants` passed, alive
         // while EnumChildWindows runs.
         unsafe { (*(found.0 as *mut Vec<Hwnd>)).push(Hwnd(child)) };
         BOOL(1)
     }
-    let mut found: Vec<Hwnd> = Vec::new();
+    let found: *mut Vec<Hwnd> = found;
     // SAFETY: the callback writes only to `found`, which outlives the call.
-    let _ = unsafe { EnumChildWindows(Some(dialog.0), Some(add), LPARAM(&raw mut found as isize)) };
-    found
-}
-
-/// Whether `control`'s window class is `class`, such as "#32770", a
-/// dialog's, which a page has.
-fn is_class(control: Hwnd, class: &str) -> bool {
-    let mut name = [0u16; 8];
-    // SAFETY: `name` is a local whose length the call is given.
-    let length = unsafe { GetClassNameW(control.0, &mut name) };
-    usize::try_from(length)
-        .is_ok_and(|n| String::from_utf16_lossy(&name[..n]).eq_ignore_ascii_case(class))
+    let _ = unsafe { EnumChildWindows(Some(window.0), Some(add), LPARAM(found as isize)) };
 }
 
 /// Whether `control` is a push button, rather than a check box, an option
@@ -737,7 +737,7 @@ fn is_class(control: Hwnd, class: &str) -> bool {
 fn is_push_button(control: Hwnd) -> bool {
     // SAFETY: plain values.
     let style = unsafe { GetWindowLongPtrW(control.0, GWL_STYLE) } as i32 & BS_TYPEMASK;
-    is_class(control, "Button") && (style == BS_PUSHBUTTON || style == BS_DEFPUSHBUTTON)
+    control.is_class("Button") && (style == BS_PUSHBUTTON || style == BS_DEFPUSHBUTTON)
 }
 
 /// Narrows the link control `link` to its text, keeping its right edge,
@@ -845,6 +845,7 @@ pub(crate) fn ask(owner: Hwnd, question: &Question) -> bool {
         ..Default::default()
     };
     let mut chosen = 0;
+    let _modal = super::present::modal_loop();
     // SAFETY: the texts and the buttons outlive the call, which returns
     // when the dialog closes.
     let shown = unsafe { TaskDialogIndirect(&config, Some(&raw mut chosen), None, None) };
@@ -939,6 +940,7 @@ fn unwrapped_width<'a>(
 /// thread, as the panic hook needs (DESIGN.md: window rule 11).
 pub(crate) fn error_box(owner: Option<Hwnd>, text: &str, title: &str) {
     let text = wide(text);
+    let _modal = super::present::modal_loop();
     // SAFETY: both texts are NUL-terminated and outlive the call.
     unsafe {
         MessageBoxW(

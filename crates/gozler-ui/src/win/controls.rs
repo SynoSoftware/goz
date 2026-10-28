@@ -145,10 +145,11 @@ impl Hwnd {
     /// every reply.
     pub(crate) fn set_enabled(self, enabled: bool) {
         // SAFETY: plain values.
-        unsafe {
-            if IsWindowEnabled(self.0).as_bool() != enabled {
-                let _ = EnableWindow(self.0, enabled);
-            }
+        if unsafe { IsWindowEnabled(self.0) }.as_bool() != enabled {
+            super::present::mark_after(self, || {
+                // SAFETY: plain values.
+                let _ = unsafe { EnableWindow(self.0, enabled) };
+            });
         }
     }
 }
@@ -278,7 +279,7 @@ impl Edit {
     }
 
     pub(crate) fn select_all(self) {
-        send(self.0, EM_SETSEL, 0, -1);
+        super::present::mark_after(self.0, || send(self.0, EM_SETSEL, 0, -1));
     }
 
     /// Sets the text with the caret after it, as a hotkey control shows the
@@ -286,7 +287,7 @@ impl Edit {
     pub(crate) fn set_text_caret_at_end(self, text: &str) {
         self.0.set_text(text);
         let end = text.encode_utf16().count();
-        send(self.0, EM_SETSEL, end, end as isize);
+        super::present::mark_after(self.0, || send(self.0, EM_SETSEL, end, end as isize));
     }
 
     /// Copies the selected text, as `Ctrl+C` does in a text box.
@@ -300,15 +301,19 @@ impl Edit {
 
     /// Selects the text and puts the caret at its end.
     pub(crate) fn select_to_end(self) {
-        send(self.0, EM_SETSEL, 0, -1);
-        send(self.0, EM_SCROLLCARET, 0, 0);
+        super::present::mark_after(self.0, || {
+            send(self.0, EM_SETSEL, 0, -1);
+            send(self.0, EM_SCROLLCARET, 0, 0);
+        });
     }
 
     /// Selects the UTF-16 units `start..end` of the text, with the caret at
     /// `end`.
     pub(crate) fn select(self, start: usize, end: usize) {
-        send(self.0, EM_SETSEL, start, end as isize);
-        send(self.0, EM_SCROLLCARET, 0, 0);
+        super::present::mark_after(self.0, || {
+            send(self.0, EM_SETSEL, start, end as isize);
+            send(self.0, EM_SCROLLCARET, 0, 0);
+        });
     }
 
     /// The selected UTF-16 units of the text; the caret is at its end.
@@ -477,12 +482,14 @@ impl FileIconLabel {
             .and_then(|(images, index)| images.icon(index))
             .map(Icon::into_handle)
             .unwrap_or_default();
-        let previous = send(
-            self.0,
-            STM_SETIMAGE,
-            IMAGE_ICON.0 as usize,
-            handle.0 as isize,
-        );
+        let previous = super::present::mark_after(self.0, || {
+            send(
+                self.0,
+                STM_SETIMAGE,
+                IMAGE_ICON.0 as usize,
+                handle.0 as isize,
+            )
+        });
         if previous != 0 {
             drop(Icon(HICON(previous as *mut _)));
         }
@@ -516,7 +523,9 @@ impl GlyphLabel {
     pub(crate) fn show_glyph(self, glyph: Glyph, side: Px) {
         let icon = glyph_icon(glyph, side, system_color(COLOR_WINDOWTEXT)).unwrap_or_default();
         if send(self.0, STM_GETIMAGE, IMAGE_ICON.0 as usize, 0) != icon.0 as isize {
-            send(self.0, STM_SETIMAGE, IMAGE_ICON.0 as usize, icon.0 as isize);
+            super::present::mark_after(self.0, || {
+                send(self.0, STM_SETIMAGE, IMAGE_ICON.0 as usize, icon.0 as isize)
+            });
         }
     }
 }
@@ -765,7 +774,7 @@ impl DropDownList {
     /// Selects `index`, unless it is selected.
     pub(crate) fn select(self, index: usize) {
         if self.selected() != Some(index) {
-            send(self.0, CB_SETCURSEL, index, 0);
+            super::present::mark_after(self.0, || send(self.0, CB_SETCURSEL, index, 0));
         }
     }
 }
@@ -776,6 +785,10 @@ impl DropDownList {
 pub(crate) struct ListBox(Hwnd);
 
 impl ListBox {
+    pub(crate) fn hwnd(self) -> Hwnd {
+        self.0
+    }
+
     /// The list box `id` of a dialog whose template declares one.
     pub(crate) fn of_dialog(dialog: Hwnd, id: u16) -> Option<ListBox> {
         super::dialog::item(dialog, id).map(ListBox)
@@ -1342,7 +1355,9 @@ impl CheckBox {
     /// Checks or clears the box, unless it already shows `checked`.
     pub(crate) fn set_checked(self, checked: bool) {
         if self.is_checked() != checked {
-            send(self.0, BM_SETCHECK, usize::from(checked), 0);
+            super::present::mark_after(self.0, || {
+                send(self.0, BM_SETCHECK, usize::from(checked), 0)
+            });
         }
     }
 
@@ -1367,11 +1382,13 @@ impl ProgressBar {
 
     /// Starts or stops the movement that measures nothing.
     pub(crate) fn set_moving(self, moving: bool) {
-        if moving {
-            self.set_marquee(true);
-        }
-        // A period of 0 keeps Windows' default of 30 ms.
-        send(self.0, PBM_SETMARQUEE, usize::from(moving), 0);
+        super::present::mark_after(self.0, || {
+            if moving {
+                self.set_marquee(true);
+            }
+            // A period of 0 keeps Windows' default of 30 ms.
+            send(self.0, PBM_SETMARQUEE, usize::from(moving), 0);
+        });
     }
 
     /// Fills the bar to `done` of `total`.
@@ -1386,15 +1403,17 @@ impl ProgressBar {
         {
             return;
         }
-        send(self.0, PBM_SETMARQUEE, 0, 0);
-        self.set_marquee(false);
-        // A themed bar animates each increase, so at one update in 500 ms
-        // the fill trails the percent beside it; a decrease draws at once,
-        // so the bar goes one step past the position and back.
-        send(self.0, PBM_SETRANGE32, 0, (STEPS + 1) as isize);
-        send(self.0, PBM_SETPOS, position as usize + 1, 0);
-        send(self.0, PBM_SETPOS, position as usize, 0);
-        send(self.0, PBM_SETRANGE32, 0, STEPS as isize);
+        super::present::mark_after(self.0, || {
+            send(self.0, PBM_SETMARQUEE, 0, 0);
+            self.set_marquee(false);
+            // A themed bar animates each increase, so at one update in
+            // 500 ms the fill trails the percent beside it; a decrease draws
+            // at once, so the bar goes one step past the position and back.
+            send(self.0, PBM_SETRANGE32, 0, (STEPS + 1) as isize);
+            send(self.0, PBM_SETPOS, position as usize + 1, 0);
+            send(self.0, PBM_SETPOS, position as usize, 0);
+            send(self.0, PBM_SETRANGE32, 0, STEPS as isize);
+        });
     }
 
     /// Only a bar without `PBS_MARQUEE` measures, and the bar takes the
@@ -1567,7 +1586,7 @@ impl ReportList {
             };
             // SAFETY: `item` outlives the call, which reads it.
             unsafe { send_pointer(self.0, LVM_SETITEMSTATE, index, &raw const item) };
-            send(self.0, LVM_ENSUREVISIBLE, index, 0);
+            super::present::scroll_now(self.0, || send(self.0, LVM_ENSUREVISIBLE, index, 0));
         }
     }
 

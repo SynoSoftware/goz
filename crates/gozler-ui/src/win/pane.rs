@@ -71,7 +71,10 @@ pub(crate) fn create(parent: Hwnd, id: u16) -> windows::core::Result<Hwnd> {
 impl Hwnd {
     /// Sets the pane's scroll range to `content`, its page to `page` and
     /// its position to `position`. Windows hides the scroll bar while the
-    /// page holds the whole range.
+    /// page holds the whole range. The scroll bar is in the pane's frame,
+    /// which no placement marks, because scrolling the filters moves only
+    /// the pane's children, so this marks it
+    /// ([`super::present::mark_after`]).
     pub(crate) fn set_vertical_scroll(self, content: Px, page: Px, position: Px) {
         let info = SCROLLINFO {
             cbSize: size_of::<SCROLLINFO>() as u32,
@@ -82,8 +85,10 @@ impl Hwnd {
             nPos: position.0,
             nTrackPos: 0,
         };
-        // SAFETY: `info` is complete and outlives the call.
-        unsafe { SetScrollInfo(self.0, SB_VERT, &info, true) };
+        super::present::mark_after(self, || {
+            // SAFETY: `info` is complete and outlives the call.
+            unsafe { SetScrollInfo(self.0, SB_VERT, &info, true) }
+        });
     }
 }
 

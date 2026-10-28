@@ -2,8 +2,10 @@
 //! candidates consume its indices. The control remains the selection owner.
 
 use super::*;
+use crate::core::commands::SelectKey;
+use crate::core::panel::QuickAction;
 use crate::core::selection::changes::{Changes, Write};
-use crate::core::selection::{CaptureKey, Capturing, RowsChange};
+use crate::core::selection::{CaptureKey, Capturing, Movement, RowsChange, moved, passed};
 use crate::core::work::INLINE_ITEMS;
 use std::collections::LinkedList;
 
@@ -15,10 +17,21 @@ pub(super) struct NativeSelection {
     writing: bool,
     update: Option<NativeUpdate>,
     action: Option<SelectionAction>,
-    keep_quick: bool,
+    /// The last run of `Shift` with a cursor key ([`MainWindow::select_key`]).
+    shift_run: Option<ShiftRun>,
     restore_focus: bool,
     unhighlight: Option<Unhighlight>,
     unhighlighting: bool,
+}
+
+#[derive(Clone, Copy)]
+struct ShiftRun {
+    /// The row where the run's last key left the focus.
+    focus: u64,
+    /// Whether the run selects its rows or clears them.
+    mark: bool,
+    /// The [`win::window::shift_presses`] that the run's keys came in.
+    press: u32,
 }
 
 #[derive(Clone, Copy)]
@@ -184,7 +197,7 @@ impl MainWindow {
         context.mode == mode && context.key.same_list(self.native_key(context.list))
     }
 
-    fn read_target_selection(&self, hwnd: Hwnd, list: List) -> bool {
+    pub(super) fn read_target_selection(&self, hwnd: Hwnd, list: List) -> bool {
         match list {
             List::Search => self.controls().search.read_list_selection(self, hwnd),
             List::Panel(side) => self.controls().panels.read_selection(self, side, true),
@@ -318,7 +331,6 @@ impl MainWindow {
         if native.applying {
             return false;
         }
-        native.keep_quick = false;
         if !native.unhighlighting
             && let Some(pending) = native.unhighlight.as_mut()
         {
@@ -361,7 +373,6 @@ impl MainWindow {
             native.applying = false;
             native.action = None;
             native.unhighlight = None;
-            native.keep_quick = false;
             native.capture.seed(count, selected)
         };
         self.created().work.borrow_mut().retire(retired);
@@ -551,14 +562,89 @@ impl MainWindow {
         self.native_selection(list).borrow().applying
     }
 
-    pub(super) fn keep_quick_selection(&self, side: Side) {
-        self.native_selection(List::Panel(side))
-            .borrow_mut()
-            .keep_quick = true;
-    }
-
-    pub(super) fn selection_closes_quick(&self, side: Side, closes: bool) -> bool {
-        closes && !self.native_selection(List::Panel(side)).borrow().keep_quick
+    /// A cursor or selection key in `list`, Search's or a panel's, which
+    /// both take the same way, as Total Commander does (DESIGN.md:
+    /// Selecting entries). While a panel's quick search box is open, `Up`
+    /// and `Down` go to its matches and Space types into it.
+    pub(super) fn select_key(&self, hwnd: Hwnd, list: List, key: SelectKey) {
+        // The list never sees the keys the window takes, so it does not
+        // show its focus outline, which Windows hides until the keyboard is
+        // used.
+        hwnd.show_focus_cues();
+        let control = self.list_control(list);
+        if !control.hwnd().is_enabled() {
+            return;
+        }
+        if let List::Panel(side) = list {
+            let quick = match key {
+                SelectKey::Move(Movement::Up) => Some(QuickAction::Step { down: false }),
+                SelectKey::Move(Movement::Down) => Some(QuickAction::Step { down: true }),
+                SelectKey::Toggle { down: false } => Some(QuickAction::Character(' ')),
+                _ => None,
+            };
+            if self.controls().panels.quick_key(self, side, quick) == Some(true) {
+                return;
+            }
+        }
+        let focused = control.focused();
+        let count = control.count();
+        match key {
+            SelectKey::Move(movement) => {
+                control.set_focused(moved(focused, movement, count, control.whole_rows()));
+            }
+            SelectKey::Toggle { down } => {
+                if let Some(row) = focused
+                    && self.model.borrow().selectable(list, row)
+                {
+                    control.select(row, !control.row_state(row).1);
+                }
+                let next = focused.map_or(0, |row| row + 1);
+                if down && next < count {
+                    control.set_focused(Some(next));
+                }
+            }
+            SelectKey::Mark(movement) => {
+                let view = control.whole_rows();
+                let Some((rows, to)) = passed(focused, movement, count, view.clone()) else {
+                    control.set_focused(moved(focused, movement, count, view));
+                    return;
+                };
+                // A run of these keys gives its rows the state opposite to
+                // its first row's; it goes on while Shift stays down and the
+                // focus is where the last one left it.
+                let press = win::window::shift_presses();
+                let run = self.native_selection(list).borrow().shift_run;
+                let mark = match run {
+                    Some(run) if run.press == press && focused == Some(run.focus) => run.mark,
+                    _ => !control.row_state(rows.start).1,
+                };
+                for row in rows {
+                    let selectable = self.model.borrow().selectable(list, row);
+                    if selectable && control.row_state(row).1 != mark {
+                        control.select(row, mark);
+                    }
+                }
+                self.native_selection(list).borrow_mut().shift_run = Some(ShiftRun {
+                    focus: to,
+                    mark,
+                    press,
+                });
+                control.set_focused(Some(to));
+            }
+            SelectKey::Restore => {
+                let cleared = self.native_selection(list).borrow_mut().cleared.take();
+                if let Some((key, selected)) = cleared
+                    && key == self.native_key(list)
+                {
+                    let before = Place {
+                        focused,
+                        selected: Arc::default(),
+                    };
+                    let place = Place { focused, selected };
+                    self.show_native_place(list, &before, &place, false, false);
+                }
+            }
+        }
     }
 
     pub(super) fn native_deselection_pending(&self, list: List) -> bool {
@@ -763,18 +849,16 @@ impl MainWindow {
             ));
         }
         let changes = update.changes.as_mut().expect("the update has a cursor");
-        control.hwnd().draw_once_after(|| {
-            while remaining > 0 && current() {
-                let Some(write) = changes.next(&mut remaining) else {
-                    break;
-                };
-                match write {
-                    Write::All(true) => control.select_all(),
-                    Write::All(false) => control.deselect_all(),
-                    Write::Row(row, selected) => control.select(row, selected),
-                }
+        while remaining > 0 && current() {
+            let Some(write) = changes.next(&mut remaining) else {
+                break;
+            };
+            match write {
+                Write::All(true) => control.select_all(),
+                Write::All(false) => control.deselect_all(),
+                Write::Row(row, selected) => control.select(row, selected),
             }
-        });
+        }
         if !current() {
             let mut retired = Retirement::default();
             retired.push(update, INLINE_ITEMS + 1);
@@ -817,15 +901,9 @@ impl MainWindow {
         if !self.selection_command_pending(list) && !self.native_deselection_pending(list) {
             self.set_selection_enabled(list, true);
         }
-        let select_focus = update.to_focus
-            && update.selected.positions.is_empty()
-            && focused.is_some_and(|row| self.model.borrow().panels().selectable(side, row));
         let mut retired = Retirement::default();
         retired.push(update, INLINE_ITEMS + 1);
         self.created().work.borrow_mut().retire(retired);
-        if select_focus && let Some(row) = focused {
-            control.select(row, true);
-        }
         control.redraw_rows(control.visible_rows());
         self.controls().panels.show_panel(self, side);
         self.controls().key_bar.update_key_bar(self);

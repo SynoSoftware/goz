@@ -458,10 +458,6 @@ impl CaptionTable {
                         Control(C::KeyboardCommandsGroup),
                         "settings_keyboard.commands",
                     ),
-                    (
-                        Control(C::KeyboardTwoPanelsNote),
-                        "settings_keyboard.two_panels",
-                    ),
                 ],
             },
             DialogId::SettingsIndex => CaptionTable {
@@ -885,7 +881,7 @@ pub(crate) struct Narrow {
 pub(crate) fn title(model: &Model) -> String {
     let strings = model.strings();
     let text = model.search_list().text().trim();
-    if text.is_empty() || model.mode() == Mode::TwoPanels {
+    if text.is_empty() || model.mode() == Mode::Commander {
         strings.text("window.title").to_owned()
     } else {
         strings.format("window.title_search", &[text])

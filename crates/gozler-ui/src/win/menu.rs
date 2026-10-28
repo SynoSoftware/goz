@@ -221,6 +221,7 @@ impl Menu {
                 let _ = unsafe { SetMenuDefaultItem(menu.handle, u32::from(id), 0) };
             }
             live(Some(menu));
+            let _modal = super::present::menu_loop();
             // SAFETY: the menu is this function's own; with TPM_RETURNCMD
             // the call returns the chosen ID instead of sending WM_COMMAND.
             unsafe {

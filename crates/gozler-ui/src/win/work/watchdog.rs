@@ -1,4 +1,5 @@
 use super::OffThread;
+use crate::core::present::Frame;
 use crate::core::work::watchdog::{HEARTBEAT, LOG_BYTES, Watchdog, retain_log};
 use crate::win::watchdog::Delivery;
 use std::fs::OpenOptions;
@@ -20,10 +21,18 @@ pub(crate) struct Thread {
     _thread: JoinHandle<()>,
 }
 
+/// How many records of `ui-frames.log` can wait for the next write, at
+/// most one [`HEARTBEAT`] later; the presenter counts more as dropped.
+const FRAMES: usize = 256;
+
 impl Thread {
+    /// Starts the worker, which writes `path` and `ui-frames.log` beside it,
+    /// and gives the presenter of the calling window thread its channel.
     pub(crate) fn start(delivery: Delivery, path: PathBuf) -> Self {
         let (stop, stopped) = sync_channel(1);
-        let thread = super::spawn(move |worker| run(delivery, path, stopped, worker));
+        let (frames, records) = sync_channel(FRAMES);
+        crate::win::present::log_frames(frames);
+        let thread = super::spawn(move |worker| run(delivery, path, stopped, records, worker));
         Self {
             stop: Some(stop),
             _thread: thread,
@@ -64,12 +73,26 @@ impl Drop for UiThread {
     }
 }
 
-fn run(delivery: Delivery, path: PathBuf, stopped: Receiver<()>, worker: &OffThread) {
+fn run(
+    delivery: Delivery,
+    path: PathBuf,
+    stopped: Receiver<()>,
+    records: Receiver<Frame>,
+    worker: &OffThread,
+) {
     let thread = UiThread::open(delivery.thread_id, worker);
     let origin = Instant::now();
     let mut watchdog = Watchdog::default();
+    let frames = Log {
+        path: path.with_file_name("ui-frames.log"),
+    };
+    let ticks = crate::win::present::ticks_per_second();
     let log = Log { path };
     loop {
+        let lines: String = records.try_iter().map(|frame| frame.line(ticks)).collect();
+        if !lines.is_empty() {
+            let _ = frames.append(lines.as_bytes(), worker);
+        }
         if !matches!(
             stopped.try_recv(),
             Err(std::sync::mpsc::TryRecvError::Empty)

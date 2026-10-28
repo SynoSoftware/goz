@@ -49,6 +49,9 @@ pub(crate) struct SearchList {
     /// A search panel's selected size, which its status line shows; `None`
     /// while nothing is read, and for Search's list.
     pub(super) chosen_size: Option<SelectedSize>,
+    /// Whether the selection is the focused row, because no row is
+    /// selected (DESIGN.md: Selecting entries).
+    pub(super) chosen_by_focus: bool,
     retired: Retirement,
 }
 
@@ -114,6 +117,7 @@ impl SearchList {
             pending: keeping::Pending::default(),
             observing: None,
             chosen_size: None,
+            chosen_by_focus: false,
             retired: Retirement::default(),
         }
     }
@@ -153,6 +157,10 @@ impl SearchList {
 
     pub(crate) fn chosen_size(&self) -> Option<SelectedSize> {
         self.chosen_size
+    }
+
+    pub(crate) fn chosen_by_focus(&self) -> bool {
+        self.chosen_by_focus
     }
 
     /// Forgets the rows, the selection and the kept operations, but not the

@@ -242,12 +242,14 @@ impl Toolbar {
     /// Checks or unchecks the check button `id`, unless it is so.
     pub(crate) fn set_checked(self, id: u16, checked: bool) {
         if self.is_checked(id) != checked {
-            send(
-                self.0,
-                TB_CHECKBUTTON,
-                usize::from(id),
-                isize::from(checked),
-            );
+            super::present::mark_after(self.0, || {
+                send(
+                    self.0,
+                    TB_CHECKBUTTON,
+                    usize::from(id),
+                    isize::from(checked),
+                )
+            });
         }
     }
 
@@ -258,12 +260,14 @@ impl Toolbar {
     /// Enables or disables the button `id`, unless it is so.
     pub(crate) fn set_enabled(self, id: u16, enabled: bool) {
         if self.is_enabled(id) != enabled {
-            send(
-                self.0,
-                TB_ENABLEBUTTON,
-                usize::from(id),
-                isize::from(enabled),
-            );
+            super::present::mark_after(self.0, || {
+                send(
+                    self.0,
+                    TB_ENABLEBUTTON,
+                    usize::from(id),
+                    isize::from(enabled),
+                )
+            });
         }
     }
 
@@ -315,12 +319,7 @@ impl Toolbar {
             return false;
         }
         if let Some((_, Tool::Check { .. })) = self.buttons().into_iter().find(|(b, _)| *b == id) {
-            send(
-                self.0,
-                TB_CHECKBUTTON,
-                usize::from(id),
-                isize::from(!self.is_checked(id)),
-            );
+            self.set_checked(id, !self.is_checked(id));
         }
         let wparam = usize::from(id) | (BN_CLICKED as usize) << 16;
         // SAFETY: plain values; the parent decodes the toolbar's handle as

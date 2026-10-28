@@ -5,6 +5,7 @@
 //! [`Commands::open_route`] decides where it goes.
 
 use super::fetch::List;
+use super::selection::DragEntry;
 use super::text::name_of;
 use gozler_core::proto::ResultItem;
 use std::sync::Arc;
@@ -77,6 +78,25 @@ impl Entries {
                 _ => None,
             },
             Self::Panel(entries) => entries.one(),
+        }
+    }
+
+    /// The entries as a drag carries them. A search panel's focused result,
+    /// taken when nothing is selected, keeps only its path and kind.
+    pub(crate) fn dragged(self) -> Vec<DragEntry> {
+        match self {
+            Self::Ready(entries) => entries
+                .into_iter()
+                .map(|entry| DragEntry {
+                    path: entry.path,
+                    is_folder: entry.is_folder,
+                    attributes: None,
+                    size: None,
+                    modified: None,
+                })
+                .collect(),
+            Self::Results(files) => files.iter().map(DragEntry::of_result).collect(),
+            Self::Panel(entries) => entries.dragged(),
         }
     }
 }

@@ -387,7 +387,7 @@ pub(super) fn status_widest(strings: &Strings, numbers: &dyn Numbers) -> StatusW
 fn status_list(model: &Model) -> Option<List> {
     match model.mode() {
         Mode::Search => Some(List::Search),
-        Mode::TwoPanels => {
+        Mode::Commander => {
             let active = model.panels().active();
             model.panels().search(active).map(|_| List::Panel(active))
         }
@@ -469,14 +469,16 @@ pub(crate) fn results_status(model: &Model, numbers: &dyn Numbers) -> String {
 /// that the selection is read.
 pub(crate) fn selection_status(model: &Model, numbers: &dyn Numbers) -> String {
     let strings = model.strings();
-    match model.search_list().selection() {
+    let list = model.search_list();
+    match list.selection() {
         Selection::None => String::new(),
+        _ if list.chosen_by_focus() => String::new(),
         Selection::Reading { .. } | Selection::Filtering { .. } => {
             strings.text("status.reading").to_owned()
         }
         Selection::TooMany(count) => too_many(strings, numbers, *count),
         Selection::Files(_) | Selection::Folder { .. } => {
-            let sums = model.search_list().selection_sums();
+            let sums = list.selection_sums();
             let count = numbers.integer(sums.entries());
             // The size counts files only, so folders alone have none.
             if sums.files == 0 {

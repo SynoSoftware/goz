@@ -1,6 +1,7 @@
 //! Wakes the main window from a request thread (DESIGN.md: window rule 5).
 
 use super::Hwnd;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
 use windows::Win32::UI::WindowsAndMessaging::{PostMessageW, WM_APP};
@@ -15,6 +16,10 @@ pub(crate) struct OpenWaker {
     window: isize,
     message: u32,
     open: Arc<Mutex<bool>>,
+    /// Whether a message is posted that the window has not taken yet
+    /// ([`Self::woken`]); one for each message, so a waiting WAKE does not
+    /// hold back another.
+    posted: Arc<AtomicBool>,
 }
 
 impl OpenWaker {
@@ -36,6 +41,7 @@ impl OpenWaker {
             window: window.0.0 as isize,
             message,
             open: Arc::new(Mutex::new(true)),
+            posted: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -43,19 +49,22 @@ impl OpenWaker {
     pub(crate) fn for_message(&self, message: u32) -> Self {
         Self {
             message,
+            posted: Arc::new(AtomicBool::new(false)),
             ..self.clone()
         }
     }
 
     /// Runs `deliver`, which leaves a result for the window, and wakes the
     /// window, while the window is open. `deliver` returns whether it left
-    /// one.
+    /// one. A message the window has not taken yet wakes it for this result
+    /// too, so a stream of results posts one message instead of one each;
+    /// those messages go before input and paint, and kept both waiting.
     pub(crate) fn deliver(&self, deliver: impl FnOnce() -> bool) {
         self.while_open(|| {
-            if deliver() {
+            if deliver() && !self.posted.swap(true, Ordering::SeqCst) {
                 // SAFETY: the delivery gate closes before HWND destruction;
                 // this cross-thread post carries no pointer and never waits.
-                let _ = unsafe {
+                let posted = unsafe {
                     PostMessageW(
                         Some(HWND(self.window as *mut _)),
                         self.message,
@@ -63,8 +72,17 @@ impl OpenWaker {
                         LPARAM(0),
                     )
                 };
+                if posted.is_err() {
+                    self.posted.store(false, Ordering::SeqCst);
+                }
             }
         });
+    }
+
+    /// The window took this waker's message. Its handler calls this before
+    /// it reads any result, so a result left while it reads posts again.
+    pub(crate) fn woken(&self) {
+        self.posted.store(false, Ordering::SeqCst);
     }
 
     /// Runs a bounded, nonblocking action before this lifetime closes. The

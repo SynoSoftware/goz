@@ -1259,7 +1259,7 @@ pub(crate) enum Body {
     /// The left and the right panel, each half of the window, and the key
     /// bar under them (DESIGN.md: Commander mode's window). The panels are boxed, as
     /// Search is, so the two variants take about the same room.
-    TwoPanels {
+    Commander {
         panels: Box<[PanelLayout; 2]>,
         key_bar: [Rect; 6],
     },
@@ -1320,8 +1320,8 @@ impl Layout {
             Mode::Search => {
                 Layout::compute_search(client, dpi, font_height, status_height, captions, panes)
             }
-            Mode::TwoPanels => {
-                Layout::compute_two_panels(client, dpi, font_height, status_height, captions, panes)
+            Mode::Commander => {
+                Layout::compute_commander(client, dpi, font_height, status_height, captions, panes)
             }
         };
         let mut layout = compute(client);
@@ -1378,7 +1378,7 @@ impl Layout {
     pub(crate) fn search(&self) -> Option<&SearchLayout> {
         match &self.body {
             Body::Search(search) => Some(search.as_ref()),
-            Body::TwoPanels { .. } => None,
+            Body::Commander { .. } => None,
         }
     }
 
@@ -1391,7 +1391,7 @@ impl Layout {
     /// divider between them and no splitter (DESIGN.md: Commander mode's window),
     /// and the key bar's buttons sharing its width. The status bar has no left
     /// group, because each panel's status line shows its drive's free space.
-    fn compute_two_panels(
+    fn compute_commander(
         client: Size,
         dpi: Dpi,
         font_height: Px,
@@ -1606,7 +1606,7 @@ impl Layout {
         });
         Layout {
             inspector,
-            body: Body::TwoPanels {
+            body: Body::Commander {
                 panels: Box::new([left, right]),
                 key_bar,
             },
@@ -2174,7 +2174,7 @@ mod tests {
             Px(15),
             Px(28),
             &captions,
-            Mode::TwoPanels,
+            Mode::Commander,
             &Panes::default(),
         );
         let status = layout.status.fit_groups(Px(0), Px(0), Px(1600), dpi);
@@ -2374,7 +2374,7 @@ mod tests {
             inspector_height: Dip(340),
             ..Panes::default()
         };
-        for mode in [Mode::Search, Mode::TwoPanels] {
+        for mode in [Mode::Search, Mode::Commander] {
             let normal = Layout::compute(client, dpi, Px(16), Px(28), &captions, mode, &panes);
             let inspector = normal.inspector().expect("the transfer pane is open");
             assert_eq!(inspector.area.height, Px(340));
@@ -2618,7 +2618,7 @@ mod tests {
     /// a size with an odd width, at 150 %, and with the pseudo-language's
     /// longer captions.
     #[test]
-    fn the_two_panels_share_the_window() {
+    fn the_commander_panels_share_the_window() {
         for (dpi, stretch, show_memory) in [(96, 1.0, false), (144, 1.0, true), (96, 2.0, true)] {
             let dpi = Dpi::new(dpi).expect("a DPI is not zero");
             // Key bar captions wide enough to set the minimum width, as
@@ -2637,7 +2637,7 @@ mod tests {
                     font_height,
                     status_height,
                     &captions,
-                    Mode::TwoPanels,
+                    Mode::Commander,
                     &Panes::default(),
                 )
             };
@@ -2650,7 +2650,7 @@ mod tests {
                 },
             ] {
                 let layout = compute(client);
-                let Body::TwoPanels { panels, key_bar } = layout.body else {
+                let Body::Commander { panels, key_bar } = layout.body else {
                     panic!("Two panels shows");
                 };
                 let panels = *panels;

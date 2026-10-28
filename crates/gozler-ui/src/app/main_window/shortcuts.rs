@@ -27,7 +27,7 @@ pub(in crate::app) enum Failure {
 impl Failure {
     pub(in crate::app) fn mode(&self) -> Mode {
         match self {
-            Self::Duplicate(_) => Mode::TwoPanels,
+            Self::Duplicate(_) => Mode::Commander,
             Self::Registration { mode, .. } => *mode,
         }
     }

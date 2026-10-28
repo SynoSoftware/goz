@@ -88,9 +88,11 @@ impl StatusBar {
         if count == edges.len() as isize && current == edges {
             return;
         }
-        // SAFETY: `edges` holds the `edges.len()` integers the message reads,
-        // and outlives the call.
-        unsafe { send_pointer(self.0, SB_SETPARTS, edges.len(), edges.as_ptr()) };
+        crate::win::present::mark_after(self.0, || {
+            // SAFETY: `edges` holds the `edges.len()` integers the message
+            // reads, and outlives the call.
+            unsafe { send_pointer(self.0, SB_SETPARTS, edges.len(), edges.as_ptr()) }
+        });
     }
 
     /// Sets the text of `part`. A text it shows already is not set again,
@@ -107,9 +109,11 @@ impl StatusBar {
             return;
         }
         let text = wide(text);
-        // SAFETY: `text` is NUL-terminated and outlives the call, which
-        // copies it.
-        unsafe { send_pointer(self.0, SB_SETTEXTW, part | style, text.as_ptr()) };
+        crate::win::present::mark_rect_after(self.0, Some(self.native_part_rect(part)), || {
+            // SAFETY: `text` is NUL-terminated and outlives the call, which
+            // copies it.
+            unsafe { send_pointer(self.0, SB_SETTEXTW, part | style, text.as_ptr()) }
+        });
     }
 
     pub(crate) fn text(self, part: usize) -> String {
@@ -135,7 +139,9 @@ impl StatusBar {
         // it alive; one that it shows already is not set again, because each
         // setting draws the part again.
         if send(self.0, SB_GETICON, part, 0) != icon.0 as isize {
-            send(self.0, SB_SETICON, part, icon.0 as isize);
+            crate::win::present::mark_rect_after(self.0, Some(self.native_part_rect(part)), || {
+                send(self.0, SB_SETICON, part, icon.0 as isize)
+            });
         }
     }
 
@@ -149,10 +155,14 @@ impl StatusBar {
     /// Where `part` is, in the bar's client coordinates, after
     /// [`Self::set_parts`].
     pub(crate) fn part_rect(self, part: usize) -> layout::Rect {
+        crate::win::from_rect(self.native_part_rect(part))
+    }
+
+    fn native_part_rect(self, part: usize) -> RECT {
         let mut rect = RECT::default();
         // SAFETY: `rect` is a local the message fills in.
         unsafe { send_pointer(self.0, SB_GETRECT, part, &raw mut rect) };
-        crate::win::from_rect(rect)
+        rect
     }
 
     /// Sets the tooltip of `part`, which shows while its text is cut off.

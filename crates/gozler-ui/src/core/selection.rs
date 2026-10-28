@@ -306,6 +306,32 @@ pub(crate) fn wide_path_into(file: &ResultItem, path: &mut Vec<u16>) {
     }
 }
 
+/// An entry to drag out of the window, with what its row knows of it, which
+/// the shell takes instead of reading the entry from the disk (DESIGN.md:
+/// Dragging).
+pub(crate) struct DragEntry {
+    pub(crate) path: Vec<u16>,
+    pub(crate) is_folder: bool,
+    /// `FILE_ATTRIBUTE_*` bits, where the row has them.
+    pub(crate) attributes: Option<u32>,
+    /// The size in bytes, where the row has it.
+    pub(crate) size: Option<u64>,
+    /// The last write time as a `FILETIME` value, where the row has it.
+    pub(crate) modified: Option<i64>,
+}
+
+impl DragEntry {
+    pub(crate) fn of_result(file: &ResultItem) -> Self {
+        Self {
+            path: wide_path(file),
+            is_folder: file.is_dir,
+            attributes: file.attributes.map(|a| a.bits()),
+            size: file.size,
+            modified: file.mtime_ft,
+        }
+    }
+}
+
 /// A change of a list's selected rows, as the list's notification tells
 /// it (DESIGN.md: The selection).
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -395,6 +421,69 @@ impl ToldRows {
     }
 }
 
+/// A key that moves a list's focus and keeps the selection, in Search's
+/// list and a panel's, as Total Commander's cursor does (DESIGN.md:
+/// Selecting entries).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Movement {
+    Up,
+    Down,
+    PageUp,
+    PageDown,
+    Home,
+    End,
+}
+
+/// The row `movement` takes the focus to from `focused`, in a list of
+/// `count` rows whose whole rows in view are `view`, as a list view moves
+/// it: a page key first goes to the last or the first row in view, then a
+/// page further. Without a focused row, the focus goes to the first row.
+pub(crate) fn moved(
+    focused: Option<u64>,
+    movement: Movement,
+    count: u64,
+    view: Range<u64>,
+) -> Option<u64> {
+    let last = count.checked_sub(1)?;
+    let Some(from) = focused else {
+        return Some(0);
+    };
+    let step = (view.end - view.start).saturating_sub(1).max(1);
+    let bottom = view.end.saturating_sub(1).max(view.start);
+    let to = match movement {
+        Movement::Up => from.saturating_sub(1),
+        Movement::Down => from + 1,
+        Movement::PageUp if from > view.start => view.start,
+        Movement::PageUp => from.saturating_sub(step),
+        Movement::PageDown if from < bottom => bottom,
+        Movement::PageDown => from + step,
+        Movement::Home => 0,
+        Movement::End => last,
+    };
+    Some(to.min(last))
+}
+
+/// The rows that `Shift` with `movement` marks or unmarks from `focused`,
+/// and the row the focus goes to ([`moved`]), as Total Commander does: the
+/// rows the focus leaves, the row it ends on too when the list's edge stops
+/// it, and always for `Home` and `End`.
+pub(crate) fn passed(
+    focused: Option<u64>,
+    movement: Movement,
+    count: u64,
+    view: Range<u64>,
+) -> Option<(Range<u64>, u64)> {
+    let from = focused?;
+    let to = moved(focused, movement, count, view)?;
+    let ends_on = u64::from(to == from || matches!(movement, Movement::Home | Movement::End));
+    let rows = if to >= from {
+        from..to + ends_on
+    } else {
+        to + 1 - ends_on..from + 1
+    };
+    Some((rows, to))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -447,5 +536,30 @@ mod tests {
             let runs = told.rows(u64::MAX);
             prop_assert!(runs.windows(2).all(|pair| pair[0].end < pair[1].start));
         }
+    }
+
+    /// `Shift` with an arrow marks the row the focus leaves, not the row it
+    /// lands on, so a second press does not mark a row twice; at the edge
+    /// and with `End` it marks the last row too.
+    #[test]
+    fn shift_marks_the_rows_the_focus_leaves() {
+        let view = 0..10;
+        assert_eq!(
+            passed(Some(3), Movement::Down, 20, view.clone()),
+            Some((3..4, 4))
+        );
+        assert_eq!(
+            passed(Some(3), Movement::Up, 20, view.clone()),
+            Some((3..4, 2))
+        );
+        assert_eq!(
+            passed(Some(19), Movement::Down, 20, view.clone()),
+            Some((19..20, 19))
+        );
+        assert_eq!(
+            passed(Some(5), Movement::End, 20, view.clone()),
+            Some((5..20, 19))
+        );
+        assert_eq!(passed(Some(5), Movement::Home, 20, view), Some((0..6, 0)));
     }
 }

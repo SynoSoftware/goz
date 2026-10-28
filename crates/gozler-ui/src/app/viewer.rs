@@ -873,6 +873,9 @@ impl WindowProc for Viewer {
                 Some(LRESULT(0))
             }
             Message::Wake => {
+                if let Some(waker) = self.waker.get() {
+                    waker.woken();
+                }
                 self.read_events(hwnd);
                 Some(LRESULT(0))
             }

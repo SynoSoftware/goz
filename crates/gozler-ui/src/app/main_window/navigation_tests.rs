@@ -97,8 +97,8 @@ fn show_in_commander_gives_the_destination_panel_keyboard_focus() {
     };
     window.controls().search.list.select_only(Some(0));
     window.run(hwnd, MenuItem::Run(CommandId::ShowInCommander));
-    until(&|| window.model.borrow().mode() == Mode::TwoPanels);
-    assert!(window.model.borrow().mode() == Mode::TwoPanels);
+    until(&|| window.model.borrow().mode() == Mode::Commander);
+    assert!(window.model.borrow().mode() == Mode::Commander);
     let side = window.model.borrow().panels().active();
     let list = window.panel(side).list;
     until(&|| list.count() == 3 && list.focused().is_some());

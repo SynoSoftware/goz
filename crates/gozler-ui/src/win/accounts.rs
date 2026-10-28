@@ -109,6 +109,7 @@ pub(crate) fn pick_accounts(owner: Hwnd) -> io::Result<Vec<String>> {
         cAttributesToFetch: attributes.len() as u32,
         apwzAttributeNames: attributes.as_ptr(),
     };
+    let _modal = super::present::modal_loop();
     // SAFETY: `init`, the scopes and the attribute names it points to outlive
     // both calls; Initialize copies them and writes only each scope's `hr`.
     // The thread's COM apartment is the window's single-threaded one.

@@ -475,6 +475,8 @@ thread_local! {
     static OWN_KEYS: RefCell<Vec<HWND>> = const { RefCell::new(Vec::new()) };
     /// Whether [`message_filter`] is routing a message.
     static FILTERING: Cell<bool> = const { Cell::new(false) };
+    /// How many times Shift went down in [`run_messages`] ([`shift_presses`]).
+    static SHIFT_PRESSES: Cell<u32> = const { Cell::new(0) };
 }
 
 /// Names `window`, a top-level window besides the main one, as one that
@@ -616,6 +618,13 @@ fn run_messages(
                     DispatchMessageW(&msg);
                 }
                 continue;
+            }
+            // Bit 30 of a key down's flags: the key was down before.
+            if matches!(msg.message, WM_KEYDOWN | WM_SYSKEYDOWN)
+                && msg.wParam.0 == usize::from(VK_SHIFT.0)
+                && (msg.lParam.0 as usize >> 30) & 1 == 0
+            {
+                SHIFT_PRESSES.set(SHIFT_PRESSES.get().wrapping_add(1));
             }
             if accelerators().translate(main, &msg) {
                 continue;
@@ -864,6 +873,8 @@ unsafe extern "system" fn procedure<W: WindowProc>(
 ) -> LRESULT {
     // SAFETY: these are the original parameters of this native message.
     let _context = unsafe { super::watchdog::enter(msg, wparam, lparam) };
+    // SAFETY: as above.
+    let _update = unsafe { super::present::enter(hwnd, msg, lparam) };
     if msg == WM_NCCREATE {
         // SAFETY: WM_NCCREATE's lparam is the CREATESTRUCTW of the
         // CreateWindowExW call, whose lpCreateParams is the Rc::into_raw
@@ -1142,6 +1153,12 @@ fn keystroke(key: VIRTUAL_KEY) -> Option<Keystroke> {
         shift: held(VK_SHIFT),
         key,
     })
+}
+
+/// How many times Shift has gone down in the main window's message loop,
+/// so a changed count says that Shift was released and pressed again.
+pub(crate) fn shift_presses() -> u32 {
+    SHIFT_PRESSES.get()
 }
 
 /// Whether Shift was down when the message being handled was read.

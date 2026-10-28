@@ -101,13 +101,19 @@ fn search_counts(
     }
     let selected =
         |count: u64| strings.count("panel.selected", count, numbers, &[&numbers.integer(total)]);
-    match search.list.selection() {
-        Selection::None if !panel.has_selection() => match search.look_in {
+    let nothing_selected = match search.list.selection() {
+        Selection::None => !panel.has_selection(),
+        _ => search.list.chosen_by_focus(),
+    };
+    if nothing_selected {
+        return match search.look_in {
             LookIn::ThisFolder => {
                 strings.count("panel.results_in", total, numbers, &[panel.folder()])
             }
             LookIn::AllDrives => strings.count("panel.results_everywhere", total, numbers, &[]),
-        },
+        };
+    }
+    match search.list.selection() {
         Selection::None | Selection::Reading { .. } | Selection::Filtering { .. } => {
             selected(panel.selected_rows())
         }

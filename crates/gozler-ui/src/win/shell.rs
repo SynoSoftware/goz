@@ -4,8 +4,7 @@
 
 use super::Hwnd;
 use crate::core::clipboard::folder_of;
-use crate::core::selection::wide_path;
-use gozler_core::proto::ResultItem;
+use crate::core::selection::DragEntry;
 use std::cell::Cell;
 use std::io;
 use std::marker::PhantomData;
@@ -98,21 +97,21 @@ impl IFileSystemBindData_Impl for FindData_Impl {
 
 /// What `FindFirstFileW` would report for `file`, from what its row holds;
 /// a size or a date the row lacks is 0.
-fn find_data(file: &ResultItem, path: &[u16]) -> WIN32_FIND_DATAW {
-    let mut attributes = file.attributes.map_or(0, |a| a.bits());
-    if file.is_dir {
+fn find_data(file: &DragEntry) -> WIN32_FIND_DATAW {
+    let mut attributes = file.attributes.unwrap_or(0);
+    if file.is_folder {
         attributes |= FILE_ATTRIBUTE_DIRECTORY.0;
     }
     if attributes == 0 {
         attributes = FILE_ATTRIBUTE_NORMAL.0;
     }
     // A folder's size in the row is the sum of its files; Windows gives 0.
-    let size = if file.is_dir {
+    let size = if file.is_folder {
         0
     } else {
         file.size.unwrap_or(0)
     };
-    let modified = file.mtime_ft.unwrap_or(0) as u64;
+    let modified = file.modified.unwrap_or(0) as u64;
     let mut data = WIN32_FIND_DATAW {
         dwFileAttributes: attributes,
         ftLastWriteTime: FILETIME {
@@ -123,8 +122,8 @@ fn find_data(file: &ResultItem, path: &[u16]) -> WIN32_FIND_DATAW {
         nFileSizeLow: size as u32,
         ..Default::default()
     };
-    let last = path.iter().rposition(|&u| u == u16::from(b'\\'));
-    let name = &path[last.map_or(0, |i| i + 1)..];
+    let last = file.path.iter().rposition(|&u| u == u16::from(b'\\'));
+    let name = &file.path[last.map_or(0, |i| i + 1)..];
     // The last unit stays the NUL; an NTFS or ReFS name always fits.
     let length = name.len().min(data.cFileName.len() - 1);
     data.cFileName[..length].copy_from_slice(&name[..length]);
@@ -140,7 +139,7 @@ fn find_data(file: &ResultItem, path: &[u16]) -> WIN32_FIND_DATAW {
 /// Each path is named from what its row holds, without reading the disk, so
 /// an entry deleted since the search is dragged too, and the drop target
 /// reports it, as it does for any stale item.
-pub(crate) fn drag(files: &[ResultItem]) -> Option<Vec<u16>> {
+pub(crate) fn drag(files: &[DragEntry]) -> Option<Vec<u16>> {
     let found: IFileSystemBindData = FindData(Cell::new(WIN32_FIND_DATAW::default())).into();
     // SAFETY: plain COM calls on the window's thread, whose apartment
     // `initialize_com` started; the context holds its own reference.
@@ -157,20 +156,20 @@ pub(crate) fn drag(files: &[ResultItem]) -> Option<Vec<u16>> {
     let mut lists = Vec::with_capacity(files.len());
     let mut paths = Vec::with_capacity(files.len());
     for file in files {
-        let path = wide_path(file);
+        let path = &file.path;
         let mut list = std::ptr::null_mut();
         // SAFETY: the find data and the path outlive the calls; the second
         // writes `list`.
         let named = unsafe {
-            found.SetFindData(&find_data(file, &path)).and_then(|()| {
-                SHParseDisplayName(&HSTRING::from_wide(&path), &context, &mut list, 0, None)
+            found.SetFindData(&find_data(file)).and_then(|()| {
+                SHParseDisplayName(&HSTRING::from_wide(path), &context, &mut list, 0, None)
             })
         };
         if named.is_ok() && !list.is_null() {
             lists.push(list);
-            paths.push(PathBuf::from(std::ffi::OsString::from_wide(&path)));
+            paths.push(PathBuf::from(std::ffi::OsString::from_wide(path)));
         } else {
-            missing.get_or_insert(path);
+            missing.get_or_insert_with(|| path.clone());
         }
     }
     let Some(&first) = lists.first() else {
@@ -202,6 +201,7 @@ pub(crate) fn drag(files: &[ResultItem]) -> Option<Vec<u16>> {
         };
         if let Ok(data) = data {
             let _own = super::drop_target::own_drag(&data, paths.into());
+            let _modal = super::present::modal_loop();
             // A move needs nothing here: the index follows the journal.
             let _ = SHDoDragDrop(
                 None,
@@ -492,6 +492,7 @@ pub(crate) fn save_dialog(
         }
         dialog.SetTitle(&HSTRING::from(title)).ok()?;
         dialog.SetFileName(&HSTRING::from(file_name)).ok()?;
+        let _modal = super::present::modal_loop();
         dialog.Show(Some(owner.0)).ok()?;
         let index = dialog.GetFileTypeIndex().ok()?;
         let path = dialog
@@ -529,6 +530,7 @@ pub(crate) fn pick_folder(owner: Hwnd, start: Option<&str>) -> Option<String> {
         {
             let _ = dialog.SetFolder(&folder);
         }
+        let _modal = super::present::modal_loop();
         dialog.Show(Some(owner.0)).ok()?;
         let path = dialog
             .GetResult()
@@ -562,6 +564,7 @@ pub(crate) fn pick_program(owner: Hwnd, title: &str, programs: &str) -> Option<S
             .ok()?;
         dialog.SetFileTypes(&filter).ok()?;
         dialog.SetTitle(&HSTRING::from(title)).ok()?;
+        let _modal = super::present::modal_loop();
         dialog.Show(Some(owner.0)).ok()?;
         let path = dialog
             .GetResult()
@@ -862,20 +865,17 @@ mod tests {
     /// summed size would be taken for its own.
     #[test]
     fn find_data_names_a_folder_as_a_folder_and_a_file_with_its_row() {
-        let row = |path: &str, is_dir| ResultItem {
-            path: path.to_owned(),
-            path_u16: None,
-            size: Some(0x1_0000_0002),
-            mtime_ft: Some(0x0123_4567_89AB_CDEF),
-            created_ft: None,
-            is_dir,
+        let row = |path: &str, is_folder| DragEntry {
+            path: path.encode_utf16().collect(),
+            is_folder,
             attributes: None,
+            size: Some(0x1_0000_0002),
+            modified: Some(0x0123_4567_89AB_CDEF),
         };
-        let data = |file: &ResultItem| find_data(file, &wide_path(file));
-        let folder = data(&row(r"C:\docs", true));
+        let folder = find_data(&row(r"C:\docs", true));
         assert_eq!(folder.dwFileAttributes, FILE_ATTRIBUTE_DIRECTORY.0);
         assert_eq!((folder.nFileSizeHigh, folder.nFileSizeLow), (0, 0));
-        let file = data(&row(r"C:\docs\Ünï.txt", false));
+        let file = find_data(&row(r"C:\docs\Ünï.txt", false));
         assert_eq!(file.dwFileAttributes, FILE_ATTRIBUTE_NORMAL.0);
         assert_eq!((file.nFileSizeHigh, file.nFileSizeLow), (1, 2));
         assert_eq!(

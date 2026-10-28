@@ -49,6 +49,11 @@ impl Work {
         }
     }
 
+    /// The window took the queue's message ([`OpenWaker::woken`]).
+    pub(in crate::app) fn woken(&self) {
+        self.waker.woken();
+    }
+
     pub(in crate::app) fn restore(&mut self, path: PathBuf) {
         self.loading.submit(
             QueueStart {

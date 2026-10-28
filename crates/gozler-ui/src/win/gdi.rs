@@ -668,7 +668,8 @@ fn system_icon_info(
 }
 
 impl Hwnd {
-    /// Gives the control `font` and redraws it.
+    /// Gives the control `font` and marks it, to paint when the update ends
+    /// ([`super::present`]) instead of at once.
     pub(crate) fn set_font(self, font: &Font) {
         if self.font() == font.0 {
             return;
@@ -679,9 +680,10 @@ impl Hwnd {
                 self.0,
                 windows::Win32::UI::WindowsAndMessaging::WM_SETFONT,
                 Some(WPARAM(font.0.0 as usize)),
-                Some(windows::Win32::Foundation::LPARAM(1)),
+                Some(windows::Win32::Foundation::LPARAM(0)),
             );
         }
+        self.invalidate();
     }
 
     fn font(self) -> HFONT {

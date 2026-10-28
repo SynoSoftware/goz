@@ -125,7 +125,7 @@ impl Choices {
     pub(crate) fn show_shortcut(&self, mode: Mode) -> Option<ShowShortcut> {
         match mode {
             Mode::Search => self.show_shortcut,
-            Mode::TwoPanels => self.commander_shortcut,
+            Mode::Commander => self.commander_shortcut,
         }
     }
 }
@@ -688,11 +688,14 @@ impl SettingsDraft {
 pub(crate) enum Mode {
     #[default]
     Search,
-    TwoPanels,
+    /// Saved under its earlier name, so a `ui.json` of an earlier version
+    /// opens in the mode it closed in.
+    #[serde(rename = "two_panels")]
+    Commander,
 }
 
 impl Mode {
-    pub(crate) const ALL: [Mode; 2] = [Mode::Search, Mode::TwoPanels];
+    pub(crate) const ALL: [Mode; 2] = [Mode::Search, Mode::Commander];
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -1312,7 +1315,7 @@ mod tests {
                     bottom: 600,
                     maximized: false,
                 }),
-                mode: Mode::TwoPanels,
+                mode: Mode::Commander,
                 matching: Matching {
                     mode: crate::core::query::MatchMode::WholeWords,
                     case: true,
@@ -1382,12 +1385,12 @@ mod tests {
         other.choices.language = LanguageChoice::Tag("de".into());
         let text = other.changes(&loaded).apply(Some(&text));
         let mut this = loaded.clone();
-        this.window.mode = Mode::TwoPanels;
+        this.window.mode = Mode::Commander;
         this.window.destination_folder = None;
         let text = this.changes(&loaded).apply(Some(&text));
         let saved = Settings::parse(&text);
         assert_eq!(saved.choices.language, LanguageChoice::Tag("de".into()));
-        assert_eq!(saved.window.mode, Mode::TwoPanels);
+        assert_eq!(saved.window.mode, Mode::Commander);
         assert_eq!(saved.window.destination_folder, None);
     }
 
@@ -1401,7 +1404,7 @@ mod tests {
         first.window.destination_folder = None;
         let mut last = first.clone();
         last.choices.show_memory = true;
-        last.window.mode = Mode::TwoPanels;
+        last.window.mode = Mode::Commander;
         let changes = first.changes(&before).combine(last.changes(&first));
         let latest_file = r#"{
             "settings": {"language": "de", "show_memory": false},

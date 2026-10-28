@@ -82,8 +82,8 @@ impl MainWindow {
             self.pending_refresh.get() == Areas::NONE && self.pending_effects.borrow().is_empty();
         self.pending_refresh
             .set(self.pending_refresh.get() | touched);
-        if post {
-            hwnd.post(DEFERRED);
+        if post && hwnd.post(DEFERRED) {
+            win::present::extend_to_deferred();
         }
     }
 
@@ -236,7 +236,7 @@ impl MainWindow {
                         break;
                     }
                     let active =
-                        list == List::Search || self.model.borrow().mode() == Mode::TwoPanels;
+                        list == List::Search || self.model.borrow().mode() == Mode::Commander;
                     if active {
                         let accepted = self.begin_search(hwnd, list);
                         self.apply_at(hwnd, revision, accepted);
@@ -366,8 +366,16 @@ impl MainWindow {
             Effect::SwitchPanels => {
                 let mode = self.model.borrow().mode();
                 let accepted = match mode {
-                    Mode::TwoPanels => self.controls().panels.start_panels(self, hwnd),
-                    Mode::Search => self.controls().panels.stop_panels(self, hwnd),
+                    Mode::Commander => self.controls().panels.start_panels(self, hwnd),
+                    Mode::Search => {
+                        // The entry the person left in Search is in view
+                        // again (DESIGN.md: Commander mode and Search).
+                        let list = self.controls().search.list;
+                        if let Some(row) = list.focused().or_else(|| list.next_selected(None)) {
+                            list.ensure_visible(row);
+                        }
+                        self.controls().panels.stop_panels(self, hwnd)
+                    }
                 };
                 self.apply_at(hwnd, revision, accepted);
             }

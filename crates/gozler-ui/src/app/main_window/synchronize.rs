@@ -48,7 +48,7 @@ impl MainWindow {
                 let model = self.model.borrow();
                 let panels = model.panels();
                 let folder = |side: Side| {
-                    if model.mode() == Mode::TwoPanels
+                    if model.mode() == Mode::Commander
                         && matches!(panels.panel(side).view(), crate::core::panel::View::Folder)
                     {
                         panels.panel(side).folder().to_owned()

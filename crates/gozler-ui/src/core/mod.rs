@@ -25,6 +25,7 @@ pub(crate) mod model;
 pub(crate) mod open;
 pub(crate) mod operations;
 pub(crate) mod panel;
+pub(crate) mod present;
 pub(crate) mod programs;
 pub(crate) mod query;
 pub(crate) mod results;

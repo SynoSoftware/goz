@@ -1,9 +1,9 @@
 use super::{
     Button, ButtonIcon, Cell, Column, ColumnFit, ColumnSizing, CommandId, ControlId, CustomDraw,
-    DEFERRED, DispInfo, Dpi, DrawAnswer, DrawStage, DropDownList, Edit, Hwnd, LRESULT, Label,
-    Layout, List, ListButton, ListCaption, ListNotify, ListView, MainWindow, MatchMode, Matching,
-    MenuItem, Px, Range, Rect, RefCell, SELECTION_LIMIT, SortDir, TextMeter, Tool, Toolbar,
-    Tooltip, captions, clear_glyph, layout, matched_width, win,
+    DEFERRED, DispInfo, Dpi, DrawAnswer, DrawStage, DropDownList, Edit, Entries, Hwnd, LRESULT,
+    Label, Layout, List, ListButton, ListCaption, ListNotify, ListView, MainWindow, MatchMode,
+    Matching, MenuItem, Px, Range, Rect, RefCell, SELECTION_LIMIT, Selected, SortDir, TextMeter,
+    Tool, Toolbar, Tooltip, captions, clear_glyph, layout, matched_width, win,
 };
 
 pub(super) struct Search {
@@ -407,7 +407,7 @@ impl Search {
             window
                 .model
                 .borrow_mut()
-                .set_selection(List::Search, selected)
+                .set_selection(List::Search, selected, list.focused())
         };
         window.apply(hwnd, accepted);
         true
@@ -445,18 +445,21 @@ impl Search {
                 }
                 Some(LRESULT(0))
             }
-            ListNotify::CustomDraw(mut draw) => Some(CustomDraw::answer(match draw.stage() {
-                DrawStage::Paint => DrawAnswer::EachRow,
-                DrawStage::Row { row } => self.draw_row(window, &mut draw, row),
-                DrawStage::Cell { row, column } => {
-                    self.draw_cell(window, &draw, hwnd.dpi(), row, column)
-                }
-                DrawStage::RowPainted => {
-                    draw.restore_font(&window.created().fonts.borrow().ui);
-                    DrawAnswer::Default
-                }
-                DrawStage::Other => DrawAnswer::Default,
-            })),
+            ListNotify::CustomDraw(mut draw) => {
+                let answer = match draw.stage() {
+                    DrawStage::Paint => DrawAnswer::EachRow,
+                    DrawStage::Row { row } => self.draw_row(window, &mut draw, row),
+                    DrawStage::Cell { row, column } => {
+                        self.draw_cell(window, &draw, hwnd.dpi(), row, column)
+                    }
+                    DrawStage::RowPainted => {
+                        draw.restore_font(&window.created().fonts.borrow().ui);
+                        DrawAnswer::Default
+                    }
+                    DrawStage::Other => DrawAnswer::Default,
+                };
+                Some(draw.answer(answer, Hwnd::focused() == Some(self.row.input.hwnd())))
+            }
             ListNotify::SelectionChanged(change) => {
                 if !window.selection_changed(List::Search, change) {
                     return None;
@@ -467,11 +470,11 @@ impl Search {
                 None
             }
             ListNotify::Activated => {
-                self.enter_result(window, hwnd);
+                self.enter_result(window);
                 None
             }
             ListNotify::BeginDrag => {
-                window.drag_selected(hwnd);
+                window.drag_selected(hwnd, List::Search);
                 None
             }
             ListNotify::DividerDoubleClick(index) => {
@@ -498,10 +501,20 @@ impl Search {
                 }
                 None
             }
+            // With no row selected, commands act on the focused row, which
+            // the selection then reads (DESIGN.md: Selecting entries).
+            ListNotify::FocusChanged => {
+                if !window.native_update_active(List::Search)
+                    && self.list.selected_count() == 0
+                    && !self.selection_pending.replace(true)
+                {
+                    hwnd.post(DEFERRED);
+                }
+                None
+            }
             ListNotify::Focused
             | ListNotify::Unfocused
             | ListNotify::Clicked
-            | ListNotify::FocusChanged
             | ListNotify::Other => None,
         }
     }
@@ -622,20 +635,26 @@ impl Search {
         DrawAnswer::Drawn
     }
 
-    /// Gives the selected row `Enter`, as `Enter` in the list does, or the
-    /// first row when none is selected (DESIGN.md: window rule 8).
-    pub(super) fn enter_first_or_selected(&self, window: &MainWindow, hwnd: Hwnd) {
+    /// Gives the focused row `Enter`, as `Enter` in the list does, or the
+    /// first row when none is focused (DESIGN.md: window rule 8).
+    pub(super) fn enter_first_or_focused(&self, window: &MainWindow) {
         let list = self.list;
-        if list.selected_count() == 0 && window.model.borrow().search_list().results().count() > 0 {
-            list.select_only(Some(0));
-            list.ensure_visible(0);
+        if list.focused().is_none() && window.model.borrow().search_list().results().count() > 0 {
+            list.set_focused(Some(0));
         }
-        self.enter_result(window, hwnd);
+        self.enter_result(window);
     }
 
-    /// Enter and double-click run the same Open command as the menus.
-    pub(super) fn enter_result(&self, window: &MainWindow, hwnd: Hwnd) {
-        window.run(hwnd, MenuItem::Run(CommandId::Open));
+    /// Enter and a double-click open the focused result alone, wherever
+    /// the selection is, as in Total Commander (DESIGN.md: Searching,
+    /// "where Open goes").
+    pub(super) fn enter_result(&self, window: &MainWindow) {
+        let entry = self.list.focused().and_then(|row| {
+            (window.model.borrow().shown_row(List::Search, row)).map(Selected::of_result)
+        });
+        if let Some(entry) = entry {
+            window.open_chosen(List::Search, Entries::Ready(vec![entry]));
+        }
     }
 }
 
@@ -646,7 +665,14 @@ impl Search {
         hwnd: Hwnd,
         event: super::ControlEvent,
     ) -> bool {
-        if self.row.input.focused(event) {
+        let gained = self.row.input.focused(event);
+        if gained || self.row.input.unfocused(event) {
+            // The list draws as the focused list while the box has the
+            // focus, because Enter in the box opens its focused row
+            // (`CustomDraw::answer`).
+            self.list.redraw_rows(self.list.visible_rows());
+        }
+        if gained {
             // The click places the caret after the focus arrives, so the
             // text is selected once the click is handled.
             let select = window.model.borrow().choices().select_on_click;

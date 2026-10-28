@@ -24,7 +24,7 @@ use super::fetch::{Ask, ChunkAsk, FromSnapshot, Generation, Outcome};
 use super::model::Column;
 use super::query::{self, Filters, Matching};
 use super::search_list::{Deselect, SearchList};
-use super::selection::{RowSelection, Selection, wide_path};
+use super::selection::{DragEntry, RowSelection, wide_path};
 use super::work::{self, Pass, Retirement};
 use gozler_core::fold::fold;
 use gozler_core::proto::ResultItem;
@@ -292,6 +292,24 @@ impl PanelEntries {
     }
 
     pub(crate) fn resolve(self) -> Vec<ChosenEntry> {
+        self.map(|path, entry| ChosenEntry {
+            path,
+            is_folder: entry.is_folder(),
+        })
+    }
+
+    pub(crate) fn dragged(self) -> Vec<DragEntry> {
+        self.map(|path, entry| DragEntry {
+            path,
+            is_folder: entry.is_folder(),
+            attributes: Some(entry.attributes),
+            size: Some(entry.size),
+            modified: Some(entry.modified),
+        })
+    }
+
+    /// `make` of each chosen entry's full path and entry, in row order.
+    fn map<T>(self, make: impl Fn(Vec<u16>, &Entry) -> T) -> Vec<T> {
         let mut base: Vec<u16> = self.folder.encode_utf16().collect();
         if base.last() != Some(&u16::from(b'\\')) {
             base.push(u16::from(b'\\'));
@@ -301,10 +319,7 @@ impl PanelEntries {
             let mut path = Vec::with_capacity(base.len() + entry.name.len());
             path.extend_from_slice(&base);
             path.extend_from_slice(&entry.name);
-            Some(ChosenEntry {
-                path,
-                is_folder: entry.is_folder(),
-            })
+            Some(make(path, entry))
         };
         if self.selected.is_empty() {
             self.focused.and_then(entry).into_iter().collect()
@@ -2148,14 +2163,10 @@ impl Panels {
         if panel.is_calculating() {
             return 0;
         }
-        let focused = || usize::from(self.focused(side).is_some());
         match (panel.search(), panel.selected.as_slice()) {
-            (None, []) => focused(),
+            (None, []) => usize::from(self.focused(side).is_some()),
             (None, _) => panel.selected_count as usize,
-            (Some(search), selected) => match search.list.selection() {
-                Selection::None if selected.is_empty() => focused(),
-                selection => selection.files().map_or(0, <[_]>::len),
-            },
+            (Some(search), _) => search.list.selection().files().map_or(0, <[_]>::len),
         }
     }
 
@@ -2176,12 +2187,9 @@ impl Panels {
                 folder: panel.folder.clone(),
                 up: panel.up_rows(),
             })),
-            Some(search) => match search.list.selection() {
-                Selection::None if panel.selected.is_empty() => Some(super::open::Entries::Ready(
-                    self.focused(side).into_iter().collect(),
-                )),
-                selection => selection.shared_files().map(super::open::Entries::Results),
-            },
+            Some(search) => {
+                (search.list.selection().shared_files()).map(super::open::Entries::Results)
+            }
         }
     }
 
@@ -3466,7 +3474,6 @@ pub(crate) mod tests {
         assert!(panels.panel(Side::Left).search().is_some());
         assert!(!panels.panel(Side::Left).is_calculating());
         assert!(!panels.take_reread(Side::Left));
-        assert!(panels.chosen_source(Side::Left).is_some());
 
         let entries = || {
             (0..work::INLINE_ITEMS + 1)

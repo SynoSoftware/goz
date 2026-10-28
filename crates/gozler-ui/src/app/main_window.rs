@@ -605,11 +605,12 @@ impl MainWindow {
         });
         let hwnd = win::window::create_window(class, Rc::clone(&window), placement)
             .expect("the main window opens");
+        win::present::set_main_window(hwnd);
         // Only a status reply names the volumes, so it is asked for beside
         // the first search (DESIGN.md: Requests).
         window.search(hwnd, List::Search);
         window.ask_status();
-        if window.model.borrow().mode() == Mode::TwoPanels {
+        if window.model.borrow().mode() == Mode::Commander {
             let accepted = window.controls().panels.start_panels(&window, hwnd);
             window.apply(hwnd, accepted);
         }
@@ -748,9 +749,7 @@ impl MainWindow {
     }
 
     /// Sets every caption, then measures them and lays out again. Runs
-    /// after a change to the language or to the regional format, inside the
-    /// caller's [`Hwnd::draw_once_after`], which does not nest, so a caller
-    /// that refreshes several things draws the window once.
+    /// after a change to the language or to the regional format.
     fn refresh_text(&self, hwnd: Hwnd) {
         let captions = self.captions();
         self.apply_text(hwnd, &captions);
@@ -761,8 +760,7 @@ impl MainWindow {
     /// Loads the language of `choice`, gives it to the model and sets every
     /// caption in it (DESIGN.md: Language). The Language menu
     /// and Settings' OK and Apply call it; the typed text, the results, the
-    /// selection and the focus stay as they are. Runs inside the caller's
-    /// [`Hwnd::draw_once_after`].
+    /// selection and the focus stay as they are.
     fn set_language(&self, hwnd: Hwnd, choice: LanguageChoice) {
         let language = choice.resolve(&win::locale::display_languages());
         let accepted = (self.model.borrow_mut()).set_language(choice, Strings::load(language));
@@ -1213,7 +1211,7 @@ impl MainWindow {
             Awaited::Request(Purpose::Selection(_)) | Awaited::Selection(_) => {
                 let empty: RowSelection = Vec::new().into();
                 self.forget_selection_action(list);
-                self.model.borrow_mut().set_selection(list, empty)
+                self.model.borrow_mut().set_selection(list, empty, None)
             }
             Awaited::Request(Purpose::Results(_)) => self.model.borrow_mut().cancel_results(list),
             _ => Accepted {
@@ -1273,26 +1271,6 @@ impl MainWindow {
     /// Places every control where `Layout::compute` says (DESIGN.md:
     /// window rule 7), and shows only the controls of the shown mode.
     fn layout(&self, hwnd: Hwnd) {
-        let mode = self.model.borrow().mode();
-        let mode_changed = self
-            .created()
-            .layout
-            .borrow()
-            .as_ref()
-            .is_some_and(|previous| {
-                matches!(
-                    (&previous.body, mode),
-                    (Body::Search(_), Mode::TwoPanels) | (Body::TwoPanels { .. }, Mode::Search)
-                )
-            });
-        if mode_changed {
-            hwnd.draw_now_after(|| self.place_controls(hwnd));
-        } else {
-            self.place_controls(hwnd);
-        }
-    }
-
-    fn place_controls(&self, hwnd: Hwnd) {
         let created = self.created();
         let controls = &created.controls;
         let metrics = created.metrics.get();
@@ -1362,7 +1340,7 @@ impl MainWindow {
                 },
                 placed.list,
             ])),
-            Body::TwoPanels { key_bar, .. } => {
+            Body::Commander { key_bar, .. } => {
                 moves.extend(
                     controls
                         .key_bar
@@ -1429,7 +1407,7 @@ impl MainWindow {
         }
         for side in Side::BOTH {
             let placed = match &layout.body {
-                Body::TwoPanels { panels, .. } => Some(&panels[side.index()]),
+                Body::Commander { panels, .. } => Some(&panels[side.index()]),
                 Body::Search(_) => None,
             };
             controls
@@ -1490,7 +1468,7 @@ impl MainWindow {
             )
         });
         let panel_widths = match &layout.body {
-            Body::TwoPanels { panels, .. } => std::array::from_fn(|index| {
+            Body::Commander { panels, .. } => std::array::from_fn(|index| {
                 let list = controls.panels.sides[index].list.hwnd();
                 let old_width = list.screen_rect().width;
                 (
@@ -1730,7 +1708,7 @@ impl MainWindow {
         if !enabled {
             return;
         }
-        if mode == Mode::TwoPanels {
+        if mode == Mode::Commander {
             // Any key or command closes the box first, so F5 after a
             // quick search copies the focused row.
             self.controls().panels.close_quick_search(self);
@@ -1755,28 +1733,8 @@ impl MainWindow {
                     return;
                 }
                 CommandId::Open => {
-                    let Some(entries) = self.selected_source(list) else {
-                        return;
-                    };
-                    // The row menu's bold Open does what a double-click
-                    // does, as Windows' guidelines ask, so one folder shows
-                    // in its panel.
-                    if let List::Panel(side) = list
-                        && let Some(folder) = entries.one().filter(|entry| entry.is_folder)
-                    {
-                        let folder = String::from_utf16_lossy(&folder.path);
-                        self.controls().panels.show_folder(self, side, folder);
-                        return;
-                    }
-                    match self.open_commands(list).open_route(list, &entries) {
-                        OpenRoute::Run => self.open_entries(list, EntryAction::Open, entries),
-                        OpenRoute::Commander { entry, commanded } => {
-                            if !commanded.is_empty() {
-                                let commanded = Entries::Ready(commanded);
-                                self.open_entries(list, EntryAction::Open, commanded);
-                            }
-                            self.show_in_commander(list, entry);
-                        }
+                    if let Some(entries) = self.selected_source(list) {
+                        self.open_chosen(list, entries);
                     }
                     return;
                 }
@@ -1845,13 +1803,13 @@ impl MainWindow {
                         return match mode {
                             Mode::Search => controls.search.list.select_all(),
                             // `..` is let go when the selection is read.
-                            Mode::TwoPanels => self.panel(active).list.select_all(),
+                            Mode::Commander => self.panel(active).list.select_all(),
                         };
                     }
                 },
                 CommandId::ClearSelection => return self.panel(active).list.deselect_all(),
                 CommandId::Find => {
-                    if mode == Mode::TwoPanels {
+                    if mode == Mode::Commander {
                         return self.controls().panels.find_in_panel(self, hwnd, active);
                     }
                     controls.search.row.input.hwnd().focus();
@@ -1863,7 +1821,7 @@ impl MainWindow {
                             self.created().work.borrow_mut().lists.refresh_location();
                             self.search(hwnd, List::Search);
                         }
-                        Mode::TwoPanels => self.controls().panels.refresh_panel(self, hwnd, active),
+                        Mode::Commander => self.controls().panels.refresh_panel(self, hwnd, active),
                     };
                 }
                 CommandId::SearchSyntax => {
@@ -1876,8 +1834,8 @@ impl MainWindow {
                 CommandId::ClearFilters => self.model.borrow_mut().clear_filters(),
                 CommandId::Settings => return self.settings.open_settings(self, hwnd),
                 CommandId::ShowSearch => return self.show_mode(hwnd, Mode::Search),
-                CommandId::ShowCommander => return self.show_mode(hwnd, Mode::TwoPanels),
-                CommandId::CopyToFolder | CommandId::MoveToFolder if mode == Mode::TwoPanels => {
+                CommandId::ShowCommander => return self.show_mode(hwnd, Mode::Commander),
+                CommandId::CopyToFolder | CommandId::MoveToFolder if mode == Mode::Commander => {
                     return self.controls().panels.transfer(
                         self,
                         hwnd,
@@ -1899,11 +1857,11 @@ impl MainWindow {
                 CommandId::Cut => return self.copy(hwnd, ClipboardFormat::CutFiles),
                 CommandId::Paste => return self.paste(),
                 CommandId::FileOperations => return self.show_operations(None),
-                CommandId::TwoPanels => {
+                CommandId::Commander => {
                     let mut model = self.model.borrow_mut();
                     let other = match model.mode() {
-                        Mode::Search => Mode::TwoPanels,
-                        Mode::TwoPanels => Mode::Search,
+                        Mode::Search => Mode::Commander,
+                        Mode::Commander => Mode::Search,
                     };
                     model.show_mode(other)
                 }
@@ -1939,7 +1897,7 @@ impl MainWindow {
                 }
                 return;
             }
-            MenuItem::SortKey(key) if mode == Mode::TwoPanels => {
+            MenuItem::SortKey(key) if mode == Mode::Commander => {
                 return self.controls().panels.change_panel_sort(
                     self,
                     hwnd,
@@ -1948,7 +1906,7 @@ impl MainWindow {
                     None,
                 );
             }
-            MenuItem::SortDirection(dir) if mode == Mode::TwoPanels => {
+            MenuItem::SortDirection(dir) if mode == Mode::Commander => {
                 return self.controls().panels.change_panel_sort(
                     self,
                     hwnd,
@@ -1971,7 +1929,7 @@ impl MainWindow {
                 return self.controls().panels.run_panel_action(self, hwnd, action);
             }
             MenuItem::Language(place) => {
-                hwnd.draw_once_after(|| self.set_language(hwnd, LanguageChoice::at(place)));
+                self.set_language(hwnd, LanguageChoice::at(place));
                 self.save_settings(true);
                 return;
             }
@@ -2053,7 +2011,7 @@ impl MainWindow {
     fn show_again(&self, hwnd: Hwnd) {
         self.created().work.borrow_mut().lists.refresh_location();
         self.search(hwnd, List::Search);
-        if self.model.borrow().mode() == Mode::TwoPanels {
+        if self.model.borrow().mode() == Mode::Commander {
             for side in Side::BOTH {
                 self.controls().panels.refresh_panel(self, hwnd, side);
             }
@@ -2196,15 +2154,7 @@ impl MainWindow {
                     if !self.created().work.borrow().clipboard.is_current(id) {
                         continue;
                     }
-                    let text = match failure {
-                        CopyFailure::Busy => self
-                            .model
-                            .borrow()
-                            .strings()
-                            .text("message.clipboard_busy")
-                            .to_owned(),
-                        CopyFailure::Native(error) => error.message(),
-                    };
+                    let text = failure.message(self.model.borrow().strings());
                     self.error_box(hwnd, &text);
                 }
                 ModalStep::PreparedPaths(purpose, id, prepared) => {
@@ -2264,9 +2214,7 @@ impl MainWindow {
                         continue;
                     }
                     if let Some(entry) = opened.commander {
-                        self.controls()
-                            .panels
-                            .show_entry_in_commander(self, hwnd, entry);
+                        self.controls().panels.show_entry_in_commander(self, entry);
                         continue;
                     }
                     if purpose == ShellPurpose::Setup {
@@ -2326,7 +2274,7 @@ impl MainWindow {
                     let shown =
                         self.model.borrow().search_list().results().shown_ask() == Some(&ask);
                     if shown {
-                        self.controls().search.enter_first_or_selected(self, hwnd);
+                        self.controls().search.enter_first_or_focused(self);
                     }
                 }
                 ModalStep::Operation(dialog) => {
@@ -2404,7 +2352,7 @@ impl MainWindow {
                 let list = self.controls().search.list;
                 list.redraw_rows(list.visible_rows());
             }
-            Mode::TwoPanels => {
+            Mode::Commander => {
                 for side in Side::BOTH {
                     let list = self.panel(side).list;
                     list.redraw_rows(list.visible_rows());
@@ -2416,6 +2364,7 @@ impl MainWindow {
     /// Accepts every reply that has arrived, and the newer release that the
     /// update check found.
     fn on_wake(&self, hwnd: Hwnd) {
+        self.created().waker.woken();
         if !self.update_live() {
             return;
         }
@@ -2479,7 +2428,7 @@ impl MainWindow {
                 .borrow_mut()
                 .panels_mut()
                 .accept_count(side, answer);
-            if current && self.model.borrow().mode() == Mode::TwoPanels {
+            if current && self.model.borrow().mode() == Mode::Commander {
                 self.controls().panels.show_panel(self, side);
             }
             self.retire_model();
@@ -2734,7 +2683,7 @@ impl MainWindow {
         }
         self.update_message();
         self.update_status();
-        if self.model.borrow().mode() == Mode::TwoPanels {
+        if self.model.borrow().mode() == Mode::Commander {
             for side in Side::BOTH {
                 self.controls().panels.show_panel_message(self, side);
             }
@@ -2942,13 +2891,11 @@ impl MainWindow {
                 let enter = self.model.borrow_mut().enter_in_search_box();
                 match enter {
                     SearchBoxEnter::Search => self.search(hwnd, List::Search),
-                    SearchBoxEnter::Enter => {
-                        self.controls().search.enter_first_or_selected(self, hwnd)
-                    }
+                    SearchBoxEnter::Enter => self.controls().search.enter_first_or_focused(self),
                     SearchBoxEnter::Wait => {}
                 }
             }
-            KeyAction::ResultEnter => self.controls().search.enter_result(self, hwnd),
+            KeyAction::ResultEnter => self.controls().search.enter_result(self),
             KeyAction::ClearSearch => controls.search.row.input.hwnd().set_text(""),
             KeyAction::MoveTab { backward } => self.move_tab_focus(hwnd, target, backward),
             KeyAction::CancelJob => {
@@ -2964,6 +2911,13 @@ impl MainWindow {
             KeyAction::Panel(key) => {
                 return self.controls().panels.on_panel_key(self, hwnd, target, key);
             }
+            KeyAction::Select(key) => {
+                let list = match self.controls().panels.panel_list(target) {
+                    Some(side) => List::Panel(side),
+                    None => List::Search,
+                };
+                self.select_key(hwnd, list, key);
+            }
         }
         true
     }
@@ -2975,7 +2929,7 @@ impl MainWindow {
     /// dialog's edit box does.
     fn move_tab_focus(&self, hwnd: Hwnd, target: Hwnd, backward: bool) {
         hwnd.show_focus_cues();
-        if self.model.borrow().mode() == Mode::TwoPanels {
+        if self.model.borrow().mode() == Mode::Commander {
             // From a control outside the panels' lists and boxes, such as
             // a drive button, Tab returns to the active panel, because
             // Search's controls are hidden.
@@ -3031,6 +2985,30 @@ impl MainWindow {
         }
     }
 
+    /// Opens `entries` of `list` where they go (DESIGN.md: Searching,
+    /// "where Open goes").
+    pub(super) fn open_chosen(&self, list: List, entries: Entries) {
+        // The row menu's bold Open does what a double-click does, as
+        // Windows' guidelines ask, so one folder shows in its panel.
+        if let List::Panel(side) = list
+            && let Some(folder) = entries.one().filter(|entry| entry.is_folder)
+        {
+            let folder = String::from_utf16_lossy(&folder.path);
+            self.controls().panels.show_folder(self, side, folder);
+            return;
+        }
+        match self.open_commands(list).open_route(list, &entries) {
+            OpenRoute::Run => self.open_entries(list, EntryAction::Open, entries),
+            OpenRoute::Commander { entry, commanded } => {
+                if !commanded.is_empty() {
+                    let commanded = Entries::Ready(commanded);
+                    self.open_entries(list, EntryAction::Open, commanded);
+                }
+                self.show_in_commander(list, entry);
+            }
+        }
+    }
+
     fn act_on_selected(&self, list: List, action: EntryAction) {
         let Some(entries) = self.selected_source(list) else {
             return;
@@ -3069,22 +3047,24 @@ impl MainWindow {
             .open_entries(list, action, entries, commands);
     }
 
-    /// Drags the selected entries out of the window, as File Explorer drags
-    /// its own, once they are read (DESIGN.md: Dragging).
-    fn drag_selected(&self, hwnd: Hwnd) {
-        if !self.controls().search.read_list_selection(self, hwnd) {
+    /// Drags the entries that `list`'s file commands act on out of the
+    /// window, as File Explorer drags its own, once they are read
+    /// (DESIGN.md: Dragging).
+    fn drag_selected(&self, hwnd: Hwnd, list: List) {
+        if !self.read_target_selection(hwnd, list) {
             return;
         }
-        let selected =
-            (self.model.borrow().search_list().selection().files()).map_or(0, <[_]>::len);
+        let selected = self.model.borrow().chosen_count(list);
         if selected > DRAG_LIMIT {
+            // Commander mode has no Edit > Copy, so a panel points to F5.
+            let key = match list {
+                List::Search => "message.drag_limit",
+                List::Panel(_) => "message.drag_limit_panel",
+            };
             let text = {
                 let numbers = self.numbers.borrow();
                 let count = |n: usize| numbers.integer(n as u64);
-                self.model.borrow().strings().format(
-                    "message.drag_limit",
-                    &[&count(DRAG_LIMIT), &count(selected)],
-                )
+                (self.model.borrow().strings()).format(key, &[&count(DRAG_LIMIT), &count(selected)])
             };
             self.error_box(hwnd, &text);
             return;
@@ -3093,11 +3073,11 @@ impl MainWindow {
             return;
         }
         // The drag runs its own message loop, so it gets its own copy of the
-        // files and no borrow is held (DESIGN.md: window rule 1).
-        let files = (self.model.borrow().search_list().selection().files())
-            .unwrap_or_default()
-            .to_vec();
-        let missing = shell::drag(&files);
+        // entries and no borrow is held (DESIGN.md: window rule 1).
+        let Some(entries) = self.selected_source(list) else {
+            return;
+        };
+        let missing = shell::drag(&entries.dragged());
         self.report_missing(hwnd, missing);
     }
 
@@ -3754,7 +3734,7 @@ impl MainWindow {
         let id = self.start_transfer(hwnd, moves, sources, destination, action);
         let follows = {
             let model = self.model.borrow();
-            model.mode() == Mode::TwoPanels && model.panels().place_is_current(place)
+            model.mode() == Mode::Commander && model.panels().place_is_current(place)
         };
         if !follows {
             return;
@@ -3915,7 +3895,7 @@ impl MainWindow {
             self.start_operation(Request::Delete { sources }, None);
             let follows = place.is_some_and(|place| {
                 let model = self.model.borrow();
-                model.mode() == Mode::TwoPanels
+                model.mode() == Mode::Commander
                     && model.panels().active() == place.side
                     && model.panels().place_is_current(place)
             });
@@ -4143,7 +4123,7 @@ impl MainWindow {
         };
         match mode {
             Mode::Search => controls.search.row.input.hwnd(),
-            Mode::TwoPanels => self.panel(active).list.hwnd(),
+            Mode::Commander => self.panel(active).list.hwnd(),
         }
     }
 
@@ -4711,7 +4691,7 @@ impl WindowProc for MainWindow {
                 self.settings.include_preview_changed();
                 self.model.borrow_mut().operation_text_changed();
                 self.start_list_passes();
-                hwnd.draw_once_after(|| self.refresh_text(hwnd));
+                self.refresh_text(hwnd);
                 None
             }
             Message::SettingChange { .. } => None,
@@ -4841,6 +4821,7 @@ impl WindowProc for MainWindow {
                 Some(LRESULT(0))
             }
             Message::Other(QUEUE_CHANGED) => {
+                self.created().work.borrow().queue.woken();
                 self.schedule_operations(hwnd);
                 Some(LRESULT(0))
             }

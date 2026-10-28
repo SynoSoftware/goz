@@ -73,6 +73,11 @@ impl Work {
         self.readings[side.index()].cancel();
     }
 
+    /// Whether `side` reads or watches a folder.
+    pub(crate) fn watches(&self, side: Side) -> bool {
+        self.watching[side.index()].is_some()
+    }
+
     pub(crate) fn is_reading(&self, side: Side, generation: u64) -> bool {
         self.watching[side.index()]
             .as_ref()

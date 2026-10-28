@@ -441,6 +441,17 @@ impl Model {
         within(&self.search.list.results().matched_parts(row), &span)
     }
 
+    /// Whether a selection key can select `row` of `list`: not `..`, and
+    /// not an entry that a delete or a move has taken.
+    pub(crate) fn selectable(&self, list: List, row: u64) -> bool {
+        match list {
+            List::Panel(side) => self.panels.selectable(side, row),
+            List::Search => self.list(list).is_some_and(|shown| {
+                row < shown.results().count() && !shown.row_taken(row, self.panels.taken())
+            }),
+        }
+    }
+
     /// The rows of `selected` in `list` whose entries a delete or a move
     /// has taken, for native deselection. Pending filtering/keeping preserves
     /// highlights even though painting may conservatively hide taken entries.
@@ -943,7 +954,7 @@ impl Model {
     pub(crate) fn active_list(&self) -> List {
         match self.mode() {
             Mode::Search => List::Search,
-            Mode::TwoPanels => List::Panel(self.panels.active()),
+            Mode::Commander => List::Panel(self.panels.active()),
         }
     }
 
@@ -953,6 +964,16 @@ impl Model {
         match list {
             List::Search => Some(&self.search.list),
             List::Panel(side) => self.panels.search(side).map(|search| &search.list),
+        }
+    }
+
+    /// How many entries a file command or a drag of `list` acts on: the
+    /// selected entries, else the focused one (DESIGN.md: Selecting
+    /// entries). A list of results counts them once they are read.
+    pub(crate) fn chosen_count(&self, list: List) -> usize {
+        match list {
+            List::Search => (self.search.list.selection().files()).map_or(0, <[_]>::len),
+            List::Panel(side) => self.panels.chosen_count(side),
         }
     }
 
@@ -975,7 +996,7 @@ impl Model {
     pub(crate) fn shown_sort(&self) -> SortSpec {
         match self.mode() {
             Mode::Search => self.sort(),
-            Mode::TwoPanels => self.panels.panel(self.panels.active()).sort(),
+            Mode::Commander => self.panels.panel(self.panels.active()).sort(),
         }
     }
 
@@ -1661,19 +1682,42 @@ impl Model {
     }
 
     /// The positions `list` says are selected, sorted and apart, read once
-    /// per user action. When the cache holds every one, the selection is
-    /// those rows, the files the person sees; otherwise it is read
-    /// (DESIGN.md: The selection). More than [`SELECTION_LIMIT`] rows are
-    /// not read, and no command acts on them.
-    pub(crate) fn set_selection(&mut self, list: List, selection: RowSelection) -> Accepted {
-        let RowSelection { positions, count } = selection;
+    /// per user action, and its `focused` row. When the cache holds every
+    /// one, the selection is those rows, the files the person sees;
+    /// otherwise it is read (DESIGN.md: The selection). With no row
+    /// selected, it is the focused row, which commands then act on
+    /// (DESIGN.md: Selecting entries). More than [`SELECTION_LIMIT`] rows
+    /// are not read, and no command acts on them.
+    #[allow(
+        clippy::single_range_in_vec_init,
+        reason = "a selection is a list of row ranges"
+    )]
+    pub(crate) fn set_selection(
+        &mut self,
+        list: List,
+        selection: RowSelection,
+        focused: Option<u64>,
+    ) -> Accepted {
+        let RowSelection {
+            mut positions,
+            mut count,
+        } = selection;
         if count > SELECTION_LIMIT {
             return self.select_too_many(list, count);
         }
+        let by_focus = match focused {
+            Some(row) if positions.is_empty() && self.selectable(list, row) => {
+                positions = Arc::new(vec![row..row + 1]);
+                count = 1;
+                true
+            }
+            _ => false,
+        };
         let Some(shown) = self.list_mut(list) else {
             return Accepted::default();
         };
         let older = shown.selection.asked();
+        shown.chosen_by_focus = by_focus;
         let effect = if positions.is_empty() || shown.results.shown_ask().is_none() {
             shown.set_selection(Selection::None);
             shown.chosen_size = None;
@@ -1711,6 +1755,7 @@ impl Model {
             return Accepted::default();
         };
         let older = shown.selection.asked();
+        shown.chosen_by_focus = false;
         shown.set_selection(Selection::TooMany(count));
         shown.chosen_size = None;
         {
@@ -4226,7 +4271,7 @@ pub(crate) mod tests {
     #[test]
     fn a_selection_of_cached_rows_is_built_from_the_cache() {
         let mut model = showing(50_000);
-        let accepted = model.set_selection(List::Search, vec![3..5, 9..10].into());
+        let accepted = model.set_selection(List::Search, vec![3..5, 9..10].into(), None);
         assert_eq!(
             accepted,
             Accepted {
@@ -4246,10 +4291,10 @@ pub(crate) mod tests {
     #[test]
     fn a_delayed_large_filter_cannot_restore_an_old_selection_or_taken_file() {
         let mut model = showing(5_000);
-        model.set_selection(List::Search, vec![0..2_001].into());
+        model.set_selection(List::Search, vec![0..2_001].into(), None);
         let old = model.take_selection_filter(List::Search).unwrap().run();
         assert!(model.search.list.selection.files().is_none());
-        model.set_selection(List::Search, vec![3..4].into());
+        model.set_selection(List::Search, vec![3..4].into(), None);
         assert_eq!(
             model.accept_filtered(List::Search, old),
             Accepted {
@@ -4259,7 +4304,7 @@ pub(crate) mod tests {
         );
         assert_eq!(paths(&model), [r"C:\row3"]);
 
-        model.set_selection(List::Search, vec![0..2_001].into());
+        model.set_selection(List::Search, vec![0..2_001].into(), None);
         let old = model.take_selection_filter(List::Search).unwrap().run();
         let mut taken = Taken::default();
         taken.insert(OperationId::for_tests(1), Path::new(r"C:\row1"), false);
@@ -4284,7 +4329,7 @@ pub(crate) mod tests {
         };
         Arc::make_mut(&mut chunk.rows)[0].is_dir = true;
         model.accept(reply);
-        let counted = folder_size(model.set_selection(List::Search, vec![0..1].into()));
+        let counted = folder_size(model.set_selection(List::Search, vec![0..1].into(), None));
         model.accept(totals(&counted, 7));
         let id = OperationId::for_tests(1);
         let mut taken = Taken::default();
@@ -4418,7 +4463,7 @@ pub(crate) mod tests {
     #[test]
     fn a_selected_row_outside_the_cache_is_read_with_the_cached_rows_beside_it() {
         let mut model = showing(50_000);
-        let accepted = model.set_selection(List::Search, vec![0..1, 40_000..40_001].into());
+        let accepted = model.set_selection(List::Search, vec![0..1, 40_000..40_001].into(), None);
         assert_eq!(
             accepted,
             Accepted {
@@ -4474,7 +4519,7 @@ pub(crate) mod tests {
     #[test]
     fn a_selection_past_the_limit_is_not_read() {
         let mut model = showing(200_000);
-        let accepted = model.set_selection(List::Search, vec![0..150_000].into());
+        let accepted = model.set_selection(List::Search, vec![0..150_000].into(), None);
         assert_eq!(
             accepted,
             Accepted {
@@ -4503,7 +4548,7 @@ pub(crate) mod tests {
     fn a_selection_read_makes_the_result_snapshot_that_rows_are_read_from() {
         use gozler_core::proto::{ResultItem, ResultSnapshotId};
         let mut model = showing(200_000);
-        model.set_selection(List::Search, vec![150_000..150_002].into());
+        model.set_selection(List::Search, vec![150_000..150_002].into(), None);
         let fetch = model
             .read_selection(List::Search)
             .expect("the selection is read");
@@ -4560,13 +4605,13 @@ pub(crate) mod tests {
     #[test]
     fn t6_a_selection_changed_while_it_is_read_drops_the_older_reply() {
         let mut model = showing(50_000);
-        model.set_selection(List::Search, vec![40_000..40_001].into());
+        model.set_selection(List::Search, vec![40_000..40_001].into(), None);
         let older = model
             .read_selection(List::Search)
             .expect("the selection is read");
         // The window ends the older read when it schedules the new one.
         assert_eq!(
-            model.set_selection(List::Search, vec![40_000..40_002].into()),
+            model.set_selection(List::Search, vec![40_000..40_002].into(), None),
             Accepted {
                 touched: Areas::list(List::Search) | Areas::STATUS | Areas::KEY_BAR,
                 effects: vec![
@@ -4641,9 +4686,9 @@ pub(crate) mod tests {
                 .clone()
         };
 
-        let first = folder_size(model.set_selection(List::Search, vec![0..1].into()));
+        let first = folder_size(model.set_selection(List::Search, vec![0..1].into(), None));
         assert_eq!(size(&model), "Calculating…");
-        let second = folder_size(model.set_selection(List::Search, vec![1..2].into()));
+        let second = folder_size(model.set_selection(List::Search, vec![1..2].into(), None));
         let Ask::FolderSize(search) = &second.ask else {
             unreachable!("folder_size returns a folder size request")
         };
@@ -4665,9 +4710,9 @@ pub(crate) mod tests {
         );
         assert_eq!(size(&model), "2 KB (2,048 bytes) in 7 items");
 
-        let _third = folder_size(model.set_selection(List::Search, vec![0..1].into()));
+        let _third = folder_size(model.set_selection(List::Search, vec![0..1].into(), None));
         assert_eq!(
-            model.set_selection(List::Search, vec![2..3].into()),
+            model.set_selection(List::Search, vec![2..3].into(), None),
             Accepted {
                 touched: Areas::list(List::Search) | Areas::STATUS | Areas::KEY_BAR,
                 effects: vec![
@@ -4692,7 +4737,7 @@ pub(crate) mod tests {
     #[test]
     fn a_selection_read_that_fails_shows_the_failure_and_polls() {
         let mut model = showing(50_000);
-        model.set_selection(List::Search, vec![40_000..40_001].into());
+        model.set_selection(List::Search, vec![40_000..40_001].into(), None);
         let fetch = model
             .read_selection(List::Search)
             .expect("the selection is read");
@@ -4722,7 +4767,7 @@ pub(crate) mod tests {
         assert!(model.polls_status(false));
 
         let mut model = showing(50_000);
-        model.set_selection(List::Search, vec![40_000..40_001].into());
+        model.set_selection(List::Search, vec![40_000..40_001].into(), None);
         let read = model
             .read_selection(List::Search)
             .expect("the selection is read");
@@ -4761,7 +4806,7 @@ pub(crate) mod tests {
     #[test]
     fn t12_a_language_switch_keeps_the_results_the_selection_and_the_text() {
         let mut model = showing(50_000);
-        model.set_selection(List::Search, vec![3..5].into());
+        model.set_selection(List::Search, vec![3..5].into(), None);
         model.set_typed_search(List::Search, r"F:\ ext:cs".into());
         model.set_language(LanguageChoice::Tag("en".into()), english());
         assert_eq!(model.search_list().results().count(), 50_000);
@@ -4777,7 +4822,7 @@ pub(crate) mod tests {
     #[test]
     fn only_a_selection_that_lost_every_file_deselects_every_row() {
         let mut model = showing(10);
-        model.set_selection(List::Search, vec![1..3].into());
+        model.set_selection(List::Search, vec![1..3].into(), None);
         let mut part = Taken::default();
         part.insert(OperationId::for_tests(1), Path::new(r"C:\row1"), false);
         let shown = model.set_taken(Arc::new(part), [None, None]);
@@ -4794,7 +4839,7 @@ pub(crate) mod tests {
     #[test]
     fn a_new_search_clears_the_selection() {
         let mut model = showing(10);
-        model.set_selection(List::Search, vec![1..2].into());
+        model.set_selection(List::Search, vec![1..2].into(), None);
         let fetch = search(&mut model, "repo");
         assert_eq!(paths(&model), [r"C:\row1"], "the selection stays until");
         model.accept(rows(&fetch, 3));

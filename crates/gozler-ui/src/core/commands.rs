@@ -9,6 +9,7 @@ use super::ids::ControlId;
 use super::model::{Column, Model};
 use super::panel::{Side, View};
 use super::query::{SORT_DIRECTIONS, SORT_KEYS, sort_direction_label, sort_key_label};
+use super::selection::Movement;
 use super::selection::OPEN_LIMIT;
 use super::settings::{ContextItem, ContextMenu, Mode};
 use super::shortcuts::CommandShortcuts;
@@ -59,7 +60,7 @@ pub(crate) enum CommandId {
     Cut,
     Paste,
     FileOperations,
-    TwoPanels,
+    Commander,
     ClearSelection,
     View,
     Edit,
@@ -103,7 +104,7 @@ impl CommandId {
         CommandId::Cut,
         CommandId::Paste,
         CommandId::FileOperations,
-        CommandId::TwoPanels,
+        CommandId::Commander,
         CommandId::ClearSelection,
         CommandId::View,
         CommandId::Edit,
@@ -230,11 +231,11 @@ impl CommandId {
                 C::Cut => ("command.cut", &[], cut, None),
                 C::Paste => ("command.paste", &[], paste, None),
                 C::FileOperations => ("command.file_operations", &[], operations_available, None),
-                C::TwoPanels => (
-                    "command.two_panels",
+                C::Commander => (
+                    "command.commander",
                     &[],
                     always,
-                    Some(|s| s.model.mode() == Mode::TwoPanels),
+                    Some(|s| s.model.mode() == Mode::Commander),
                 ),
                 // `Esc` in a panel's list (control_key).
                 C::ClearSelection => (
@@ -313,7 +314,7 @@ impl CommandId {
             | C::Match
             | C::SortBy
             | C::ClearFilters
-            | C::TwoPanels
+            | C::Commander
             | C::ClearSelection => return None,
         })
     }
@@ -332,7 +333,7 @@ impl CommandId {
             | C::ShowSearch
             | C::ShowCommander
             | C::FileOperations
-            | C::TwoPanels
+            | C::Commander
             | C::Synchronize
             | C::SelectAll
             | C::Refresh
@@ -340,7 +341,7 @@ impl CommandId {
             | C::SortBy
             | C::Cancel => true,
             C::Open | C::Properties | C::CopyToFolder | C::MoveToFolder | C::Delete => true,
-            C::ClearSelection | C::View | C::Edit | C::NewFolder => mode == Mode::TwoPanels,
+            C::ClearSelection | C::View | C::Edit | C::NewFolder => mode == Mode::Commander,
             C::OpenFileLocation
             | C::ShowInCommander
             | C::Explore
@@ -422,7 +423,7 @@ fn never(_: &State) -> bool {
 /// Refresh runs the shown search again (DESIGN.md: C17); in Commander mode it
 /// reads the active panel's folder again.
 fn searched(state: &State) -> bool {
-    state.model.mode() == Mode::TwoPanels || state.model.search_list().results().has_searched()
+    state.model.mode() == Mode::Commander || state.model.search_list().results().has_searched()
 }
 
 /// The selected entries, once the selection is read (DESIGN.md: The selection).
@@ -430,14 +431,8 @@ fn files(state: &State) -> bool {
     state.model.search_list().selection().files().is_some()
 }
 
-/// How many entries a file command acts on: Search's selected files, once
-/// read, or the active panel's selected entries, else its focused entry
-/// (DESIGN.md: Commands in Commander mode).
 fn chosen(state: &State) -> usize {
-    match state.list {
-        List::Search => (state.model.search_list().selection().files()).map_or(0, <[_]>::len),
-        List::Panel(side) => state.model.panels().chosen_count(side),
-    }
+    state.model.chosen_count(state.list)
 }
 
 /// Open, Open file location and Explore (DESIGN.md: C1, C2, C26).
@@ -470,7 +465,7 @@ fn transfer(state: &State) -> bool {
     let both_search = Side::BOTH
         .into_iter()
         .all(|side| panels.search(side).is_some());
-    file_operation(state) && !(state.model.mode() == Mode::TwoPanels && both_search)
+    file_operation(state) && !(state.model.mode() == Mode::Commander && both_search)
 }
 
 /// Cut acts on the selected files while the list has the focus, as Copy
@@ -769,9 +764,28 @@ pub(crate) enum KeyAction {
     ClearSearch,
     /// `Enter` in a closed Date modified or Size list.
     ChooseCustom,
-    /// A key of a panel's list or path box (DESIGN.md: Moving around, Selecting
-    /// entries).
+    /// A key of a panel's list or path box (DESIGN.md: Moving around).
     Panel(PanelKey),
+    /// A key that moves the focus or selects, the same in Search's list and
+    /// a panel's (DESIGN.md: Selecting entries).
+    Select(SelectKey),
+}
+
+/// What a cursor key or a selection key does in a list, as in Total
+/// Commander.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum SelectKey {
+    /// `Up`, `Down`, `PgUp`, `PgDn`, `Home` and `End` move the focus and
+    /// keep the selection. In a panel, `Up` and `Down` go to the previous
+    /// or the next match while the quick search box is open.
+    Move(Movement),
+    /// The same keys with `Shift` mark or unmark the rows the focus passes
+    /// ([`passed`](super::selection::passed)).
+    Mark(Movement),
+    /// Space toggles the focused row and keeps the focus there; `Insert`
+    /// toggles it and moves the focus `down`. In a panel, Space types into
+    /// the open quick search box.
+    Toggle { down: bool },
 }
 
 /// What a key does in a panel.
@@ -790,14 +804,6 @@ pub(crate) enum PanelKey {
     /// `Esc` in the list: the quick search box closes, else the selection
     /// is cleared.
     Escape,
-    /// `Insert` toggles the focused row and moves the focus down.
-    Toggle,
-    /// Space types into quick search; otherwise Windows handles selection.
-    Space,
-    /// `Up` and `Down`: the previous or the next match while the quick
-    /// search box is open; otherwise the list's own keys, which move the
-    /// selection with the focus, as in Search.
-    Arrow { down: bool },
     /// `Enter` in the path box: the panel goes to the typed path.
     PathEnter,
     /// `Esc` in the path box: the folder's path is back and the list has
@@ -916,14 +922,18 @@ pub(crate) fn control_key(focus: Focus, key: Keystroke) -> Option<KeyAction> {
         }
         Focus::Value { .. } | Focus::Other => &[],
     };
+    let select = match focus {
+        Focus::List | Focus::Panel => SELECT_KEYS,
+        _ => &[],
+    };
     table
         .iter()
+        .chain(select)
         .find(|(stroke, _)| *stroke == key)
         .map(|(_, action)| *action)
 }
 
-/// The keys of a panel's list. Every other arrow key is the list's own, as
-/// in Search.
+/// The keys of a panel's list besides [`SELECT_KEYS`].
 const PANEL_KEYS: &[(Keystroke, KeyAction)] = {
     use KeyAction::Panel as P;
     const fn shift(key: Key) -> Keystroke {
@@ -941,21 +951,46 @@ const PANEL_KEYS: &[(Keystroke, KeyAction)] = {
             P(PanelKey::ShowIn(Side::Right)),
         ),
         (Keystroke::plain(Key::Escape), P(PanelKey::Escape)),
-        (Keystroke::plain(Key::Insert), P(PanelKey::Toggle)),
-        (Keystroke::plain(Key::Space), P(PanelKey::Space)),
         // As in Search's list.
         (
             Keystroke::plain(Key::Delete),
             KeyAction::Run(CommandId::Delete),
         ),
         (shift(Key::Delete), KeyAction::Run(CommandId::Delete)),
+    ]
+};
+
+/// The cursor and selection keys of Search's list and of a panel's, one
+/// table for both. The arrow keys with `Ctrl` are the list's own.
+const SELECT_KEYS: &[(Keystroke, KeyAction)] = {
+    use KeyAction::Select as S;
+    use SelectKey::{Mark, Move};
+    const fn shift(key: Key) -> Keystroke {
+        Keystroke {
+            shift: true,
+            ..Keystroke::plain(key)
+        }
+    }
+    &[
+        (Keystroke::plain(Key::Up), S(Move(Movement::Up))),
+        (Keystroke::plain(Key::Down), S(Move(Movement::Down))),
+        (Keystroke::plain(Key::PageUp), S(Move(Movement::PageUp))),
+        (Keystroke::plain(Key::PageDown), S(Move(Movement::PageDown))),
+        (Keystroke::plain(Key::Home), S(Move(Movement::Home))),
+        (Keystroke::plain(Key::End), S(Move(Movement::End))),
+        (shift(Key::Up), S(Mark(Movement::Up))),
+        (shift(Key::Down), S(Mark(Movement::Down))),
+        (shift(Key::PageUp), S(Mark(Movement::PageUp))),
+        (shift(Key::PageDown), S(Mark(Movement::PageDown))),
+        (shift(Key::Home), S(Mark(Movement::Home))),
+        (shift(Key::End), S(Mark(Movement::End))),
         (
-            Keystroke::plain(Key::Up),
-            P(PanelKey::Arrow { down: false }),
+            Keystroke::plain(Key::Space),
+            S(SelectKey::Toggle { down: false }),
         ),
         (
-            Keystroke::plain(Key::Down),
-            P(PanelKey::Arrow { down: true }),
+            Keystroke::plain(Key::Insert),
+            S(SelectKey::Toggle { down: true }),
         ),
     ]
 };
@@ -987,7 +1022,7 @@ impl PanelAction {
 
 /// Commander mode's fixed keys, which win over the person's shortcuts on the
 /// same keys.
-const TWO_PANEL_KEYS: &[(Keystroke, MenuItem)] = &[
+const COMMANDER_KEYS: &[(Keystroke, MenuItem)] = &[
     (
         Keystroke::alt(Key::Function(7)),
         MenuItem::Panel(PanelAction::SearchBox),
@@ -1046,7 +1081,7 @@ const TWO_PANEL_KEYS: &[(Keystroke, MenuItem)] = &[
 /// its key runs: `F3` View first (DESIGN.md: The key bar).
 pub(crate) fn key_bar_command(index: usize) -> CommandId {
     let key = u8::try_from(index).map(|index| Keystroke::plain(Key::Function(3 + index)));
-    (TWO_PANEL_KEYS.iter())
+    (COMMANDER_KEYS.iter())
         .find_map(|(stroke, item)| match item {
             MenuItem::Run(command) if Ok(*stroke) == key => Some(*command),
             _ => None,
@@ -1057,12 +1092,12 @@ pub(crate) fn key_bar_command(index: usize) -> CommandId {
 /// Whether Commander mode keeps `keystroke` from the person's shortcuts: its
 /// fixed keys, `F3` to `F8` among them, which the key bar's commands take;
 /// and `Alt` with a character, which is quick search.
-fn kept_by_two_panels(keystroke: Keystroke) -> bool {
+pub(crate) fn kept_by_commander(keystroke: Keystroke) -> bool {
     let character = matches!(
         keystroke.key,
         Key::Letter(_) | Key::Digit(_) | Key::Comma | Key::Period
     );
-    TWO_PANEL_KEYS.iter().any(|(fixed, _)| *fixed == keystroke)
+    COMMANDER_KEYS.iter().any(|(fixed, _)| *fixed == keystroke)
         || keystroke.alt && !keystroke.ctrl && character
 }
 
@@ -1212,7 +1247,7 @@ impl MenuItem {
             .find(|(_, item)| *item == self)
             .map(|(key, _)| key)
             .or_else(|| {
-                (mode == Mode::TwoPanels && command == CommandId::ClearSelection)
+                (mode == Mode::Commander && command == CommandId::ClearSelection)
                     .then_some(Keystroke::plain(Key::Escape))
             })
     }
@@ -1226,7 +1261,7 @@ impl MenuItem {
             }
             MenuItem::SortKey(_) | MenuItem::SortDirection(_) => CommandId::SortBy,
             MenuItem::Language(_) => CommandId::Language,
-            MenuItem::Panel(_) => CommandId::TwoPanels,
+            MenuItem::Panel(_) => CommandId::Commander,
         }
     }
 
@@ -1401,7 +1436,7 @@ fn every_menu() -> Vec<Menu> {
         menu(
             "menu.view",
             vec![
-                run(&[C::TwoPanels]),
+                run(&[C::Commander]),
                 vec![
                     Entry::Item(MenuItem::Run(C::Filters)),
                     Entry::Item(MenuItem::Run(C::Inspector)),
@@ -1713,9 +1748,9 @@ pub(crate) fn items(menus: &[Menu]) -> Vec<MenuItem> {
 pub(crate) fn accelerators(shortcuts: &CommandShortcuts, mode: Mode) -> Vec<(Keystroke, MenuItem)> {
     let fixed = match mode {
         Mode::Search => &[],
-        Mode::TwoPanels => TWO_PANEL_KEYS,
+        Mode::Commander => COMMANDER_KEYS,
     };
-    let free = |key: &Keystroke| mode == Mode::Search || !kept_by_two_panels(*key);
+    let free = |key: &Keystroke| mode == Mode::Search || !kept_by_commander(*key);
     let shortcuts = CommandId::ALL
         .iter()
         .filter(|c| c.belongs_to(mode))
@@ -1803,7 +1838,7 @@ mod tests {
             Some(MenuItem::Run(CommandId::Refresh))
         );
         assert_eq!(
-            takes(Mode::TwoPanels, refresh),
+            takes(Mode::Commander, refresh),
             Some(MenuItem::Run(CommandId::CopyToFolder))
         );
         for mode in Mode::ALL {
@@ -1817,7 +1852,7 @@ mod tests {
         let find = Some(MenuItem::Run(CommandId::Find));
         let alt_f7 = Keystroke::alt(Key::Function(7));
         assert_eq!(
-            takes(Mode::TwoPanels, alt_f7),
+            takes(Mode::Commander, alt_f7),
             Some(MenuItem::Panel(PanelAction::SearchBox))
         );
         assert_eq!(takes(Mode::Search, alt_f7), find);
@@ -1830,12 +1865,12 @@ mod tests {
         let mut moved = shortcuts.clone();
         moved.remove(CommandId::Find, ctrl_f);
         let fixed = (ctrl_f, MenuItem::Run(CommandId::Find));
-        assert!(accelerators(&moved, Mode::TwoPanels).contains(&fixed));
+        assert!(accelerators(&moved, Mode::Commander).contains(&fixed));
         let shown = |mode, command| items(&menu_bar(mode)).contains(&MenuItem::Run(command));
         assert!(shown(Mode::Search, CommandId::Refresh));
-        assert!(!shown(Mode::TwoPanels, CommandId::Copy));
-        for command in [CommandId::TwoPanels, CommandId::Find] {
-            assert!(shown(Mode::Search, command) && shown(Mode::TwoPanels, command));
+        assert!(!shown(Mode::Commander, CommandId::Copy));
+        for command in [CommandId::Commander, CommandId::Find] {
+            assert!(shown(Mode::Search, command) && shown(Mode::Commander, command));
         }
     }
 
@@ -1888,7 +1923,7 @@ mod tests {
             let mut bar_keys = HashSet::new();
             assert_unique(
                 language.tag,
-                menu_bar(Mode::TwoPanels)
+                menu_bar(Mode::Commander)
                     .iter()
                     .map(|m| strings.text(m.label)),
                 &mut HashSet::new(),
@@ -1899,7 +1934,7 @@ mod tests {
                 bar.iter().map(|m| strings.text(m.label)),
                 &mut bar_keys,
             );
-            for menu in bar.iter().chain(&menu_bar(Mode::TwoPanels)) {
+            for menu in bar.iter().chain(&menu_bar(Mode::Commander)) {
                 // A submenu's label shares its menu with the items beside it.
                 let labels = menu.groups.iter().flatten().map(|entry| match entry {
                     Entry::Item(item) => item.label(&strings),
@@ -1974,13 +2009,13 @@ mod tests {
         for (selected, opens, shows_properties) in
             [(1, true, true), (15, true, false), (16, false, false)]
         {
-            model.set_selection(List::Search, vec![0..selected].into());
+            model.set_selection(List::Search, vec![0..selected].into(), None);
             assert_eq!(enabled(&model, CommandId::Open), opens, "{selected} rows");
             assert_eq!(enabled(&model, CommandId::OpenFileLocation), opens);
             assert_eq!(enabled(&model, CommandId::Properties), shows_properties);
             assert!(enabled(&model, CommandId::CopyAsPath));
         }
-        model.set_selection(List::Search, vec![0..1, 40_000..40_001].into());
+        model.set_selection(List::Search, vec![0..1, 40_000..40_001].into(), None);
         for command in [CommandId::Open, CommandId::Copy, CommandId::Properties] {
             assert!(
                 !enabled(&model, command),
@@ -1995,11 +2030,11 @@ mod tests {
     /// of them in a second window, which owns no file operations
     /// (DESIGN.md: Commands in Commander mode).
     #[test]
-    fn two_panels_file_commands_follow_the_chosen_entries() {
+    fn commander_file_commands_follow_the_chosen_entries() {
         use crate::core::model::{Instance, tests::model_for};
         use crate::core::panel::tests::{file, list};
         let mut model = model_for(Instance::First);
-        model.show_mode(Mode::TwoPanels);
+        model.show_mode(Mode::Commander);
         list(
             model.panels_mut(),
             r"C:\f",
@@ -2048,7 +2083,7 @@ mod tests {
         assert!(!enabled(&model, CommandId::NewFolder));
 
         let mut second = crate::core::model::tests::model();
-        second.show_mode(Mode::TwoPanels);
+        second.show_mode(Mode::Commander);
         list(second.panels_mut(), r"C:\f", vec![file("a.txt", 1, 0)]);
         second.panels_mut().set_focused(Side::Left, Some(1));
         assert_eq!(offered(&second), [false; 3]);
@@ -2060,7 +2095,7 @@ mod tests {
         use crate::core::model::{Instance, tests::model_for};
         use crate::core::panel::tests::{file, list};
         let mut model = model_for(Instance::First);
-        model.show_mode(Mode::TwoPanels);
+        model.show_mode(Mode::Commander);
         list(model.panels_mut(), r"C:\f", vec![file("a.txt", 1, 0)]);
         model
             .panels_mut()
@@ -2095,7 +2130,7 @@ mod tests {
     #[test]
     fn t11_a_command_chosen_after_new_rows_cleared_the_selection_does_nothing() {
         let mut model = showing(10);
-        model.set_selection(List::Search, vec![2..3].into());
+        model.set_selection(List::Search, vec![2..3].into(), None);
         assert!(
             enabled(&model, CommandId::Open),
             "the menu opens with it on"

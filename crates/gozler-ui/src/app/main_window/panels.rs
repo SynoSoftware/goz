@@ -293,6 +293,10 @@ fn first_folder(side: Side) -> String {
 
 pub(super) struct Panels {
     pub(super) sides: [PanelControls; 2],
+    /// The reading that Show in Commander started while Search shows.
+    /// Commander mode shows when its listing arrives, so the panel appears
+    /// with the requested folder, not with the folder it showed before.
+    commander_reading: Cell<Option<Side>>,
 }
 
 impl Panels {
@@ -306,6 +310,7 @@ impl Panels {
                 PanelControls::create(parent, Side::Left)?,
                 PanelControls::create(parent, Side::Right)?,
             ],
+            commander_reading: Cell::new(None),
         })
     }
 }
@@ -426,7 +431,7 @@ impl Panels {
     /// `side`'s place in the window's layout, while Commander mode shows.
     pub(super) fn panel_layout(&self, window: &MainWindow, side: Side) -> Option<PanelLayout> {
         match &window.created().layout.borrow().as_ref()?.body {
-            Body::TwoPanels { panels, .. } => Some(panels[side.index()]),
+            Body::Commander { panels, .. } => Some(panels[side.index()]),
             Body::Search(_) => None,
         }
     }
@@ -530,7 +535,7 @@ impl Panels {
     fn panel_visible(&self, window: &MainWindow) -> bool {
         let model = window.model.borrow();
         let panes = model.panes();
-        model.mode() == Mode::TwoPanels
+        model.mode() == Mode::Commander
             && !(panes.inspector
                 && panes.maximized
                 && panes.content == crate::core::layout::InspectorContent::Transfers)
@@ -905,6 +910,10 @@ impl Panels {
             ],
         };
         for side in Side::BOTH {
+            // Show in Commander's reading of this side runs already.
+            if window.created().work.borrow().folders.watches(side) {
+                continue;
+            }
             let ask = window
                 .model
                 .borrow_mut()
@@ -933,6 +942,7 @@ impl Panels {
             touched: Areas::LEFT_PANEL | Areas::RIGHT_PANEL | Areas::STATUS | Areas::KEY_BAR,
             effects: Vec::new(),
         };
+        self.commander_reading.set(None);
         window.created().work.borrow_mut().folders.stop_all();
         window.model.borrow_mut().panels_mut().stop_reading();
         for side in Side::BOTH {
@@ -1140,7 +1150,11 @@ impl Panels {
         side: Side,
         update: PanelUpdate,
     ) {
-        if window.model.borrow().mode() != Mode::TwoPanels {
+        // The panel that Show in Commander reads while Search shows takes
+        // its rows before Commander mode shows it.
+        if window.model.borrow().mode() != Mode::Commander
+            && self.commander_reading.get() != Some(side)
+        {
             return;
         }
         let shown = &update.before;
@@ -1193,6 +1207,10 @@ impl Panels {
         window.update_status();
         window.note_saved_state(hwnd);
         window.release_operations();
+        // Every listing arrives here, also one calculated in the background.
+        if listed {
+            self.show_commander_after(window, hwnd, side);
+        }
     }
 
     /// Applies `event` of `side`'s reading.
@@ -1250,11 +1268,18 @@ impl Panels {
                 reason,
                 typed,
             } => {
-                // Starting the refused reading ended the shown folder's watch,
-                // so the panel reads its folder again, which keeps the rows
-                // and watches it again.
-                let ask = window.model.borrow_mut().panels_mut().read_again(side);
-                self.read(window, side, ask);
+                if self.commander_reading.get() == Some(side) {
+                    // The person stays in Search, where a panel watches
+                    // nothing; it reads its folder when Commander mode shows.
+                    self.commander_reading.set(None);
+                    window.created().work.borrow_mut().folders.cancel_read(side);
+                } else {
+                    // Starting the refused reading ended the shown folder's
+                    // watch, so the panel reads its folder again, which keeps
+                    // the rows and watches it again.
+                    let ask = window.model.borrow_mut().panels_mut().read_again(side);
+                    self.read(window, side, ask);
+                }
                 self.show_panel(window, side);
                 let typed = self.panel(side).typed.borrow_mut().take().filter(|_| typed);
                 let refused = Refused {
@@ -1270,6 +1295,34 @@ impl Panels {
         }
         self.show_panel(window, side);
         window.update_status();
+        // A folder that opened is still read; a drive that is not ready ends
+        // the reading, and the panel says so.
+        if window
+            .model
+            .borrow()
+            .panels()
+            .panel(side)
+            .reading_generation()
+            .is_none()
+        {
+            self.show_commander_after(window, hwnd, side);
+        }
+    }
+
+    /// Shows Commander mode when `side`'s reading is the one Show in
+    /// Commander started from Search.
+    fn show_commander_after(&self, window: &MainWindow, hwnd: Hwnd, side: Side) {
+        if self.commander_reading.get() == Some(side) {
+            self.commander_reading.set(None);
+            let shown = window.model.borrow_mut().show_mode(Mode::Commander);
+            window.apply(hwnd, shown);
+            // The listing scrolled while the list was hidden and had no
+            // height, so the entry comes into view now.
+            let list = self.panel(side).list;
+            if let Some(row) = list.focused() {
+                list.ensure_visible(row);
+            }
+        }
     }
 
     /// The message box for a folder that could not be opened, after which
@@ -1508,30 +1561,11 @@ impl Panels {
         if target == c.list.hwnd() && !target.is_enabled() {
             return true;
         }
-        let quick = window.model.borrow().panels().quick_active(side);
-        if quick {
-            let action = match key {
-                PanelKey::Arrow { down } => Some(QuickAction::Step { down }),
-                PanelKey::Back => Some(QuickAction::Back),
-                // A space is a character while the box is open, which the
-                // list must not take as a selection.
-                PanelKey::Space => Some(QuickAction::Character(' ')),
-                _ => None,
-            };
-            if let Some(action) = action {
-                window
-                    .model
-                    .borrow_mut()
-                    .panels_mut()
-                    .find_quick(side, action);
-                window.start_list_passes();
-                return true;
-            }
-            window.model.borrow_mut().panels_mut().close_quick(side);
-            self.show_panel(window, side);
-            if key == PanelKey::Escape {
-                return true;
-            }
+        let action = (key == PanelKey::Back).then_some(QuickAction::Back);
+        match self.quick_key(window, side, action) {
+            Some(true) => return true,
+            Some(false) if key == PanelKey::Escape => return true,
+            _ => {}
         }
         match key {
             PanelKey::Enter => self.enter_row(window, side),
@@ -1569,9 +1603,14 @@ impl Panels {
                     None => c.list.deselect_all(),
                 }
             }
+            // The focus goes to the row the person left, and selects
+            // nothing, as a panel's cursor keys do.
             PanelKey::ToList => {
+                c.list.hwnd().focus();
                 let count = window.model.borrow().panels().panel(side).count();
-                c.list.focus_left_row(count);
+                if c.list.focused().is_none() && count > 0 {
+                    c.list.set_focused(Some(0));
+                }
             }
             PanelKey::LeaveSearch => {
                 let ask = window.model.borrow_mut().panels_mut().leave_search(side);
@@ -1579,23 +1618,6 @@ impl Panels {
                 self.read(window, side, ask);
             }
             PanelKey::LookInEnter => c.search.hwnd().focus(),
-            PanelKey::Space => return false,
-            PanelKey::Toggle => {
-                let focused = c.list.focused();
-                if let Some(row) = focused {
-                    let selectable = window.model.borrow().panels().selectable(side, row);
-                    if selectable {
-                        let (_, selected) = c.list.row_state(row);
-                        c.list.select(row, !selected);
-                    }
-                }
-                let next = focused.map_or(0, |row| row + 1);
-                if next < window.model.borrow().panels().panel(side).count() {
-                    c.list.set_focused(Some(next));
-                }
-            }
-            // The list moves the selection with the focus, as Search's does.
-            PanelKey::Arrow { .. } => return false,
             PanelKey::PathEnter => {
                 let typed = c.path.text();
                 let ask = window
@@ -1615,14 +1637,37 @@ impl Panels {
         true
     }
 
-    /// Selects and focuses `row` of `side`, which quick search went to, as
-    /// an arrow key would. Its deferred selection capture keeps the quick
-    /// search box open; a later user selection closes it.
+    /// While `side`'s quick search box is open, runs `action` in it, or
+    /// for another key (`None`) closes the box, so the key then does what
+    /// it does without the box. Returns whether `action` ran, or `None`
+    /// when the box was closed already.
+    pub(super) fn quick_key(
+        &self,
+        window: &MainWindow,
+        side: Side,
+        action: Option<QuickAction>,
+    ) -> Option<bool> {
+        if !window.model.borrow().panels().quick_active(side) {
+            return None;
+        }
+        if let Some(action) = action {
+            window
+                .model
+                .borrow_mut()
+                .panels_mut()
+                .find_quick(side, action);
+            window.start_list_passes();
+            return Some(true);
+        }
+        window.model.borrow_mut().panels_mut().close_quick(side);
+        self.show_panel(window, side);
+        Some(false)
+    }
+
+    /// Focuses `row` of `side`, which quick search went to, as a cursor key
+    /// would, and keeps the selection.
     pub(super) fn quick_go(&self, window: &MainWindow, side: Side, row: u64) {
-        let list = self.panel(side).list;
-        list.select_only(Some(row));
-        list.ensure_visible(row);
-        window.keep_quick_selection(side);
+        self.panel(side).list.set_focused(Some(row));
         self.read_selection(window, side, false);
     }
 
@@ -1654,9 +1699,7 @@ impl Panels {
         self.read(window, side, Some(ask));
     }
 
-    /// Show the mode before navigating: its initial folder reads must not
-    /// replace the requested location.
-    pub(super) fn show_entry_in_commander(&self, window: &MainWindow, hwnd: Hwnd, entry: Selected) {
+    pub(super) fn show_entry_in_commander(&self, window: &MainWindow, entry: Selected) {
         let path = String::from_utf16_lossy(&entry.path);
         let (path, focus) = if entry.is_folder {
             (path, None)
@@ -1669,10 +1712,11 @@ impl Panels {
                 .collect();
             (parent_of(&path), Some(name))
         };
-        let shown = window.model.borrow_mut().show_mode(Mode::TwoPanels);
-        window.apply(hwnd, shown);
         let side = window.model.borrow().panels().active();
         let ask = window.model.borrow_mut().panels_mut().go(side, path, focus);
+        if window.model.borrow().mode() == Mode::Search {
+            self.commander_reading.set(Some(side));
+        }
         self.read(window, side, Some(ask));
     }
 
@@ -1846,15 +1890,18 @@ impl Panels {
                 }
                 Some(LRESULT(0))
             }
-            ListNotify::CustomDraw(mut draw) => Some(CustomDraw::answer(match draw.stage() {
-                DrawStage::Paint => DrawAnswer::EachRow,
-                DrawStage::Row { row } => self.draw_panel_row(window, side, &mut draw, row),
-                DrawStage::RowPainted => {
-                    draw.restore_font(&window.created().fonts.borrow().ui);
-                    DrawAnswer::Default
-                }
-                DrawStage::Cell { .. } | DrawStage::Other => DrawAnswer::Default,
-            })),
+            ListNotify::CustomDraw(mut draw) => {
+                let answer = match draw.stage() {
+                    DrawStage::Paint => DrawAnswer::EachRow,
+                    DrawStage::Row { row } => self.draw_panel_row(window, side, &mut draw, row),
+                    DrawStage::RowPainted => {
+                        draw.restore_font(&window.created().fonts.borrow().ui);
+                        DrawAnswer::Default
+                    }
+                    DrawStage::Cell { .. } | DrawStage::Other => DrawAnswer::Default,
+                };
+                Some(draw.answer(answer, false))
+            }
             // Read later, because the list tells them while the window may
             // hold the model.
             ListNotify::SelectionChanged(change) => {
@@ -1899,10 +1946,14 @@ impl Panels {
                 }
                 None
             }
-            ListNotify::BeginDrag
-            | ListNotify::DividerDoubleClick(_)
-            | ListNotify::ColumnDragEnded
-            | ListNotify::Other => None,
+            ListNotify::BeginDrag => {
+                self.close_quick_search_of(window, side);
+                window.drag_selected(hwnd, List::Panel(side));
+                None
+            }
+            ListNotify::DividerDoubleClick(_) | ListNotify::ColumnDragEnded | ListNotify::Other => {
+                None
+            }
         }
     }
 
@@ -1918,11 +1969,12 @@ impl Panels {
     }
 
     /// Notes that `side`'s list changed `change`, which the panel reads on
-    /// the next [`super::DEFERRED`].
+    /// the next [`super::DEFERRED`]. The update goes on until then, so the
+    /// status line and the key bar change with the rows.
     pub(super) fn list_changed(&self, hwnd: Hwnd, side: Side, change: ListChanged) {
         let changed = &self.panel(side).changed;
-        if changed.get() == ListChanged::Nothing {
-            hwnd.post(super::DEFERRED);
+        if changed.get() == ListChanged::Nothing && hwnd.post(super::DEFERRED) {
+            crate::win::present::extend_to_deferred();
         }
         changed.set(changed.get().max(change));
     }
@@ -1944,13 +1996,22 @@ impl Panels {
         {
             return false;
         }
-        let closes_quick = window.selection_closes_quick(side, closes_quick);
         let list = self.panel(side).list;
         match self.panel(side).changed.replace(ListChanged::Nothing) {
             ListChanged::Nothing => return true,
             ListChanged::Focus => {
                 let focused = list.focused();
-                (window.model.borrow_mut().panels_mut()).set_focused(side, focused);
+                let nothing_selected = list.selected_count() == 0;
+                let accepted = {
+                    let mut model = window.model.borrow_mut();
+                    model.panels_mut().set_focused(side, focused);
+                    let search = model.panels().search(side).is_some();
+                    (search && nothing_selected)
+                        .then(|| model.set_selection(List::Panel(side), Vec::new().into(), focused))
+                };
+                if let Some(accepted) = accepted {
+                    window.apply(list.hwnd().parent(), accepted);
+                }
                 // The status line shows the focused result's folder.
                 if self.panel(side).kind.get() == Some(LookIn::AllDrives) {
                     self.show_panel(window, side);
@@ -2000,10 +2061,11 @@ impl Panels {
             changed && panels.search(side).is_some()
         };
         if search {
-            let accepted = window
-                .model
-                .borrow_mut()
-                .set_selection(List::Panel(side), selected);
+            let accepted =
+                window
+                    .model
+                    .borrow_mut()
+                    .set_selection(List::Panel(side), selected, focused);
             window.apply(list.hwnd().parent(), accepted);
         }
         window.start_list_passes();
@@ -2211,10 +2273,9 @@ impl Panels {
         }
     }
 
-    /// After a delete is submitted, the first row after the deleted ones is
-    /// selected and focused alone (DESIGN.md: Delete). A search panel's rows
-    /// stay in place, struck through, so its focus stays and its selection
-    /// is cleared.
+    /// After a delete is submitted, the selection is cleared and the first
+    /// row after the deleted ones is focused (DESIGN.md: Delete). A search
+    /// panel's rows stay in place, struck through, so its focus stays.
     pub(super) fn focus_after_chosen(&self, window: &MainWindow) {
         let side = window.model.borrow().panels().active();
         let row = {
@@ -2225,12 +2286,9 @@ impl Panels {
                 .map_or_else(|| panel.row_after_chosen(), |_| None)
         };
         let list = self.panel(side).list;
-        match row {
-            Some(row) => {
-                list.select_only(Some(row));
-                list.ensure_visible(row);
-            }
-            None => list.deselect_all(),
+        list.deselect_all();
+        if row.is_some() {
+            list.set_focused(row);
         }
     }
 
@@ -2413,7 +2471,7 @@ impl Panels {
         hwnd: Hwnd,
         follow: &[PanelFollow],
     ) {
-        if window.model.borrow().mode() != Mode::TwoPanels {
+        if window.model.borrow().mode() != Mode::Commander {
             return;
         }
         for follow in follow {
