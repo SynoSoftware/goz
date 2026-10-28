@@ -1,6 +1,8 @@
 //! Each Viewer admits one persistent native reader. Reopening replaces its
 //! pending command, so a blocked read cannot leave additional readers behind.
 
+use crate::core::clipboard::Publication;
+use crate::core::viewer_window::CopyText;
 use crate::core::work::{Interest, Replacement, Waiting};
 use crate::win::Hwnd;
 use crate::win::folder::Register;
@@ -15,6 +17,7 @@ use std::time::Instant;
 enum Read {
     Open,
     Block,
+    Copy,
 }
 
 pub(in crate::app) struct Reader {
@@ -53,6 +56,18 @@ impl Reader {
         self.command(Command::Read(index), false);
     }
 
+    /// Reads the file whole and puts its text on the clipboard. It replaces
+    /// a block read in flight, which the page then asks for again.
+    pub(in crate::app) fn copy(&mut self, copy: CopyText, publication: Publication) {
+        self.pending = Some((Read::Copy, Instant::now()));
+        self.command(Command::Copy(copy, publication), false);
+    }
+
+    /// Whether a copy runs, which a block read would replace.
+    pub(in crate::app) fn copying(&self) -> bool {
+        matches!(self.pending, Some((Read::Copy, _)))
+    }
+
     pub(in crate::app) fn take(&mut self) -> Option<ViewerEvent> {
         let event = self.mailbox.take(self.generation)?;
         self.pending = None;
@@ -80,7 +95,7 @@ impl Reader {
             Read::Open => Command::Release {
                 keep_registration: false,
             },
-            Read::Block => Command::Cancel,
+            Read::Block | Read::Copy => Command::Cancel,
         };
         self.command(command, true);
         true

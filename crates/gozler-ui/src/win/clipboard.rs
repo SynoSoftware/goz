@@ -4,6 +4,7 @@
 
 use super::Hwnd;
 use crate::core::clipboard::{ClipboardData, ClipboardFormat, Publication};
+use crate::core::text::Strings;
 use gozler_client::CancelToken;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -72,7 +73,9 @@ fn effect_block(value: u32) -> Option<HGLOBAL> {
 /// the clipboard did not take frees it.
 pub(crate) struct ClipboardBlock {
     memory: Memory,
-    format: ClipboardFormat,
+    format: u32,
+    /// The drop effect that a file list's source names with it.
+    effect: Option<u32>,
     items: usize,
 }
 
@@ -94,6 +97,23 @@ pub(crate) enum CopyAttempt {
     Busy(ClipboardBlock),
     Superseded,
     Failed(windows::core::Error),
+}
+
+/// Why a copy did not reach the clipboard.
+pub(crate) enum CopyFailure {
+    /// Another program kept the clipboard open through every retry.
+    Busy,
+    Native(windows::core::Error),
+}
+
+impl CopyFailure {
+    /// The message box's text.
+    pub(crate) fn message(&self, strings: &Strings) -> String {
+        match self {
+            CopyFailure::Busy => strings.text("message.clipboard_busy").to_owned(),
+            CopyFailure::Native(error) => error.message(),
+        }
+    }
 }
 
 struct Owner(Hwnd);
@@ -123,14 +143,46 @@ impl ClipboardBlock {
     /// It makes no call that sends a message, so the model may be borrowed
     /// while `data` writes into it (DESIGN.md: window rule 1).
     pub(crate) fn new(data: &ClipboardData) -> Option<ClipboardBlock> {
-        let len = data.len();
+        let (format, effect) = match data.format() {
+            ClipboardFormat::Files => (CF_HDROP, Some(DROPEFFECT_COPY)),
+            ClipboardFormat::CutFiles => (CF_HDROP, Some(DROPEFFECT_MOVE)),
+            ClipboardFormat::Paths | ClipboardFormat::Names | ClipboardFormat::Folders => {
+                (CF_UNICODETEXT, None)
+            }
+        };
+        Self::written(data.len(), format, effect, data.items(), |bytes| {
+            data.write_into(bytes);
+        })
+    }
+
+    /// A block holding `text` as `CF_UNICODETEXT`, or `None` when Windows
+    /// has no memory for it.
+    pub(crate) fn text(text: &str) -> Option<ClipboardBlock> {
+        let units = text.encode_utf16().count() + 1;
+        Self::written(2 * units, CF_UNICODETEXT, None, 1, |bytes| {
+            let (pairs, _) = bytes.as_chunks_mut::<2>();
+            for (pair, unit) in pairs.iter_mut().zip(text.encode_utf16().chain([0])) {
+                *pair = unit.to_le_bytes();
+            }
+        })
+    }
+
+    /// A block of `len` bytes that `write` fills.
+    fn written(
+        len: usize,
+        format: u32,
+        effect: Option<u32>,
+        items: usize,
+        write: impl FnOnce(&mut [u8]),
+    ) -> Option<ClipboardBlock> {
         // SAFETY: plain values; the block is this value's until the
         // clipboard takes it.
         let memory = unsafe { GlobalAlloc(GMEM_MOVEABLE, len) }.ok()?;
         let block = ClipboardBlock {
             memory: Memory(memory),
-            format: data.format(),
-            items: data.items(),
+            format,
+            effect,
+            items,
         };
         // SAFETY: a locked moveable block of at least `len` bytes stays put
         // until it is unlocked, and nothing else holds it.
@@ -139,7 +191,7 @@ impl ClipboardBlock {
             if bytes.is_null() {
                 return None;
             }
-            data.write_into(std::slice::from_raw_parts_mut(bytes, len));
+            write(std::slice::from_raw_parts_mut(bytes, len));
             let _ = GlobalUnlock(memory);
         }
         Some(block)
@@ -161,14 +213,8 @@ impl ClipboardBlock {
         if cancel.is_cancelled() {
             return CopyAttempt::Superseded;
         }
-        let (format, effect) = match self.format {
-            ClipboardFormat::Files => (CF_HDROP, Some(DROPEFFECT_COPY)),
-            ClipboardFormat::CutFiles => (CF_HDROP, Some(DROPEFFECT_MOVE)),
-            ClipboardFormat::Paths | ClipboardFormat::Names | ClipboardFormat::Folders => {
-                (CF_UNICODETEXT, None)
-            }
-        };
-        let effect = match effect {
+        let format = self.format;
+        let effect = match self.effect {
             Some(value) => match effect_block(value) {
                 Some(memory) => Some(Memory(memory)),
                 None => {

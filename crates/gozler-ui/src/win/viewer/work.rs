@@ -2,18 +2,24 @@
 //! The mailbox holds only the latest command and one bounded block.
 
 use super::ViewerEvent;
-use crate::core::viewer_window::BLOCK_BYTES;
+use crate::core::clipboard::{Publication, RETRY_AFTER};
+use crate::core::viewer::copy_text;
+use crate::core::viewer_window::{BLOCK_BYTES, CopyText};
+use crate::win::clipboard::{ClipboardBlock, CopyAttempt, CopyFailure};
 use crate::win::folder::{Register, reason, unregister, verbatim_wide};
+use crate::win::locale::ansi_text;
 use crate::win::wake::OpenWaker;
 use crate::win::work::OffThread;
 use gozler_client::CancelToken;
 use gozler_winfs::{Access, Entry, Reparse, WinError, open_entry};
-use std::sync::atomic::{AtomicBool, AtomicIsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicU32, Ordering};
 use std::sync::{Arc, Condvar, Mutex, PoisonError};
+use windows::Win32::Foundation::E_OUTOFMEMORY;
 
 pub(crate) enum Command {
     Open(Vec<u16>),
     Read(u64),
+    Copy(CopyText, Publication),
     Cancel,
     Release { keep_registration: bool },
 }
@@ -163,6 +169,8 @@ struct Reading {
     failed: Option<(bool, String)>,
     len: u64,
     mailbox: Arc<Mailbox>,
+    /// The clipboard's sequence number after this Viewer's last copy.
+    copied: AtomicU32,
 }
 
 impl Reading {
@@ -233,6 +241,54 @@ impl Reading {
         self.bytes(index)
             .map(|bytes| ViewerEvent::Block { index, bytes })
     }
+
+    /// Reads the file whole and puts its text on the clipboard, retrying
+    /// while another program holds the clipboard as the main window's Copy
+    /// does; `None` when a newer command replaced it.
+    fn copy(
+        &self,
+        copy: CopyText,
+        mut publication: Publication,
+        current: impl Fn() -> bool,
+        cancel: &CancelToken,
+        worker: &OffThread,
+    ) -> Result<Option<ViewerEvent>, WinError> {
+        let mut bytes = Vec::with_capacity(usize::try_from(copy.len).unwrap_or(0));
+        for index in 0..copy.len.div_ceil(BLOCK_BYTES as u64) {
+            if !current() {
+                return Ok(None);
+            }
+            let block = self.bytes(index)?;
+            let short = block.len() < BLOCK_BYTES;
+            bytes.extend_from_slice(&block);
+            if short {
+                break;
+            }
+        }
+        bytes.truncate(usize::try_from(copy.len).unwrap_or(usize::MAX));
+        let text = copy_text(copy.mode, copy.detected, &bytes, &ansi_text);
+        drop(bytes);
+        let Some(mut block) = ClipboardBlock::text(&text) else {
+            let error = windows::core::Error::from_hresult(E_OUTOFMEMORY);
+            return Ok(Some(ViewerEvent::Copied(Err(CopyFailure::Native(error)))));
+        };
+        drop(text);
+        let copied = loop {
+            match block.set(&publication, &self.copied, cancel, worker) {
+                CopyAttempt::Published | CopyAttempt::Superseded => break Ok(()),
+                CopyAttempt::Busy(again) if publication.retry() => {
+                    if !current() {
+                        return Ok(None);
+                    }
+                    std::thread::sleep(RETRY_AFTER);
+                    block = again;
+                }
+                CopyAttempt::Busy(_) => break Err(CopyFailure::Busy),
+                CopyAttempt::Failed(error) => break Err(CopyFailure::Native(error)),
+            }
+        };
+        Ok(Some(ViewerEvent::Copied(copied)))
+    }
 }
 
 impl Drop for Reading {
@@ -241,12 +297,13 @@ impl Drop for Reading {
     }
 }
 
-pub(crate) fn run(session: Session, _worker: &OffThread, cancel: &CancelToken) {
+pub(crate) fn run(session: Session, worker: &OffThread, cancel: &CancelToken) {
     let mut reading = Reading {
         file: None,
         failed: None,
         len: 0,
         mailbox: Arc::clone(&session.mailbox),
+        copied: AtomicU32::new(0),
     };
     while let Some((generation, command)) = session.mailbox.next() {
         if cancel.is_cancelled() {
@@ -263,7 +320,10 @@ pub(crate) fn run(session: Session, _worker: &OffThread, cancel: &CancelToken) {
                     .register(generation, file.handle_value(), &session.waker);
             }),
             Command::Read(index) if reading.file.is_some() => reading.read(index).map(Some),
-            Command::Read(_) => {
+            Command::Copy(copy, publication) if reading.file.is_some() => {
+                reading.copy(copy, publication, current, cancel, worker)
+            }
+            Command::Read(_) | Command::Copy(..) => {
                 Ok(reading
                     .failed
                     .as_ref()
@@ -322,6 +382,7 @@ mod tests {
                 failed: None,
                 len: 0,
                 mailbox: Arc::clone(&mailbox),
+                copied: AtomicU32::new(0),
             };
             assert!(
                 reading
@@ -376,6 +437,7 @@ mod tests {
                 failed: None,
                 len: 0,
                 mailbox: Arc::default(),
+                copied: AtomicU32::new(0),
             };
             assert!(
                 matches!(reading.open(&wide, 0, || true, |_| {}), Ok(Some(ViewerEvent::Opened { len, .. }))

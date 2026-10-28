@@ -494,6 +494,40 @@ pub(crate) fn hex_row(file_len: u64, offset: u64, bytes: &[u8]) -> String {
     row
 }
 
+/// The text that Copy puts on the clipboard for `bytes`, a whole file shown
+/// as `mode`: in Text the decoded text after the byte order mark, with the
+/// file's own line ends and tabs; in Hex each row as the Viewer shows it,
+/// with CR LF between the rows.
+pub(crate) fn copy_text(
+    mode: Mode,
+    detected: Detected,
+    bytes: &[u8],
+    ansi: &dyn Fn(&[u8]) -> String,
+) -> String {
+    match mode {
+        Mode::Text => {
+            let start = usize::try_from(detected.data_start)
+                .unwrap_or(usize::MAX)
+                .min(bytes.len());
+            decode_piece(detected.encoding, &bytes[start..], ansi)
+        }
+        Mode::Hex => {
+            let len = bytes.len() as u64;
+            let mut text = String::new();
+            for (row, offset) in bytes
+                .chunks(HEX_ROW_BYTES)
+                .zip((0u64..).step_by(HEX_ROW_BYTES))
+            {
+                if offset > 0 {
+                    text.push_str("\r\n");
+                }
+                text.push_str(&hex_row(len, offset, row));
+            }
+            text
+        }
+    }
+}
+
 /// The largest position of a scroll bar for a file of `file_len` bytes: a
 /// byte each, until the 32-bit range of a Win32 scroll bar ends.
 pub(crate) fn scroll_max(file_len: u64) -> i32 {

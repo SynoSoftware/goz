@@ -2,15 +2,16 @@
 //! notification lifetime, handing registration to the receiving window thread.
 
 use super::Hwnd;
+use super::clipboard::CopyFailure;
 use super::gdi::{Font, muted_text, system_color};
 use super::window::offer_key;
 use crate::core::layout::{Dpi, Px};
 use crate::core::viewer_window::ScrollBar;
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::{
-    BeginPaint, COLOR_WINDOW, COLOR_WINDOWTEXT, ETO_CLIPPED, ETO_OPAQUE, EndPaint, ExtTextOutW,
-    FillRect, GetSysColorBrush, HBRUSH, HGDIOBJ, PAINTSTRUCT, SelectObject, SetBkColor,
-    SetTextColor,
+    BeginPaint, COLOR_HIGHLIGHT, COLOR_HIGHLIGHTTEXT, COLOR_WINDOW, COLOR_WINDOWTEXT, ETO_CLIPPED,
+    ETO_OPAQUE, EndPaint, ExtTextOutW, FillRect, GetSysColorBrush, HBRUSH, HGDIOBJ, PAINTSTRUCT,
+    SelectObject, SetBkColor, SetTextColor,
 };
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::Controls::SetScrollInfo;
@@ -32,6 +33,9 @@ const AREA_CLASS: PCWSTR = w!("gozler.ui.viewer_area");
 /// The private message with which the area asks its Viewer to paint it;
 /// the Viewer answers 1 when it painted.
 pub(crate) const AREA_PAINT: u32 = super::wake::WAKE + 9;
+
+/// The private message with which the area tells its Viewer of a click.
+pub(crate) const AREA_CLICKED: u32 = super::wake::WAKE + 10;
 
 /// Registers the area's window class; once, before the first Viewer opens.
 pub(crate) fn register_area() -> windows::core::Result<()> {
@@ -82,7 +86,7 @@ pub(crate) fn create_area(parent: Hwnd, id: u16) -> windows::core::Result<Hwnd> 
 
 /// Has the Viewer paint the area, and passes the scroll bar's requests to
 /// it with the area as their sender, as a scroll bar control sends them. A
-/// click gives the area the focus.
+/// click gives the area the focus, and tells the Viewer.
 unsafe extern "system" fn area_procedure(
     hwnd: HWND,
     msg: u32,
@@ -114,6 +118,7 @@ unsafe extern "system" fn area_procedure(
         WM_LBUTTONDOWN => {
             // SAFETY: plain values.
             let _ = unsafe { SetFocus(Some(hwnd)) };
+            to_parent(AREA_CLICKED, WPARAM(0));
             LRESULT(0)
         }
         // SAFETY: the parameters are the ones Windows passed.
@@ -127,6 +132,8 @@ pub(crate) struct AreaText<'a> {
     /// Each row's text, with how many of its first characters show in the
     /// muted text colour.
     pub(crate) rows: &'a [(&'a str, usize)],
+    /// Every row shows in the selection colours.
+    pub(crate) selected: bool,
     pub(crate) line_height: Px,
     pub(crate) char_width: Px,
     /// The space before the text and above its first row.
@@ -172,6 +179,28 @@ pub(crate) fn paint_area(area: Hwnd, text: &AreaText) {
                 bottom: top + height,
             };
             let units: Vec<u16> = row.encode_utf16().collect();
+            if text.selected {
+                // The window colour over the line, then the text on the
+                // selection colour, which the opaque background mode
+                // gives each character's cell, as an edit control shows
+                // a selection.
+                FillRect(dc, &line, window);
+                SetBkColor(dc, system_color(COLOR_HIGHLIGHT));
+                SetTextColor(dc, system_color(COLOR_HIGHLIGHTTEXT));
+                let _ = ExtTextOutW(
+                    dc,
+                    x,
+                    top,
+                    ETO_CLIPPED,
+                    Some(&raw const line),
+                    PCWSTR(units.as_ptr()),
+                    units.len() as u32,
+                    None,
+                );
+                SetBkColor(dc, system_color(COLOR_WINDOW));
+                top += height;
+                continue;
+            }
             let split = row.char_indices().nth(*muted).map_or(row.len(), |(i, _)| i);
             let muted_units = row[..split].encode_utf16().count();
             // The muted part, and the row's ground over the whole line.
@@ -236,6 +265,8 @@ pub(crate) enum ViewerEvent {
     Opened { len: u64, first: Vec<u8> },
     /// The block `index`, fewer bytes than asked when the file shrank.
     Block { index: u64, bytes: Vec<u8> },
+    /// Copy put the file's text on the clipboard, or why it did not.
+    Copied(Result<(), CopyFailure>),
     /// Windows could not open the file, or, when `opened`, read it.
     Failed { opened: bool, reason: String },
 }

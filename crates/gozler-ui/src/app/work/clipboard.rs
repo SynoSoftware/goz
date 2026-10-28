@@ -2,6 +2,7 @@
 
 use crate::core::clipboard::{ClipboardData, ClipboardFormat, Publication};
 use crate::core::work::{Id, Replacement, Retirement, Waiting};
+pub(in crate::app) use crate::win::clipboard::CopyFailure;
 use crate::win::clipboard::{self, ClipboardBlock, CopyAttempt};
 use crate::win::wake::OpenWaker;
 use crate::win::work::{OffThread, Task};
@@ -41,11 +42,6 @@ struct CopyRetry {
     id: Id,
     copy: Copy,
     due: Instant,
-}
-
-pub(in crate::app) enum CopyFailure {
-    Busy,
-    Native(windows::core::Error),
 }
 
 pub(in crate::app) enum CopyNotice {

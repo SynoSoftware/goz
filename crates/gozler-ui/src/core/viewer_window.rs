@@ -31,6 +31,11 @@ const WHEEL_ROW: i32 = 40;
 
 const HEX_ROW: u64 = HEX_ROW_BYTES as u64;
 
+/// The most UTF-16 units that Copy puts on the clipboard, 64 MB there.
+/// Copy holds the whole file and its text in memory at once, so a larger
+/// file would take hundreds of megabytes from the machine.
+const COPY_UNITS: u64 = 32 << 20;
+
 /// A block that the page or a move waits for, by its index.
 type Need<T> = Result<T, u64>;
 
@@ -185,6 +190,18 @@ pub(crate) struct Document {
     decoded: Option<LineRows>,
     /// The wheel's turn not yet scrolled, less than a row.
     wheel: i32,
+    /// Select all selected the whole file, until a click clears it.
+    selected: bool,
+}
+
+/// What Copy reads, and how it makes the clipboard's text of it with
+/// [`viewer::copy_text`].
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct CopyText {
+    pub(crate) mode: Mode,
+    pub(crate) detected: Detected,
+    /// The bytes from the file's start: its length as the Viewer shows it.
+    pub(crate) len: u64,
 }
 
 impl Document {
@@ -212,6 +229,7 @@ impl Document {
             task: Task::Page,
             decoded: None,
             wheel: 0,
+            selected: false,
         };
         document.show_from(document.start_row());
         document
@@ -680,6 +698,44 @@ impl Document {
         }
     }
 
+    pub(crate) fn select_all(&mut self) {
+        self.selected = true;
+    }
+
+    pub(crate) fn clear_selection(&mut self) {
+        self.selected = false;
+    }
+
+    pub(crate) fn selected(&self) -> bool {
+        self.selected
+    }
+
+    /// What Copy reads for the whole file as the shown mode, or `Err` with
+    /// the largest file that Copy takes as that mode, when the file's text
+    /// could pass [`COPY_UNITS`].
+    pub(crate) fn copy(&self) -> Result<CopyText, u64> {
+        let len = self.blocks.len;
+        let (units, limit) = match self.mode {
+            // Every encoding makes at most one UTF-16 unit of each byte.
+            Mode::Text => {
+                let start = self.start();
+                (len - start, COPY_UNITS + start)
+            }
+            Mode::Hex => {
+                let row = viewer::hex_row(len, 0, &[0; HEX_ROW_BYTES]).len() as u64 + 2;
+                (len.div_ceil(HEX_ROW) * row, COPY_UNITS / row * HEX_ROW)
+            }
+        };
+        if units > COPY_UNITS {
+            return Err(limit);
+        }
+        Ok(CopyText {
+            mode: self.mode,
+            detected: self.detected,
+            len,
+        })
+    }
+
     /// Each shown row from the first shown column, cut after the area's
     /// width, with how many of its first characters show in gray.
     pub(crate) fn shown(&self) -> Vec<(&str, usize)> {
@@ -922,14 +978,18 @@ pub(crate) enum ViewerCommand {
     Text,
     Hex,
     Wrap,
+    Copy,
+    SelectAll,
 }
 
 impl ViewerCommand {
-    const ALL: [ViewerCommand; 4] = [
+    const ALL: [ViewerCommand; 6] = [
         ViewerCommand::Close,
         ViewerCommand::Text,
         ViewerCommand::Hex,
         ViewerCommand::Wrap,
+        ViewerCommand::Copy,
+        ViewerCommand::SelectAll,
     ];
 
     /// The first `WM_COMMAND` ID, above `IDOK` and `IDCANCEL`, which `Enter`
@@ -956,23 +1016,37 @@ impl ViewerCommand {
             ViewerCommand::Text => "viewer.text",
             ViewerCommand::Hex => "viewer.hex",
             ViewerCommand::Wrap => "viewer.wrap",
+            ViewerCommand::Copy => "command.copy",
+            ViewerCommand::SelectAll => "command.select_all",
         }
     }
 
-    /// The key the menu shows: `F4` switches between Text and Hex.
-    fn key(self) -> Key {
+    /// The keys the menu shows: `F4` switches between Text and Hex.
+    fn keystroke(self) -> Keystroke {
         match self {
-            ViewerCommand::Close => Key::Escape,
-            ViewerCommand::Text | ViewerCommand::Hex => Key::Function(4),
-            ViewerCommand::Wrap => Key::Function(2),
+            ViewerCommand::Close => Keystroke::plain(Key::Escape),
+            ViewerCommand::Text | ViewerCommand::Hex => Keystroke::plain(Key::Function(4)),
+            ViewerCommand::Wrap => Keystroke::plain(Key::Function(2)),
+            ViewerCommand::Copy => Keystroke::ctrl(Key::Letter(b'C')),
+            ViewerCommand::SelectAll => Keystroke::ctrl(Key::Letter(b'A')),
         }
     }
 
     fn mark(self) -> Mark {
         match self {
-            ViewerCommand::Close => Mark::None,
+            ViewerCommand::Close | ViewerCommand::Copy | ViewerCommand::SelectAll => Mark::None,
             ViewerCommand::Text | ViewerCommand::Hex => Mark::Radio,
             ViewerCommand::Wrap => Mark::Check,
+        }
+    }
+
+    /// The icon, as the main window's command of the same name has.
+    fn glyph(self) -> Option<Glyph> {
+        match self {
+            ViewerCommand::Close => Some(Glyph::Cancel),
+            ViewerCommand::Copy => Some(Glyph::Copy),
+            ViewerCommand::SelectAll => Some(Glyph::SelectAll),
+            ViewerCommand::Text | ViewerCommand::Hex | ViewerCommand::Wrap => None,
         }
     }
 
@@ -981,15 +1055,16 @@ impl ViewerCommand {
             id: self.id(),
             text: menu_label(
                 strings.text(self.label()),
-                Some(Keystroke::plain(self.key()).text(strings)),
+                Some(self.keystroke().text(strings)),
             ),
             mark: self.mark(),
-            glyph: (self == ViewerCommand::Close).then_some(Glyph::Cancel),
+            glyph: self.glyph(),
         }
     }
 }
 
-/// The Viewer's menu bar: File: Close. View: Text, Hex | Wrap long lines.
+/// The Viewer's menu bar: File: Close. Edit: Copy | Select all. View:
+/// Text, Hex | Wrap long lines.
 pub(crate) fn menu_bar(strings: &Strings) -> Vec<MenuNode> {
     let menu = |label: &str, children| MenuNode::Submenu {
         text: strings.text(label).to_owned(),
@@ -998,6 +1073,14 @@ pub(crate) fn menu_bar(strings: &Strings) -> Vec<MenuNode> {
     };
     vec![
         menu("menu.file", vec![ViewerCommand::Close.item(strings)]),
+        menu(
+            "menu.edit",
+            vec![
+                ViewerCommand::Copy.item(strings),
+                MenuNode::Separator,
+                ViewerCommand::SelectAll.item(strings),
+            ],
+        ),
         menu(
             "menu.view",
             vec![
@@ -1011,16 +1094,23 @@ pub(crate) fn menu_bar(strings: &Strings) -> Vec<MenuNode> {
 }
 
 /// Each menu item's ID, whether it is enabled and whether it is checked,
-/// while the Viewer shows a file as `mode`, or none yet, and wraps long
-/// lines when `wrap`. Wrap long lines is disabled in Hex, because a hex row
-/// is always 16 bytes.
-pub(crate) fn menu_states(mode: Option<Mode>, wrap: bool) -> [(u16, bool, bool); 4] {
+/// while the Viewer shows a file as `mode`, or none yet, wraps long lines
+/// when `wrap`, and has the file selected when `selected`. Wrap long lines
+/// is disabled in Hex, because a hex row is always 16 bytes, and Copy
+/// without a selection, as in Notepad.
+pub(crate) fn menu_states(
+    mode: Option<Mode>,
+    wrap: bool,
+    selected: bool,
+) -> [(u16, bool, bool); 6] {
     ViewerCommand::ALL.map(|command| {
         let (enabled, checked) = match command {
             ViewerCommand::Close => (true, false),
             ViewerCommand::Text => (mode.is_some(), mode == Some(Mode::Text)),
             ViewerCommand::Hex => (mode.is_some(), mode == Some(Mode::Hex)),
             ViewerCommand::Wrap => (mode != Some(Mode::Hex), wrap),
+            ViewerCommand::Copy => (selected, false),
+            ViewerCommand::SelectAll => (mode.is_some(), false),
         };
         (command.id(), enabled, checked)
     })
@@ -1037,6 +1127,10 @@ pub(crate) enum ViewerKey {
     SwitchMode,
     /// `F2`: Wrap long lines on or off.
     Wrap,
+    /// `Ctrl+C`.
+    Copy,
+    /// `Ctrl+A`.
+    SelectAll,
     LineUp,
     LineDown,
     PageUp,
@@ -1057,6 +1151,8 @@ pub(crate) fn viewer_key(keystroke: Keystroke) -> Option<ViewerKey> {
         (Key::Function(3), false) => ViewerKey::Close,
         (Key::Function(4), false) => ViewerKey::SwitchMode,
         (Key::Function(2), false) => ViewerKey::Wrap,
+        (Key::Letter(b'C'), true) => ViewerKey::Copy,
+        (Key::Letter(b'A'), true) => ViewerKey::SelectAll,
         (Key::Up, false) => ViewerKey::LineUp,
         (Key::Down, false) => ViewerKey::LineDown,
         (Key::PageUp, false) => ViewerKey::PageUp,
@@ -1170,6 +1266,33 @@ mod tests {
         assert_eq!(document.blocks.len, file.len() as u64);
         assert_eq!(texts(&document), ["x"; 3]);
         assert!(document.end_shown());
+    }
+
+    /// The clipboard gets the text a person pastes: no byte order mark in
+    /// Text, the rows as shown in Hex, and nothing for a file whose text
+    /// could pass the limit, before a byte of it is read.
+    #[test]
+    fn copy_gives_the_shown_text_of_a_file_within_the_limit() {
+        let file = b"\xEF\xBB\xBFone\r\ntwo\n";
+        let mut document = open(file, true, 80, 4);
+        let copy = document.copy().expect("a small file copies");
+        assert_eq!(
+            viewer::copy_text(copy.mode, copy.detected, file, &latin1),
+            "one\r\ntwo\n"
+        );
+        document.set_mode(Mode::Hex);
+        let copy = document.copy().expect("a small file copies");
+        let bytes = [b'a'; 17];
+        assert_eq!(
+            viewer::copy_text(copy.mode, copy.detected, &bytes, &latin1),
+            format!(
+                "{}\r\n{}",
+                viewer::hex_row(17, 0, &bytes),
+                viewer::hex_row(17, 16, &bytes[16..])
+            )
+        );
+        let large = Document::new(COPY_UNITS + 1, vec![b'x'; BLOCK_BYTES], true);
+        assert_eq!(large.copy().map(|_| ()), Err(COPY_UNITS));
     }
 
     #[test]

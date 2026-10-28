@@ -6,6 +6,7 @@
 
 use super::work::viewers::Reader;
 use crate::core::captions;
+use crate::core::clipboard::Publication;
 use crate::core::ids::{ControlId, IconId};
 use crate::core::layout::{
     Px, Rect, Size, image_button_width, status_last_part, viewer_message, viewer_message_width,
@@ -18,15 +19,17 @@ use crate::core::viewer_window::{
     place_samples, text_inset, text_room, viewer_key, waiting_layout,
 };
 use crate::core::work::{Waiting, waiting};
+use crate::win::clipboard;
 use crate::win::controls::{Button, Label, StatusBar};
+use crate::win::dialog::error_box;
 use crate::win::folder::Removal;
 use crate::win::gdi::{Font, TextMeter};
 use crate::win::locale::{WindowsNumbers, ansi_text};
 use crate::win::menu::{Menu, replace_menu_bar};
 use crate::win::notify::Command;
 use crate::win::viewer::{
-    AREA_PAINT, AreaText, ViewerEvent, caption_height, create_area, paint_area, register_area,
-    set_area_scroll,
+    AREA_CLICKED, AREA_PAINT, AreaText, ViewerEvent, caption_height, create_area, paint_area,
+    register_area, set_area_scroll,
 };
 use crate::win::wake::OpenWaker;
 use crate::win::window::{self, DEFERRED, Message, WindowProc};
@@ -468,6 +471,7 @@ impl Viewer {
         if let Some(index) = waits
             && self.in_flight.get().is_none()
             && let Some(reader) = self.reader.borrow_mut().as_mut()
+            && !reader.copying()
         {
             reader.read(index);
             self.in_flight.set(Some(index));
@@ -562,6 +566,7 @@ impl Viewer {
             &AreaText {
                 font: &fonts.text,
                 rows: &rows,
+                selected: shown.document().is_some_and(Document::selected),
                 line_height: fonts.line_height,
                 char_width: fonts.char_width,
                 inset: text_inset(hwnd.dpi()),
@@ -604,6 +609,18 @@ impl Viewer {
                         self.layout(hwnd);
                     } else {
                         self.pump();
+                    }
+                }
+                ViewerEvent::Copied(copied) => {
+                    if was_slow {
+                        self.show_message();
+                        self.layout(hwnd);
+                    } else {
+                        self.pump();
+                    }
+                    if let Err(failure) = copied {
+                        let text = failure.message(&self.strings.borrow());
+                        self.error_box(hwnd, &text);
                     }
                 }
                 ViewerEvent::Failed { opened, reason } => {
@@ -683,6 +700,8 @@ impl Viewer {
                 }
             }
             ViewerKey::Wrap => self.toggle_wrap(),
+            ViewerKey::Copy => self.copy(hwnd),
+            ViewerKey::SelectAll => self.select_all(),
             key => {
                 if let Some(document) = self.shown.borrow_mut().document_mut() {
                     match key {
@@ -697,7 +716,9 @@ impl Viewer {
                         ViewerKey::Cancel
                         | ViewerKey::Close
                         | ViewerKey::SwitchMode
-                        | ViewerKey::Wrap => {}
+                        | ViewerKey::Wrap
+                        | ViewerKey::Copy
+                        | ViewerKey::SelectAll => {}
                     }
                 }
             }
@@ -742,8 +763,52 @@ impl Viewer {
             ViewerCommand::Text => self.set_mode(Mode::Text),
             ViewerCommand::Hex => self.set_mode(Mode::Hex),
             ViewerCommand::Wrap => self.toggle_wrap(),
+            ViewerCommand::Copy => self.copy(hwnd),
+            ViewerCommand::SelectAll => self.select_all(),
         }
         self.pump();
+    }
+
+    fn select_all(&self) {
+        if let Some(document) = self.shown.borrow_mut().document_mut() {
+            document.select_all();
+        }
+    }
+
+    /// Puts the selected file's text on the clipboard. The reader reads the
+    /// file whole and publishes the text, so the window never waits for the
+    /// disk or the clipboard (DESIGN.md: The Viewer).
+    fn copy(&self, hwnd: Hwnd) {
+        let (mode, copy) = match self.shown.borrow().document() {
+            Some(document) if document.selected() => (document.mode(), document.copy()),
+            _ => return,
+        };
+        match copy {
+            Ok(copy) => {
+                if let Some(reader) = self.reader.borrow_mut().as_mut() {
+                    reader.copy(copy, Publication::new(clipboard::sequence()));
+                }
+                self.in_flight.set(None);
+            }
+            Err(limit) => {
+                let text = {
+                    let strings = self.strings.borrow();
+                    let key = match mode {
+                        Mode::Text => "viewer.copy_too_large_text",
+                        Mode::Hex => "viewer.copy_too_large_hex",
+                    };
+                    let limit = text::bytes(&strings, &*self.numbers.borrow(), limit);
+                    strings.format(key, &[&self.name, &limit])
+                };
+                self.error_box(hwnd, &text);
+            }
+        }
+    }
+
+    /// A message box about Copy, which its title names.
+    fn error_box(&self, hwnd: Hwnd, text: &str) {
+        let title = text::without_access_key(self.strings.borrow().text("command.copy"));
+        error_box(Some(hwnd), text, &title);
     }
 
     /// Activates the main window, which keeps its focused row, so `F3`,
@@ -793,6 +858,20 @@ impl WindowProc for Viewer {
                 Some(LRESULT(0))
             }
             Message::Other(AREA_PAINT) => Some(LRESULT(isize::from(self.paint(hwnd)))),
+            // A click clears Select all, as in Notepad.
+            Message::Other(AREA_CLICKED) => {
+                let cleared = match self.shown.borrow_mut().document_mut() {
+                    Some(document) if document.selected() => {
+                        document.clear_selection();
+                        true
+                    }
+                    _ => false,
+                };
+                if cleared {
+                    self.show();
+                }
+                Some(LRESULT(0))
+            }
             Message::Wake => {
                 self.read_events(hwnd);
                 Some(LRESULT(0))
@@ -846,9 +925,16 @@ impl WindowProc for Viewer {
                 notification,
             } => self.removal(hwnd, notification, removal),
             Message::InitMenuPopup => {
-                let mode = self.shown.borrow().document().map(Document::mode);
+                let (mode, selected) = {
+                    let shown = self.shown.borrow();
+                    let document = shown.document();
+                    (
+                        document.map(Document::mode),
+                        document.is_some_and(Document::selected),
+                    )
+                };
                 if let Some(menu) = Menu::of(hwnd) {
-                    for (id, enabled, checked) in menu_states(mode, self.wrap.get()) {
+                    for (id, enabled, checked) in menu_states(mode, self.wrap.get(), selected) {
                         menu.set_state(id, enabled, checked);
                     }
                 }
