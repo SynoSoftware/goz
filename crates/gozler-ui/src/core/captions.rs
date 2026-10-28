@@ -289,6 +289,16 @@ impl CaptionTable {
                 keyed: &[(Control(C::SelectFilesLabel), "select_files.mask")],
                 plain: &[(Ok, "button.ok"), (Cancel, "button.cancel")],
             },
+            // The text and the label hold numbers and the word, so the
+            // dialog sets them (`DeleteUnseen`).
+            DialogId::DeleteUnseen => CaptionTable {
+                title: "file_operations.delete",
+                keyed: &[],
+                plain: &[
+                    (Ok, "file_operations.delete_button"),
+                    (Cancel, "button.cancel"),
+                ],
+            },
             DialogId::UnselectFiles => CaptionTable {
                 title: "select_files.unselect_title",
                 keyed: &[(Control(C::SelectFilesLabel), "select_files.mask")],
@@ -703,6 +713,7 @@ impl CaptionTable {
             | DialogId::NewFolder
             | DialogId::SelectFiles
             | DialogId::UnselectFiles
+            | DialogId::DeleteUnseen
             | DialogId::Settings
             | DialogId::IndexedFolders
             | DialogId::ServiceReport

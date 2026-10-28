@@ -12,8 +12,8 @@
 //! interrupted areas.
 
 use super::dialogs::{
-    About, CustomDate, CustomSize, SearchSyntax, Transfer, TransferAction, TransferMode,
-    TransferStart,
+    About, CustomDate, CustomSize, DeleteUnseen, SearchSyntax, Transfer, TransferAction,
+    TransferMode, TransferStart,
 };
 use super::file_operations::{FileOperations, FilesSource};
 use super::icons::Icons;
@@ -2200,8 +2200,8 @@ impl MainWindow {
                                 prepared.paths,
                             );
                         }
-                        PathAction::Delete { place } => {
-                            self.delete_paths(hwnd, place, prepared.paths)
+                        PathAction::Delete { place, unseen } => {
+                            self.delete_paths(hwnd, place, unseen, prepared.paths)
                         }
                     }
                 }
@@ -3874,32 +3874,51 @@ impl MainWindow {
     /// Delete, and the list's `Delete` and `Shift+Delete`: the Delete
     /// question, then the permanent delete (DESIGN.md: File operations).
     fn delete_selected(&self, _hwnd: Hwnd, list: List) {
-        let place = {
-            let model = self.model.borrow();
-            match list {
-                List::Panel(side) => Some(model.panels().command_place(side)),
-                List::Search => None,
+        let (place, unseen) = match list {
+            List::Panel(side) => (
+                Some(self.model.borrow().panels().command_place(side)),
+                false,
+            ),
+            // A selection the window cannot tell counts as unseen.
+            List::Search => {
+                let shown = self.list_control(list).visible_rows();
+                let unseen = self.selected_rows(list).is_none_or(|selected| {
+                    (selected.positions.iter())
+                        .any(|rows| rows.start < shown.start || rows.end > shown.end)
+                });
+                (None, unseen)
             }
         };
-        self.prepare_selected(list, PathAction::Delete { place });
+        self.prepare_selected(list, PathAction::Delete { place, unseen });
     }
 
     fn delete_paths(
         &self,
         hwnd: Hwnd,
         place: Option<crate::core::panel::CommandPlace>,
+        unseen: bool,
         sources: Vec<PathBuf>,
     ) {
         if sources.is_empty() {
             return;
         }
-        let question = {
-            let model = self.model.borrow();
-            delete_question(model.strings(), &*self.numbers.borrow(), &sources)
-        };
-        // The question runs its own message loop, so nothing is borrowed
+        // Each dialog runs its own message loop, so nothing is borrowed
         // here.
-        if win::dialog::ask(hwnd, &question) {
+        let confirmed = if unseen {
+            let dialog = {
+                let model = self.model.borrow();
+                let count = sources.len() as u64;
+                DeleteUnseen::new(model.strings(), &*self.numbers.borrow(), count)
+            };
+            self.open_dialog(hwnd, DialogId::DeleteUnseen, &dialog) == Some(DialogEnd::Ok)
+        } else {
+            let question = {
+                let model = self.model.borrow();
+                delete_question(model.strings(), &*self.numbers.borrow(), &sources)
+            };
+            win::dialog::ask(hwnd, &question)
+        };
+        if confirmed {
             self.start_operation(Request::Delete { sources }, None);
             let follows = place.is_some_and(|place| {
                 let model = self.model.borrow();

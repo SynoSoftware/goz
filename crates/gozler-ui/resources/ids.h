@@ -369,6 +369,12 @@
 #define IDC_SELECT_FILES_LABEL 3901
 #define IDC_SELECT_FILES_MASK 3902
 
+// Search's Delete of rows the list does not show: the word to type.
+#define IDD_DELETE_UNSEEN 126
+#define IDC_DELETE_UNSEEN_TEXT 4001
+#define IDC_DELETE_UNSEEN_LABEL 4002
+#define IDC_DELETE_UNSEEN_WORD 4003
+
 // Settings > File operations: the speed settings of copies, moves and
 // deletes.
 #define IDD_SETTINGS_FILE_OPERATIONS 115

@@ -8,7 +8,7 @@ use super::work::REPOSITORY;
 use crate::core::captions::DialogItem;
 use crate::core::ids::ControlId;
 use crate::core::query::{DateRange, DateRangeError, Day, SizeRange, SizeRangeError, SizeUnit};
-use crate::core::text::Strings;
+use crate::core::text::{Numbers, Strings};
 use crate::core::typed::{self, Refusal};
 use crate::win::controls::{Balloon, DatePicker, DropDownList, Edit, Tooltip};
 use crate::win::dialog::{self, DialogEnd, DialogMessage, DialogProc, Opened};
@@ -812,6 +812,90 @@ impl DialogProc for NewFolder<'_> {
                 dialog::error_box(Some(dialog), &text, &self.title);
                 name.hwnd().focus();
                 name.select_all();
+                true
+            }
+            DialogMessage::Command { .. }
+            | DialogMessage::LinkActivated { .. }
+            | DialogMessage::DoubleClicked { .. }
+            | DialogMessage::Timer { .. }
+            | DialogMessage::Reply
+            | DialogMessage::Tree { .. }
+            | DialogMessage::Focus { .. }
+            | DialogMessage::KeysCaptured { .. }
+            | DialogMessage::Other => false,
+        }
+    }
+}
+
+/// Search's Delete when its selection holds rows the list does not show:
+/// Delete is enabled once the person types the word, because Select all
+/// reaches files they never saw (DESIGN.md: Delete).
+pub(super) struct DeleteUnseen {
+    text: String,
+    label: String,
+    word: String,
+}
+
+impl DeleteUnseen {
+    /// The dialog for a delete of `count` entries.
+    pub(super) fn new(strings: &Strings, numbers: &dyn Numbers, count: u64) -> DeleteUnseen {
+        let word = strings
+            .text("file_operations.delete_unseen_word")
+            .to_owned();
+        DeleteUnseen {
+            text: format!(
+                "{}
+
+{}",
+                strings.count("file_operations.delete_items", count, numbers, &[]),
+                strings.text("file_operations.delete_unseen_body"),
+            ),
+            label: strings.format("file_operations.delete_unseen_type", &[&word]),
+            word,
+        }
+    }
+
+    /// Whether the box holds the word, without regard to case.
+    fn typed(&self, dialog: Hwnd) -> bool {
+        Edit::of_dialog(dialog, ControlId::DeleteUnseenWord.id())
+            .is_some_and(|word| word.text().trim().to_lowercase() == self.word.to_lowercase())
+    }
+
+    fn update_ok(&self, dialog: Hwnd) {
+        if let Some(ok) = dialog::item(dialog, DialogItem::Ok.id()) {
+            ok.set_enabled(self.typed(dialog));
+        }
+    }
+}
+
+impl DialogProc for DeleteUnseen {
+    fn init(&self, dialog: Hwnd) -> Opened {
+        for (id, text) in [
+            (ControlId::DeleteUnseenText, &self.text),
+            (ControlId::DeleteUnseenLabel, &self.label),
+        ] {
+            if let Some(item) = dialog::item(dialog, id.id()) {
+                item.set_text(text);
+            }
+        }
+        self.update_ok(dialog);
+        Opened {
+            focus: ControlId::DeleteUnseenWord.id(),
+            fonts: Vec::new(),
+        }
+    }
+
+    fn message(&self, dialog: Hwnd, message: DialogMessage) -> bool {
+        match message {
+            DialogMessage::Edited { .. } => {
+                self.update_ok(dialog);
+                true
+            }
+            // Checked here too, so only the typed word deletes.
+            DialogMessage::Command { id } if id == DialogItem::Ok.id() => {
+                if self.typed(dialog) {
+                    dialog::end(dialog, DialogEnd::Ok);
+                }
                 true
             }
             DialogMessage::Command { .. }

@@ -53,6 +53,9 @@ pub(in crate::app) enum PathAction {
     },
     Delete {
         place: Option<CommandPlace>,
+        /// Search's selection holds rows its list did not show, so the
+        /// person types a word to delete (DESIGN.md: Delete).
+        unseen: bool,
     },
 }
 
