@@ -4,7 +4,7 @@
 //! The list owns the focus and the selection, as Search's list does (DESIGN.md:
 //! The selection).
 
-use super::super::dialogs::{NewFolder, TransferMode, TransferStart};
+use super::super::dialogs::{NewFolder, SelectFiles, TransferMode, TransferStart};
 use super::{MainWindow, Selected, Timer};
 use crate::core::captions::{self, PanelCaptions};
 use crate::core::commands::{self, CommandId, Mark, MenuItem, MenuNode, PanelAction, PanelKey};
@@ -32,7 +32,7 @@ use crate::win::{self, Hwnd, shell};
 use gozler_core::types::{SortDir, SortKey, SortSpec};
 use gozler_core::winpath::parent_of;
 use gozler_fileops::Request;
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::path::PathBuf;
 use std::time::Instant;
 use windows::Win32::Foundation::LRESULT;
@@ -279,6 +279,9 @@ pub(super) struct Panels {
     /// Commander mode shows when its listing arrives, so the panel appears
     /// with the requested folder, not with the folder it showed before.
     commander_reading: Cell<Option<Side>>,
+    /// The mask that Select files… and Unselect files… show first: the
+    /// last one chosen, while the window runs.
+    select_mask: RefCell<String>,
 }
 
 impl Panels {
@@ -293,6 +296,7 @@ impl Panels {
                 PanelControls::create(parent, Side::Right)?,
             ],
             commander_reading: Cell::new(None),
+            select_mask: RefCell::new("*.*".to_owned()),
         })
     }
 }
@@ -438,7 +442,7 @@ impl Panels {
         keep_action: bool,
     ) {
         window.show_native_place(
-            side,
+            List::Panel(side),
             shown,
             place,
             matches!(scroll, Scroll::ToFocus),
@@ -2241,6 +2245,30 @@ impl Panels {
                 .borrow_mut()
                 .panels_mut()
                 .await_name(side, &name, None, false, id);
+        }
+    }
+
+    /// `Num +` and `Num -`: the mask, then the files of `side`'s folder that
+    /// it matches are selected, or unselected when not `select`
+    /// (DESIGN.md: Selecting entries).
+    pub(super) fn select_files(&self, window: &MainWindow, hwnd: Hwnd, side: Side, select: bool) {
+        let dialog = SelectFiles::new(&self.select_mask.borrow());
+        let id = if select {
+            DialogId::SelectFiles
+        } else {
+            DialogId::UnselectFiles
+        };
+        if window.open_dialog(hwnd, id, &dialog) != Some(DialogEnd::Ok) {
+            return;
+        }
+        let Some((text, mask)) = dialog.chosen() else {
+            return;
+        };
+        self.select_mask.replace(text);
+        let shown = self.place(window, side);
+        let place = (window.model.borrow_mut().panels_mut()).select_matching(side, &mask, select);
+        if let Some(place) = place {
+            self.show_place(window, side, &shown, &place, Scroll::Keep, false);
         }
     }
 

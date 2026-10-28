@@ -10,7 +10,7 @@ use super::model::{Column, Model};
 use super::panel::{Side, View};
 use super::query::{SORT_DIRECTIONS, SORT_KEYS, sort_direction_label, sort_key_label};
 use super::selection::Movement;
-use super::selection::OPEN_LIMIT;
+use super::selection::{OPEN_LIMIT, Selection};
 use super::settings::{ContextItem, ContextMenu, Mode};
 use super::shortcuts::CommandShortcuts;
 use super::text::{LANGUAGES, LanguageChoice, Strings, menu_label};
@@ -66,10 +66,12 @@ pub(crate) enum CommandId {
     Edit,
     NewFolder,
     Synchronize,
+    SelectFiles,
+    UnselectFiles,
 }
 
 impl CommandId {
-    pub(crate) const ALL: [CommandId; 40] = [
+    pub(crate) const ALL: [CommandId; 42] = [
         CommandId::Open,
         CommandId::OpenFileLocation,
         CommandId::ShowInCommander,
@@ -110,6 +112,8 @@ impl CommandId {
         CommandId::Edit,
         CommandId::NewFolder,
         CommandId::Synchronize,
+        CommandId::SelectFiles,
+        CommandId::UnselectFiles,
     ];
 
     /// The command's row; a `match`, so every command has one.
@@ -237,11 +241,20 @@ impl CommandId {
                     always,
                     Some(|s| s.model.mode() == Mode::Commander),
                 ),
-                // `Esc` in a panel's list (control_key).
+                // `Num +` and `Num -` in a panel's list (control_key).
+                C::SelectFiles => ("command.select_files", &[], lists_folder, None),
+                C::UnselectFiles => ("command.unselect_files", &[], lists_folder, None),
+                // `Esc` in a panel's list and `Num -` in Search's
+                // (control_key).
                 C::ClearSelection => (
                     "command.clear_selection",
                     &[],
-                    |s| matches!(s.list, List::Panel(side) if s.model.panels().panel(side).has_selection()),
+                    |s| match s.list {
+                        List::Search => {
+                            !matches!(s.model.search_list().selection(), Selection::None)
+                        }
+                        List::Panel(side) => s.model.panels().panel(side).has_selection(),
+                    },
                     None,
                 ),
                 C::View => (
@@ -315,7 +328,9 @@ impl CommandId {
             | C::SortBy
             | C::ClearFilters
             | C::Commander
-            | C::ClearSelection => return None,
+            | C::ClearSelection
+            | C::SelectFiles
+            | C::UnselectFiles => return None,
         })
     }
 
@@ -336,12 +351,15 @@ impl CommandId {
             | C::Commander
             | C::Synchronize
             | C::SelectAll
+            | C::ClearSelection
             | C::Refresh
             | C::Find
             | C::SortBy
             | C::Cancel => true,
             C::Open | C::Properties | C::CopyToFolder | C::MoveToFolder | C::Delete => true,
-            C::ClearSelection | C::View | C::Edit | C::NewFolder => mode == Mode::Commander,
+            C::SelectFiles | C::UnselectFiles | C::View | C::Edit | C::NewFolder => {
+                mode == Mode::Commander
+            }
             C::OpenFileLocation
             | C::ShowInCommander
             | C::Explore
@@ -418,6 +436,15 @@ fn always(_: &State) -> bool {
 
 fn never(_: &State) -> bool {
     false
+}
+
+/// Select files… and Unselect files… match names, which only a panel that
+/// lists a folder holds (DESIGN.md: Selecting entries).
+fn lists_folder(state: &State) -> bool {
+    let List::Panel(side) = state.list else {
+        return false;
+    };
+    matches!(state.model.panels().panel(side).view(), View::Folder)
 }
 
 /// Refresh runs the shown search again (DESIGN.md: C17); in Commander mode it
@@ -537,11 +564,15 @@ pub(crate) enum Key {
     Down,
     Comma,
     Period,
+    /// The number pad's `+` and `-`, which are other keys than the main
+    /// keyboard's, so they never type into quick search.
+    NumPlus,
+    NumMinus,
 }
 
 impl Key {
     /// Every key without a number, for reading a key's name back.
-    const NAMED: [Key; 17] = [
+    const NAMED: [Key; 19] = [
         Key::Enter,
         Key::Escape,
         Key::Tab,
@@ -559,6 +590,8 @@ impl Key {
         Key::Down,
         Key::Comma,
         Key::Period,
+        Key::NumPlus,
+        Key::NumMinus,
     ];
 
     /// Its name in `ui.json`, the same in every language, such as "PageUp".
@@ -583,6 +616,9 @@ impl Key {
             Key::Down => "Down".into(),
             Key::Comma => ",".into(),
             Key::Period => ".".into(),
+            // Without `+`, which `Keystroke::from_name` splits at.
+            Key::NumPlus => "NumPlus".into(),
+            Key::NumMinus => "NumMinus".into(),
         }
     }
 
@@ -608,6 +644,8 @@ impl Key {
             Key::Letter(_) | Key::Digit(_) | Key::Function(_) | Key::Comma | Key::Period => {
                 self.name()
             }
+            Key::NumPlus => "Num +".to_owned(),
+            Key::NumMinus => "Num -".to_owned(),
             Key::Enter => named("key.enter"),
             Key::Escape => named("key.escape"),
             Key::Tab => named("key.tab"),
@@ -786,6 +824,9 @@ pub(crate) enum SelectKey {
     /// toggles it and moves the focus `down`. In a panel, Space types into
     /// the open quick search box.
     Toggle { down: bool },
+    /// `Num +` in Search's list selects again the rows that Clear
+    /// selection cleared, while nothing else changed the selection since.
+    Restore,
 }
 
 /// What a key does in a panel.
@@ -875,6 +916,14 @@ pub(crate) fn control_key(focus: Focus, key: Keystroke) -> Option<KeyAction> {
                     // Stops the status bar's job, as Esc in the search box
                     // empties the box.
                     (Keystroke::plain(Key::Escape), KeyAction::CancelJob),
+                    (
+                        Keystroke::plain(Key::NumMinus),
+                        KeyAction::Run(CommandId::ClearSelection),
+                    ),
+                    (
+                        Keystroke::plain(Key::NumPlus),
+                        KeyAction::Select(SelectKey::Restore),
+                    ),
                 ]
             }
         }
@@ -957,6 +1006,14 @@ const PANEL_KEYS: &[(Keystroke, KeyAction)] = {
             KeyAction::Run(CommandId::Delete),
         ),
         (shift(Key::Delete), KeyAction::Run(CommandId::Delete)),
+        (
+            Keystroke::plain(Key::NumPlus),
+            KeyAction::Run(CommandId::SelectFiles),
+        ),
+        (
+            Keystroke::plain(Key::NumMinus),
+            KeyAction::Run(CommandId::UnselectFiles),
+        ),
     ]
 };
 
@@ -1130,7 +1187,9 @@ pub(crate) enum Mark {
 impl MenuItem {
     pub(crate) fn writes_selection(self, focus: Focus) -> bool {
         match self {
-            Self::Run(CommandId::ClearSelection) => true,
+            Self::Run(
+                CommandId::ClearSelection | CommandId::SelectFiles | CommandId::UnselectFiles,
+            ) => true,
             Self::Run(CommandId::SelectAll) => !matches!(
                 focus,
                 Focus::SearchBox { .. } | Focus::Value { .. } | Focus::PathBox | Focus::PanelSearch
@@ -1247,8 +1306,14 @@ impl MenuItem {
             .find(|(_, item)| *item == self)
             .map(|(key, _)| key)
             .or_else(|| {
-                (mode == Mode::Commander && command == CommandId::ClearSelection)
-                    .then_some(Keystroke::plain(Key::Escape))
+                let key = match (command, mode) {
+                    (CommandId::ClearSelection, Mode::Commander) => Key::Escape,
+                    (CommandId::ClearSelection, Mode::Search) => Key::NumMinus,
+                    (CommandId::SelectFiles, Mode::Commander) => Key::NumPlus,
+                    (CommandId::UnselectFiles, Mode::Commander) => Key::NumMinus,
+                    _ => return None,
+                };
+                Some(Keystroke::plain(key))
             })
     }
 
@@ -1429,7 +1494,12 @@ fn every_menu() -> Vec<Menu> {
                     C::CopyName,
                     C::CopyFolder,
                 ]),
-                run(&[C::SelectAll, C::ClearSelection]),
+                run(&[
+                    C::SelectAll,
+                    C::SelectFiles,
+                    C::UnselectFiles,
+                    C::ClearSelection,
+                ]),
                 run(&[C::Find]),
             ],
         ),

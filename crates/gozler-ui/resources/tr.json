@@ -57,10 +57,12 @@
     "move_to_folder": "Klasöre ta&şı…",
     "file_operations": "Dosya a&ktarımları",
     "commander": "&Commander",
-    "clear_selection": "Seçimi &kaldır",
+    "clear_selection": "Seçi&mi kaldır",
     "view": "&Görüntüle",
     "edit": "&Düzenle",
-    "new_folder": "Yeni klasö&r…"
+    "new_folder": "Yeni klasö&r…",
+    "select_files": "Dosyaları &seç…",
+    "unselect_files": "Dosyaların seçimini kal&dır…"
   },
   "column": {
     "name": "&Ad",
@@ -1018,6 +1020,11 @@
     "name": "&Ad:",
     "create": "Oluştur",
     "exists": "{0} bu klasörde zaten var. Başka bir ad seçin."
+  },
+  "select_files": {
+    "select_title": "Dosyaları seç",
+    "unselect_title": "Dosyaların seçimini kaldır",
+    "mask": "&Dosyalar, örneğin *.txt veya *.jpg;*.png:"
   },
   "name": {
     "characters": "Dosya adı şu karakterlerin hiçbirini içeremez: \\ / : * ? \" < > |",

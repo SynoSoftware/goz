@@ -57,10 +57,12 @@
     "move_to_folder": "&Move to folder…",
     "file_operations": "File tr&ansfers",
     "commander": "Co&mmander",
-    "clear_selection": "&Clear selection",
+    "clear_selection": "Cl&ear selection",
     "view": "&View",
     "edit": "&Edit",
-    "new_folder": "&New folder…"
+    "new_folder": "&New folder…",
+    "select_files": "Se&lect files…",
+    "unselect_files": "&Unselect files…"
   },
   "column": {
     "name": "&Name",
@@ -1018,6 +1020,11 @@
     "name": "&Name:",
     "create": "Create",
     "exists": "{0} is already in this folder. Choose another name."
+  },
+  "select_files": {
+    "select_title": "Select files",
+    "unselect_title": "Unselect files",
+    "mask": "&Files, such as *.txt or *.jpg;*.png:"
   },
   "name": {
     "characters": "A file name can't contain any of the following characters: \\ / : * ? \" < > |",

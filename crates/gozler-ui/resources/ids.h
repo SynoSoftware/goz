@@ -363,6 +363,12 @@
 #define IDC_NEW_FOLDER_LABEL 3401
 #define IDC_NEW_FOLDER_NAME 3402
 
+// Commander mode's Select files and Unselect files: the mask.
+#define IDD_SELECT_FILES 124
+#define IDD_UNSELECT_FILES 125
+#define IDC_SELECT_FILES_LABEL 3901
+#define IDC_SELECT_FILES_MASK 3902
+
 // Settings > File operations: the speed settings of copies, moves and
 // deletes.
 #define IDD_SETTINGS_FILE_OPERATIONS 115

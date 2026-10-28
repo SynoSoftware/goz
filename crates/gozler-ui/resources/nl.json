@@ -60,7 +60,9 @@
     "clear_selection": "Selectie &wissen",
     "view": "&Weergeven",
     "edit": "&Bewerken",
-    "new_folder": "&Nieuwe map…"
+    "new_folder": "&Nieuwe map…",
+    "select_files": "Bestanden se&lecteren…",
+    "unselect_files": "Bestanden &deselecteren…"
   },
   "column": {
     "name": "&Naam",
@@ -1018,6 +1020,11 @@
     "name": "&Naam:",
     "create": "Maken",
     "exists": "{0} staat al in deze map. Kies een andere naam."
+  },
+  "select_files": {
+    "select_title": "Bestanden selecteren",
+    "unselect_title": "Bestanden deselecteren",
+    "mask": "&Bestanden, zoals *.txt of *.jpg;*.png:"
   },
   "name": {
     "characters": "Een bestandsnaam mag geen van de volgende tekens bevatten: \\ / : * ? \" < > |",

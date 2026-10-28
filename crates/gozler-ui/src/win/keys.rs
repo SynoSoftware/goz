@@ -4,13 +4,13 @@
 
 use crate::core::commands::Key;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    VIRTUAL_KEY, VK_BACK, VK_DELETE, VK_DOWN, VK_END, VK_ESCAPE, VK_F1, VK_F24, VK_HOME, VK_INSERT,
-    VK_LEFT, VK_NEXT, VK_OEM_COMMA, VK_OEM_PERIOD, VK_PRIOR, VK_RETURN, VK_RIGHT, VK_SPACE, VK_TAB,
-    VK_UP,
+    VIRTUAL_KEY, VK_ADD, VK_BACK, VK_DELETE, VK_DOWN, VK_END, VK_ESCAPE, VK_F1, VK_F24, VK_HOME,
+    VK_INSERT, VK_LEFT, VK_NEXT, VK_OEM_COMMA, VK_OEM_PERIOD, VK_PRIOR, VK_RETURN, VK_RIGHT,
+    VK_SPACE, VK_SUBTRACT, VK_TAB, VK_UP,
 };
 
 /// The keys without a number, with their codes.
-const NAMED: [(Key, VIRTUAL_KEY); 17] = [
+const NAMED: [(Key, VIRTUAL_KEY); 19] = [
     (Key::Enter, VK_RETURN),
     (Key::Escape, VK_ESCAPE),
     (Key::Tab, VK_TAB),
@@ -28,6 +28,8 @@ const NAMED: [(Key, VIRTUAL_KEY); 17] = [
     (Key::Down, VK_DOWN),
     (Key::Comma, VK_OEM_COMMA),
     (Key::Period, VK_OEM_PERIOD),
+    (Key::NumPlus, VK_ADD),
+    (Key::NumMinus, VK_SUBTRACT),
 ];
 
 pub(crate) fn virtual_key(key: Key) -> u16 {

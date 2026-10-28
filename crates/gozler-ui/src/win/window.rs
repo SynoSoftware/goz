@@ -907,6 +907,13 @@ unsafe extern "system" fn procedure<W: WindowProc>(
         Rc::increment_strong_count(raw);
         Rc::from_raw(raw)
     };
+    if msg == WM_NOTIFY {
+        // SAFETY: WM_NOTIFY's lparam is its NMHDR.
+        let typed_row = unsafe { super::notify::typed_row_answer(lparam) };
+        if let Some(answer) = typed_row {
+            return LRESULT(answer);
+        }
+    }
     // SAFETY: each pointer is decoded only for the message that carries it.
     let message = unsafe { decode(msg, wparam, lparam) };
     match state.message(Hwnd(hwnd), message) {

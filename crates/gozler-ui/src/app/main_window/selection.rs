@@ -3,7 +3,7 @@
 
 use super::*;
 use crate::core::commands::SelectKey;
-use crate::core::panel::QuickAction;
+use crate::core::panel::{Place, QuickAction};
 use crate::core::selection::changes::{Changes, Write};
 use crate::core::selection::{CaptureKey, Capturing, Movement, RowsChange, moved, passed};
 use crate::core::work::INLINE_ITEMS;
@@ -22,6 +22,9 @@ pub(super) struct NativeSelection {
     restore_focus: bool,
     unhighlight: Option<Unhighlight>,
     unhighlighting: bool,
+    /// The rows that Clear selection cleared in Search's list, which
+    /// `Num +` selects again while the list's key is still the one here.
+    cleared: Option<(CaptureKey, Arc<Vec<Range<u64>>>)>,
 }
 
 #[derive(Clone, Copy)]
@@ -151,8 +154,8 @@ impl MainWindow {
         if !self.update_live() {
             return;
         }
-        for side in Side::BOTH {
-            self.apply_native_place(side);
+        for list in List::ALL {
+            self.apply_native_place(list);
             if !self.update_live() {
                 return;
             }
@@ -445,9 +448,7 @@ impl MainWindow {
         let control = self.list_control(list);
         let mut read = self.native_selection(list).borrow_mut().reading.take();
         if read.as_ref().is_some_and(|read| read.key != key) {
-            let mut retired = Retirement::default();
-            retired.push(read.take(), INLINE_ITEMS + 1);
-            self.created().work.borrow_mut().retire(retired);
+            self.retire_selection(read.take());
         }
         if read.is_none() {
             let expected = control.selected_count();
@@ -512,9 +513,7 @@ impl MainWindow {
             self.native_selection(list).borrow_mut().reading = Some(read);
             self.schedule_native_selection(control.hwnd().parent());
         } else {
-            let mut retired = Retirement::default();
-            retired.push(read, INLINE_ITEMS + 1);
-            self.created().work.borrow_mut().retire(retired);
+            self.retire_selection(read);
             self.schedule_native_selection(control.hwnd().parent());
         }
     }
@@ -647,6 +646,34 @@ impl MainWindow {
         }
     }
 
+    /// Clear selection clears `list`'s selection. Search's list remembers
+    /// it first, so `Num +` selects it again (DESIGN.md: Selecting entries).
+    #[allow(
+        clippy::single_range_in_vec_init,
+        reason = "a selection is a list of row ranges"
+    )]
+    pub(super) fn clear_selection(&self, list: List) {
+        let control = self.list_control(list);
+        let count = control.count();
+        let kept = match list {
+            // More rows than `SELECTION_LIMIT` run the command before the
+            // capture knows them, which for every row it need not.
+            List::Search => (self.native_selection(list).borrow())
+                .capture
+                .selected(count)
+                .map(|kept| kept.positions)
+                .or_else(|| {
+                    (count > 0 && control.selected_count() == count)
+                        .then(|| Arc::new(vec![0..count]))
+                }),
+            List::Panel(_) => None,
+        };
+        control.deselect_all();
+        // The key after the clear, so any later change forgets it.
+        let key = self.native_key(list);
+        self.native_selection(list).borrow_mut().cleared = kept.map(|kept| (key, kept));
+    }
+
     pub(super) fn native_deselection_pending(&self, list: List) -> bool {
         let native = self.native_selection(list).borrow();
         native.unhighlight.is_some() || native.unhighlighting
@@ -752,21 +779,32 @@ impl MainWindow {
         self.created().work.borrow_mut().retire(retired);
     }
 
+    /// Shows `place` in `list`, which showed `before`, writing the rows
+    /// that change in bounded slices. A panel's model holds `place` already;
+    /// Search's list tells its model when the writes end, as a person's
+    /// selection does.
     pub(super) fn show_native_place(
         &self,
-        side: Side,
-        before: &crate::core::panel::Place,
-        place: &crate::core::panel::Place,
+        list: List,
+        before: &Place,
+        place: &Place,
         to_focus: bool,
         keep_action: bool,
     ) {
-        let list = List::Panel(side);
-        let (count, selected_count) = {
-            let model = self.model.borrow();
-            (
-                model.panels().panel(side).count(),
-                model.panels().selected_count(side),
-            )
+        let (count, selected_count) = match list {
+            List::Panel(side) => {
+                let model = self.model.borrow();
+                (
+                    model.panels().panel(side).count(),
+                    model.panels().selected_count(side),
+                )
+            }
+            List::Search => (
+                self.list_control(list).count(),
+                (place.selected.iter())
+                    .map(|rows| rows.end - rows.start)
+                    .sum(),
+            ),
         };
         let mut retired = Retirement::default();
         {
@@ -797,19 +835,29 @@ impl MainWindow {
                 to_focus,
             });
         }
-        self.model
-            .borrow_mut()
-            .panels_mut()
-            .native_selection_pending(side, true);
+        if let List::Panel(side) = list {
+            self.model
+                .borrow_mut()
+                .panels_mut()
+                .native_selection_pending(side, true);
+        }
         self.created().work.borrow_mut().retire(retired);
-        let control = self.list_control(list);
-        self.set_selection_enabled(list, false);
-        control.set_count(count);
-        self.apply_native_place(side);
+        if let List::Panel(_) = list {
+            // The panel's rows may have changed with the place.
+            self.list_control(list).set_count(count);
+        }
+        self.apply_native_place(list);
     }
 
-    pub(super) fn apply_native_place(&self, side: Side) {
-        let list = List::Panel(side);
+    /// Drops `value`, which can hold a large selection, on a work thread,
+    /// so the window never waits while its memory is freed.
+    fn retire_selection<T: Send + 'static>(&self, value: T) {
+        let mut retired = Retirement::default();
+        retired.push(value, INLINE_ITEMS + 1);
+        self.created().work.borrow_mut().retire(retired);
+    }
+
+    pub(super) fn apply_native_place(&self, list: List) {
         {
             let mut native = self.native_selection(list).borrow_mut();
             if native.writing {
@@ -817,7 +865,7 @@ impl MainWindow {
             }
             native.writing = true;
         }
-        self.write_native_place(side);
+        self.write_native_place(list);
         let pending = {
             let mut native = self.native_selection(list).borrow_mut();
             native.writing = false;
@@ -828,8 +876,7 @@ impl MainWindow {
         }
     }
 
-    fn write_native_place(&self, side: Side) {
-        let list = List::Panel(side);
+    fn write_native_place(&self, list: List) {
         let update = self.native_selection(list).borrow_mut().update.take();
         let Some(mut update) = update else {
             return;
@@ -860,13 +907,15 @@ impl MainWindow {
             }
         }
         if !current() {
-            let mut retired = Retirement::default();
-            retired.push(update, INLINE_ITEMS + 1);
-            self.created().work.borrow_mut().retire(retired);
+            self.retire_selection(update);
             return;
         }
+        // Only writes left for a later slice disable the list against
+        // clicks between the slices: disabling repaints the whole list, and
+        // its scroll bars flash, also when nothing changed.
         if !changes.is_done() {
             self.native_selection(list).borrow_mut().update = Some(update);
+            self.set_selection_enabled(list, false);
             return;
         }
         if update.to_focus {
@@ -875,37 +924,42 @@ impl MainWindow {
             control.focus_in_place(update.focused);
         }
         if !current() {
-            let mut retired = Retirement::default();
-            retired.push(update, INLINE_ITEMS + 1);
-            self.created().work.borrow_mut().retire(retired);
+            self.retire_selection(update);
             return;
         }
         let focused = control.focused();
-        self.model
-            .borrow_mut()
-            .panels_mut()
-            .set_focused(side, focused);
-        self.panel(side).changed.set(panels::ListChanged::Nothing);
+        match list {
+            List::Panel(side) => {
+                self.model
+                    .borrow_mut()
+                    .panels_mut()
+                    .set_focused(side, focused);
+                self.panel(side).changed.set(panels::ListChanged::Nothing);
+            }
+            List::Search => self.controls().search.selection_pending.set(true),
+        }
         let count = control.count();
         let input = {
             let mut native = self.native_selection(list).borrow_mut();
             native.applying = false;
             native.capture.known(count, update.selected.clone())
         };
-        self.model
-            .borrow_mut()
-            .panels_mut()
-            .native_selection_pending(side, false);
+        if let List::Panel(side) = list {
+            self.model
+                .borrow_mut()
+                .panels_mut()
+                .native_selection_pending(side, false);
+        }
         self.created().work.borrow_mut().lists.tell(list, input);
         self.retire_native_selection(list);
         if !self.selection_command_pending(list) && !self.native_deselection_pending(list) {
             self.set_selection_enabled(list, true);
         }
-        let mut retired = Retirement::default();
-        retired.push(update, INLINE_ITEMS + 1);
-        self.created().work.borrow_mut().retire(retired);
+        self.retire_selection(update);
         control.redraw_rows(control.visible_rows());
-        self.controls().panels.show_panel(self, side);
+        if let List::Panel(side) = list {
+            self.controls().panels.show_panel(self, side);
+        }
         self.controls().key_bar.update_key_bar(self);
         self.resume_selection_actions(control.hwnd().parent());
         self.start_list_passes();

@@ -284,6 +284,16 @@ impl CaptionTable {
                 keyed: &[(Control(C::NewFolderLabel), "new_folder.name")],
                 plain: &[(Ok, "new_folder.create"), (Cancel, "button.cancel")],
             },
+            DialogId::SelectFiles => CaptionTable {
+                title: "select_files.select_title",
+                keyed: &[(Control(C::SelectFilesLabel), "select_files.mask")],
+                plain: &[(Ok, "button.ok"), (Cancel, "button.cancel")],
+            },
+            DialogId::UnselectFiles => CaptionTable {
+                title: "select_files.unselect_title",
+                keyed: &[(Control(C::SelectFilesLabel), "select_files.mask")],
+                plain: &[(Ok, "button.ok"), (Cancel, "button.cancel")],
+            },
             DialogId::Synchronize => CaptionTable {
                 title: "sync.title",
                 keyed: &[
@@ -691,6 +701,8 @@ impl CaptionTable {
             | DialogId::Transfer
             | DialogId::Synchronize
             | DialogId::NewFolder
+            | DialogId::SelectFiles
+            | DialogId::UnselectFiles
             | DialogId::Settings
             | DialogId::IndexedFolders
             | DialogId::ServiceReport

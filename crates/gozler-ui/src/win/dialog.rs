@@ -261,6 +261,13 @@ unsafe extern "system" fn procedure<D: DialogProc>(
         }
         WM_NOTIFY => {
             // SAFETY: WM_NOTIFY's lparam points to an NMHDR.
+            let typed_row = unsafe { super::notify::typed_row_answer(lparam) };
+            if let Some(answer) = typed_row {
+                // SAFETY: plain values.
+                unsafe { SetWindowLongPtrW(hwnd, DWLP_MSGRESULT, answer) };
+                return 1;
+            }
+            // SAFETY: WM_NOTIFY's lparam points to an NMHDR.
             let header = unsafe { &*(lparam.0 as *const NMHDR) };
             let id = header.idFrom as u16;
             match header.code {

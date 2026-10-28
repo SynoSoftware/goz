@@ -14,6 +14,7 @@ use crate::win::controls::{Balloon, DatePicker, DropDownList, Edit, Tooltip};
 use crate::win::dialog::{self, DialogEnd, DialogMessage, DialogProc, Opened};
 use crate::win::gdi::{Font, TextMeter};
 use crate::win::{self, Hwnd};
+use gozler_core::query::NameMask;
 use gozler_fileops::{Destination, Policy};
 use std::cell::{Cell, OnceCell, RefCell};
 
@@ -811,6 +812,83 @@ impl DialogProc for NewFolder<'_> {
                 dialog::error_box(Some(dialog), &text, &self.title);
                 name.hwnd().focus();
                 name.select_all();
+                true
+            }
+            DialogMessage::Command { .. }
+            | DialogMessage::LinkActivated { .. }
+            | DialogMessage::DoubleClicked { .. }
+            | DialogMessage::Timer { .. }
+            | DialogMessage::Reply
+            | DialogMessage::Tree { .. }
+            | DialogMessage::Focus { .. }
+            | DialogMessage::KeysCaptured { .. }
+            | DialogMessage::Other => false,
+        }
+    }
+}
+
+/// Commander mode's Select files… and Unselect files…: the mask that names
+/// the files (DESIGN.md: Selecting entries).
+pub(super) struct SelectFiles {
+    /// The mask the box shows first.
+    text: String,
+    chosen: RefCell<Option<(String, NameMask)>>,
+}
+
+impl SelectFiles {
+    pub(super) fn new(text: &str) -> SelectFiles {
+        SelectFiles {
+            text: text.to_owned(),
+            chosen: RefCell::new(None),
+        }
+    }
+
+    /// The mask OK chose, as typed and as parsed.
+    pub(super) fn chosen(&self) -> Option<(String, NameMask)> {
+        self.chosen.take()
+    }
+
+    fn mask(dialog: Hwnd) -> Option<Edit> {
+        Edit::of_dialog(dialog, ControlId::SelectFilesMask.id())
+    }
+
+    /// OK stays disabled while the box holds no wildcard.
+    fn update_ok(dialog: Hwnd) {
+        let valid =
+            SelectFiles::mask(dialog).is_some_and(|mask| NameMask::parse(&mask.text()).is_ok());
+        if let Some(ok) = dialog::item(dialog, DialogItem::Ok.id()) {
+            ok.set_enabled(valid);
+        }
+    }
+}
+
+impl DialogProc for SelectFiles {
+    fn init(&self, dialog: Hwnd) -> Opened {
+        if let Some(mask) = SelectFiles::mask(dialog) {
+            mask.hwnd().set_text(&self.text);
+            mask.select_all();
+        }
+        SelectFiles::update_ok(dialog);
+        Opened {
+            focus: ControlId::SelectFilesMask.id(),
+            fonts: Vec::new(),
+        }
+    }
+
+    fn message(&self, dialog: Hwnd, message: DialogMessage) -> bool {
+        match message {
+            DialogMessage::Edited { .. } => {
+                SelectFiles::update_ok(dialog);
+                true
+            }
+            DialogMessage::Command { id } if id == DialogItem::Ok.id() => {
+                let text = SelectFiles::mask(dialog).map(|mask| mask.text());
+                if let Some(text) = text
+                    && let Ok(mask) = NameMask::parse(&text)
+                {
+                    self.chosen.replace(Some((text, mask)));
+                    dialog::end(dialog, DialogEnd::Ok);
+                }
                 true
             }
             DialogMessage::Command { .. }

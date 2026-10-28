@@ -11,6 +11,7 @@
 
 mod dates;
 pub mod engine;
+pub mod mask;
 pub mod order;
 pub mod parse;
 mod paths;
@@ -19,6 +20,7 @@ pub(crate) mod wildcard;
 
 pub use dates::{DateField, DateRange, QueryStart};
 pub use engine::{CompiledQuery, MatchSums, MatchedParts, SizeOverflow, Totals, extension};
+pub use mask::{EmptyMask, MaskScratch, NameMask};
 pub use parse::{
     Clause, Kind, Malformed, ParseOptions, ParsedQuery, QueryError, SIZE_WORDS, SizeRange,
     SizeWord, Term, TermMatch, Test, parse_query, parse_query_with, regex_test,

@@ -688,6 +688,7 @@ job's progress and Cancel controls. The tooltip retains all drive details.
 | C31 | Paste | the list is focused, the window owns the file operations, the clipboard holds files, and exactly one folder row is selected and read | the clipboard's files, moved into the folder when they were cut and copied when they were copied (see "Copy"); `Ctrl+V` in the list runs it |
 | C32 | File operations | the window owns the file operations | opens the shared File transfers pane |
 | C33 | Commander | always, checked while Commander mode shows | switches between Search and Commander mode (see "Commander mode") |
+| C37 | Clear selection | rows are selected | the list's selection; in Search's list `Num -` runs it, and `Num +` then selects the same rows again while nothing else has changed the selection, so a key pressed by mistake costs nothing |
 | C34 | Synchronize folders… | the window owns the file operations | compares explicit source and destination folders, then offers Synchronize; no default shortcut |
 
 Copy to folder…, Move to folder… and Commander have no default shortcut, because File Explorer has none for the first two and `F5` is Refresh in Search. `Delete`, `Shift+Delete`, `Ctrl+X` and `Ctrl+V` are keys of the list, not accelerators (window rule 8), so in the search box they keep deleting, cutting and pasting text. `Esc` never stops a file operation, because one stray key would leave a copy half done; File > Cancel and the status bar's Cancel do. Select all reaches rows the person never saw, up to 100,000 (`S4`), so the Delete question gives the count.
@@ -699,7 +700,7 @@ Open, Open file location and Explore stop at 15 entries, because File Explorer a
 Groups are separated by a separator, in this order:
 
 - **File:** Open, Open file location, Properties | Copy to folder…, Move to folder…, Delete | Synchronize folders… | Export results…, Cancel | Settings… | Exit
-- **Edit:** Cut, Copy, Paste, Copy path, Copy name, Copy folder | Select all | Find. Cut, Copy and Paste are in File Explorer's order.
+- **Edit:** Cut, Copy, Paste, Copy path, Copy name, Copy folder | Select all, Clear selection | Find. Cut, Copy and Paste are in File Explorer's order.
 - **View:** Commander | Filters, Inspector, Columns | Sort by | Refresh | File operations
 - **Help:** Search syntax | About Gozler
 - **Language,** aligned right on the menu bar (`MFT_RIGHTJUSTIFY`): Windows default | each shipped language by its own name
@@ -1238,6 +1239,8 @@ Search's list and a panel's keep the focused row, the cursor, apart from the sel
 | `Shift`+click | select the rows from the focused row to the clicked one |
 | a right-click | on a row that is not selected: clear the selection and focus the row, as File Explorer does; on a selected row: focus it and keep the selection; then open the context menu |
 | `Esc`, Edit > Clear selection | clear the whole selection (**Owner decision**), because every delete is permanent, so a forgotten selection must take one key to drop |
+| `Num +`, Edit > Select files… | select every file whose name a mask matches, as Total Commander's Select group does: wildcards apart by `;`, such as `*.txt;*.md`, matched without regard to case, where `*.*` is every file. Folders keep their state, as in Total Commander. The box shows the last mask the window was given, `*.*` at first. The number pad's keys are other keys than the main keyboard's `+` and `-`, which still type into quick search |
+| `Num -`, Edit > Unselect files… | clear every file that a mask matches, as `Num +` selects them |
 
 - **The selection is cleared** when the panel shows another folder, and when the person submits a copy, a move or a delete of it, as in Total Commander, because the rows of a move or a delete leave the panel.
 - **Search's list and a search panel use the same keys and the same list selection.** A search panel's selection is read from gozlerd, as Search's is.
@@ -1324,6 +1327,8 @@ A row of push buttons under the panels: `F3 View`, `F4 Edit`, `F5 Copy`, `F6 Mov
 | Find | `Ctrl+F` | always | the active panel (see "Search in a panel") |
 | Open, Properties | `Enter` on a file in a folder panel; none | as in Search | the focused row, or the selected entries |
 | Select all | `Ctrl+A` | always | the panel's entries, or the focused box's text |
+| Select files… | `Num +` | the panel lists a folder | the files whose names the mask matches (see "Selecting entries") |
+| Unselect files… | `Num -` | the panel lists a folder | as Select files…, clearing them |
 | Clear selection | `Esc` | an entry is selected | the panel's selection |
 | Refresh | `Ctrl+R` | always | the panel's folder and its sizes, or its search |
 
@@ -1359,6 +1364,7 @@ Commander mode has no clipboard commands. `Ctrl+C`, `Ctrl+X` and `Ctrl+V` in the
 | `Enter`, `Backspace`, `Esc`, arrows, `PgUp`, `PgDn`, `Home`, `End` | as "Moving around" says | list | the list's own |
 | `Ctrl+Left`, `Ctrl+Right` | as "Moving around" says | list | — |
 | `Insert`, `Space`, `Shift`+arrows | as "Selecting entries" says | list | — |
+| `Num +`, `Num -` | Select files…, Unselect files… | list | `Num -` clears the selection and `Num +` selects it again (C37) |
 | a character, `Alt`+a character | quick search | list | — |
 | `Tab` | the other panel's list | list, path box and search box | the next control |
 
@@ -1413,7 +1419,7 @@ rows publish and retire together, including after watch and taken-entry changes.
 The menus follow Search's (see "Menus"): File acts on the selected entries and the window, Edit on the selection, View on what the window shows. The items of the menu bar show their keys, so the menus teach the keys as the key bar does.
 
 - **File:** Open, View, Edit, Properties | Copy to folder…, Move to folder…, New folder…, Delete | Synchronize folders… | Cancel | Settings… | Exit. Edit is disabled, as in the key bar. Cancel stops the job that the status bar shows, as its Cancel does.
-- **Edit:** Select all, Clear selection | Find
+- **Edit:** Select all, Select files…, Unselect files…, Clear selection | Find
 - **View:** Commander | Sort by ▸ | Refresh | File operations
 - **Help** and **Language** as in Search.
 - **The context menu on a row:** Open, View | Copy to folder…, Move to folder…, Delete | Properties. The context menu on the empty area of a list: New folder… | Refresh.

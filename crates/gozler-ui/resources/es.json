@@ -60,7 +60,9 @@
     "clear_selection": "&Quitar selección",
     "view": "&Ver",
     "edit": "&Editar",
-    "new_folder": "&Nueva carpeta…"
+    "new_folder": "&Nueva carpeta…",
+    "select_files": "Seleccionar arc&hivos…",
+    "unselect_files": "&Deseleccionar archivos…"
   },
   "column": {
     "name": "&Nombre",
@@ -1018,6 +1020,11 @@
     "name": "&Nombre:",
     "create": "Crear",
     "exists": "{0} ya está en esta carpeta. Elige otro nombre."
+  },
+  "select_files": {
+    "select_title": "Seleccionar archivos",
+    "unselect_title": "Deseleccionar archivos",
+    "mask": "&Archivos, como *.txt o *.jpg;*.png:"
   },
   "name": {
     "characters": "Un nombre de archivo no puede contener ninguno de los caracteres siguientes: \\ / : * ? \" < > |",

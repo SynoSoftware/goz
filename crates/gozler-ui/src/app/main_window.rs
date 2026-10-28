@@ -1803,7 +1803,19 @@ impl MainWindow {
                         };
                     }
                 },
-                CommandId::ClearSelection => return self.panel(active).list.deselect_all(),
+                CommandId::ClearSelection => return self.clear_selection(list),
+                CommandId::SelectFiles => {
+                    return self
+                        .controls()
+                        .panels
+                        .select_files(self, hwnd, active, true);
+                }
+                CommandId::UnselectFiles => {
+                    return self
+                        .controls()
+                        .panels
+                        .select_files(self, hwnd, active, false);
+                }
                 CommandId::Find => {
                     if mode == Mode::Commander {
                         return self.controls().panels.find_in_panel(self, hwnd, active);

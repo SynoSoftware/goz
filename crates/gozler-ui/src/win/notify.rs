@@ -25,9 +25,9 @@ use windows::Win32::UI::Controls::{
     LVIR_BOUNDS, LVIR_ICON, LVIR_LABEL, LVIS_DROPHILITED, LVIS_FOCUSED, LVIS_SELECTED, LVITEMW,
     LVM_GETITEMRECT, LVM_GETITEMW, LVM_GETSUBITEMRECT, LVN_BEGINDRAG, LVN_BEGINRDRAG,
     LVN_COLUMNCLICK, LVN_GETDISPINFOW, LVN_GETINFOTIPW, LVN_ITEMACTIVATE, LVN_ITEMCHANGED,
-    LVN_ODCACHEHINT, LVN_ODSTATECHANGED, NM_CLICK, NM_CUSTOMDRAW, NM_DBLCLK, NM_KILLFOCUS,
-    NM_RCLICK, NM_SETFOCUS, NMHDR, NMHEADERW, NMLISTVIEW, NMLVCACHEHINT, NMLVCUSTOMDRAW,
-    NMLVDISPINFOW, NMLVGETINFOTIPW, NMLVODSTATECHANGE, NMMOUSE,
+    LVN_ODCACHEHINT, LVN_ODFINDITEMW, LVN_ODSTATECHANGED, NM_CLICK, NM_CUSTOMDRAW, NM_DBLCLK,
+    NM_KILLFOCUS, NM_RCLICK, NM_SETFOCUS, NMHDR, NMHEADERW, NMLISTVIEW, NMLVCACHEHINT,
+    NMLVCUSTOMDRAW, NMLVDISPINFOW, NMLVGETINFOTIPW, NMLVODSTATECHANGE, NMMOUSE,
 };
 use windows::Win32::UI::WindowsAndMessaging::SendMessageW;
 
@@ -136,6 +136,21 @@ pub(crate) enum ListNotify<'a> {
     ColumnDragEnded,
     ColumnWidthChanged(usize),
     Other,
+}
+
+/// The answer to `LVN_ODFINDITEMW`, which an owner-data list sends to ask
+/// for the row that starts with a typed character, or `None` for another
+/// notification. Gozler's lists find rows by quick search or not at all,
+/// so the answer is -1, no row: the list reads an unanswered 0 as row 0
+/// and selects it.
+///
+/// # Safety
+/// `lparam` is the NMHDR of a WM_NOTIFY, valid for the length of the
+/// message.
+pub(super) unsafe fn typed_row_answer(lparam: LPARAM) -> Option<isize> {
+    // SAFETY: the caller's promise.
+    let code = unsafe { (*(lparam.0 as *const NMHDR)).code };
+    (code == LVN_ODFINDITEMW).then_some(-1)
 }
 
 impl ListView {

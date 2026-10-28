@@ -28,9 +28,10 @@ use super::selection::{DragEntry, RowSelection, wide_path};
 use super::work::{self, Pass, Retirement};
 use gozler_core::fold::fold;
 use gozler_core::proto::ResultItem;
-use gozler_core::query::QueryStart;
+use gozler_core::query::{MaskScratch, NameMask, QueryStart};
 use gozler_core::types::{SortDir, SortKey, SortSpec};
 use gozler_core::winpath::{absolute, is_root, parent_of};
+use gozler_core::wtf8;
 use gozler_fileops::{OperationId, Request, Taken};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -2110,6 +2111,50 @@ impl Panels {
         });
         panel.clear();
         searched
+    }
+
+    /// Select files… and Unselect files…: `side`'s place with every file
+    /// whose name `mask` matches selected, or unselected when not `select`;
+    /// folders keep their state, as in Total Commander. `None` when the
+    /// panel lists no folder.
+    pub(crate) fn select_matching(
+        &mut self,
+        side: Side,
+        mask: &NameMask,
+        select: bool,
+    ) -> Option<Place> {
+        let panel = self.panel(side);
+        if !matches!(panel.view, View::Folder) {
+            return None;
+        }
+        let mut scratch = MaskScratch::default();
+        let mut name = Vec::new();
+        let mut was = panel.selected.iter().peekable();
+        let mut selected: Vec<Range<u64>> = Vec::new();
+        let mut count = 0;
+        for row in 0..panel.count() {
+            while was.next_if(|rows| rows.end <= row).is_some() {}
+            let mut is = was.peek().is_some_and(|rows| rows.contains(&row));
+            if let Some(entry) = panel.entry(row)
+                && !entry.is_folder()
+            {
+                name.clear();
+                wtf8::from_utf16(&entry.name, &mut name);
+                if mask.matches(&name, &mut scratch) {
+                    is = select;
+                }
+            }
+            if !is {
+                continue;
+            }
+            count += 1;
+            match selected.last_mut() {
+                Some(last) if last.end == row => last.end = row + 1,
+                _ => selected.push(row..row + 1),
+            }
+        }
+        self.set_selected(side, RowSelection::new(selected, count));
+        Some(self.place(side))
     }
 
     /// The list's selected rows, as it tells them; whether they changed.
