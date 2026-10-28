@@ -455,10 +455,6 @@ impl CaptionTable {
                         "settings_keyboard.global_shortcuts",
                     ),
                     (
-                        Control(C::KeyboardShortcutHint),
-                        "settings_keyboard.shortcut_hint",
-                    ),
-                    (
                         Control(C::KeyboardCommandsGroup),
                         "settings_keyboard.commands",
                     ),

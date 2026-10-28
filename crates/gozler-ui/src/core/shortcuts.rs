@@ -113,8 +113,6 @@ pub(crate) enum Refusal {
     Control,
     /// The key types a character or opens a menu, such as `K` or `Alt+F`.
     Typing,
-    /// Another command has it.
-    Taken(CommandId),
 }
 
 impl Refusal {
@@ -124,10 +122,6 @@ impl Refusal {
         match self {
             Refusal::Control => strings.format("settings_keyboard.refused_control", &[&key]),
             Refusal::Typing => strings.format("settings_keyboard.refused_typing", &[&key]),
-            Refusal::Taken(other) => strings.format(
-                "settings_keyboard.refused_taken",
-                &[&key, &command_place(strings, other)],
-            ),
         }
     }
 }
@@ -196,29 +190,32 @@ impl CommandShortcuts {
             .find(|c| self.of(*c).contains(&keystroke))
     }
 
-    /// Whether `command` may have `keystroke`, beside the shortcuts it has.
-    pub(crate) fn check(&self, command: CommandId, keystroke: Keystroke) -> Result<(), Refusal> {
+    /// Whether a command may have `keystroke`. A key that another command
+    /// has is allowed, because [`CommandShortcuts::add`] moves it.
+    pub(crate) fn check(keystroke: Keystroke) -> Result<(), Refusal> {
         if belongs_to_a_control(keystroke) {
             return Err(Refusal::Control);
         }
         if !leaves_typing_alone(keystroke) {
             return Err(Refusal::Typing);
         }
-        match self.owner(keystroke) {
-            Some(other) if other != command => Err(Refusal::Taken(other)),
-            _ => Ok(()),
-        }
+        Ok(())
     }
 
     /// Gives `command` `keystroke` too, or in place of `replaced`, after
-    /// [`CommandShortcuts::check`] allows it.
+    /// [`CommandShortcuts::check`] allows it. A command that had the key
+    /// loses it and is returned, so two commands never share a key.
     pub(crate) fn add(
         &mut self,
         command: CommandId,
         keystroke: Keystroke,
         replaced: Option<Keystroke>,
-    ) -> Result<(), Refusal> {
-        self.check(command, keystroke)?;
+    ) -> Result<Option<CommandId>, Refusal> {
+        Self::check(keystroke)?;
+        let moved = self.owner(keystroke).filter(|owner| *owner != command);
+        if let Some(owner) = moved {
+            self.remove(owner, keystroke);
+        }
         let mut keys = self.of(command).to_vec();
         match replaced.and_then(|old| keys.iter().position(|k| *k == old)) {
             Some(index) => keys[index] = keystroke,
@@ -232,7 +229,7 @@ impl CommandShortcuts {
             }
         }
         self.set(command, unique);
-        Ok(())
+        Ok(moved)
     }
 
     pub(crate) fn remove(&mut self, command: CommandId, keystroke: Keystroke) {
@@ -297,7 +294,9 @@ impl<'de> Deserialize<'de> for CommandShortcuts {
         let valid = listed.iter().all(|(command, _)| {
             let keys = table.of(*command);
             keys.iter().enumerate().all(|(index, key)| {
-                !keys[..index].contains(key) && table.check(*command, *key).is_ok()
+                !keys[..index].contains(key)
+                    && CommandShortcuts::check(*key).is_ok()
+                    && table.owner(*key) == Some(*command)
             })
         });
         if valid {
@@ -449,10 +448,11 @@ mod tests {
         let defaults = CommandShortcuts::default();
         for (command, _) in listed_commands() {
             for keystroke in defaults.of(command) {
+                assert_eq!(CommandShortcuts::check(*keystroke), Ok(()), "{keystroke:?}");
                 assert_eq!(
-                    defaults.check(command, *keystroke),
-                    Ok(()),
-                    "{command:?} {keystroke:?}"
+                    defaults.owner(*keystroke),
+                    Some(command),
+                    "{command:?} shares {keystroke:?}"
                 );
             }
         }
@@ -476,20 +476,19 @@ mod tests {
             ("Ctrl+V", Refusal::Control),
             ("Ctrl+Home", Refusal::Control),
         ] {
-            assert_eq!(
-                table.check(CommandId::Copy, key(name)),
-                Err(refusal),
-                "{name}"
-            );
+            assert_eq!(CommandShortcuts::check(key(name)), Err(refusal), "{name}");
         }
+        // A key that another command has moves, so the two never share it.
+        let mut moved = table.clone();
         assert_eq!(
-            table.check(CommandId::Copy, key("Ctrl+E")),
-            Err(Refusal::Taken(CommandId::Find))
+            moved.add(CommandId::Copy, key("Ctrl+E"), None),
+            Ok(Some(CommandId::Find))
         );
+        assert!(!moved.of(CommandId::Find).contains(&key("Ctrl+E")));
         // A function key alone and Alt with a key that is not a letter are
         // free of typing.
-        assert_eq!(table.check(CommandId::Copy, key("F3")), Ok(()));
-        assert_eq!(table.check(CommandId::Copy, key("Alt+Down")), Ok(()));
+        assert_eq!(CommandShortcuts::check(key("F3")), Ok(()));
+        assert_eq!(CommandShortcuts::check(key("Alt+Down")), Ok(()));
         // The list finds a command by its new key.
         let found: Vec<CommandId> = command_rows(&strings, &table, [None, None], " ctrl+k")
             .into_iter()

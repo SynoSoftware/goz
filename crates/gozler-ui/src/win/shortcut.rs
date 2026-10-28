@@ -28,7 +28,8 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
     GetAsyncKeyState, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBD_EVENT_FLAGS, KEYBDINPUT,
     KEYEVENTF_KEYUP, MOD_ALT, MOD_CONTROL, MOD_NOREPEAT, MOD_SHIFT, RegisterHotKey, SendInput,
     UnregisterHotKey, VIRTUAL_KEY, VK_CONTROL, VK_ESCAPE, VK_LCONTROL, VK_LMENU, VK_LSHIFT,
-    VK_LWIN, VK_MENU, VK_RCONTROL, VK_RETURN, VK_RMENU, VK_RSHIFT, VK_RWIN, VK_SHIFT, VK_TAB,
+    VK_LWIN, VK_MENU, VK_RCONTROL, VK_RETURN, VK_RMENU, VK_RSHIFT, VK_RWIN, VK_SHIFT, VK_SNAPSHOT,
+    VK_TAB,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CallNextHookEx, HC_ACTION, HOOKPROC, KBDLLHOOKSTRUCT, MSG, MWMO_INPUTAVAILABLE,
@@ -554,7 +555,12 @@ unsafe extern "system" fn capture_hook(code: i32, wparam: WPARAM, lparam: LPARAM
     .contains(&key);
     let alone = !(windows || ctrl || alt || shift);
     // The key this hook sends passes too, or the shell would not see it.
-    if modifier || [VK_TAB, VK_ESCAPE, UNASSIGNED].contains(&key) || (key == VK_RETURN && alone) {
+    // Print Screen passes with any modifier, so a screenshot still works
+    // while the box has the focus; no shortcut can use it.
+    if modifier
+        || [VK_TAB, VK_ESCAPE, VK_SNAPSHOT, UNASSIGNED].contains(&key)
+        || (key == VK_RETURN && alone)
+    {
         return next();
     }
     let mut held = 0;

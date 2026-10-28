@@ -3041,21 +3041,12 @@ try {
         }
         finally { if ($held) { [void][GozlerProbe.Win]::UnregisterHotKey(0, 0x7A) } }
 
-        # Keep running off: closing ends Gozler, also with a shortcut, and
-        # the Keyboard page says that the shortcut works only while the
-        # window is open (C7).
+        # Keep running off: closing ends Gozler, also with a shortcut (C7).
         Write-Settings '{ "settings": { "keep_running": false, "show_shortcut": "Ctrl+Alt+Shift+F12" } }'
         $window = Start-Window
-        $dialog = Open-Settings $window
-        Show-SettingsPage $dialog 'keyboard'
-        $note = Dialog-Control $dialog 'IDC_KEYBOARD_CLOSED_NOTE' 'Static'
-        $noteText = [GozlerProbe.Win]::ControlText($note)
-        [void](Cancel-Dialog $dialog)
         [void][GozlerProbe.Win]::PostMessageW($windowOf[$window.Id], $WM_CLOSE, 0, 0)
         $ended = $window.WaitForExit(10000)
-        Check 'keep running off: closing ends Gozler' ($ended -and $noteText -eq (Caption 'settings_keyboard.closed_note')) ([ordered]@{
-                ended = $ended; note = $noteText
-            })
+        Check 'keep running off: closing ends Gozler' $ended ([ordered]@{ ended = $ended })
 
         # Select the search text when the window is activated: on, activation
         # from another program selects the search text, and activation from

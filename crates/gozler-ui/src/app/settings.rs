@@ -14,7 +14,7 @@ use crate::core::captions::{
     self, ButtonIcon, DialogCaptions, DialogItem, IndexCaptions, JobCaption, JobProgress,
     SETTINGS_GROUPS, failure_text,
 };
-use crate::core::commands::{CommandId, Key, Keystroke};
+use crate::core::commands::{CommandId, Key, Keystroke, kept_by_commander};
 use crate::core::dates::DateFormat;
 use crate::core::fetch::Purpose;
 use crate::core::glyph::Glyph;
@@ -183,7 +183,7 @@ const SHOW_SHORTCUTS: [(Mode, ControlId, ControlId); 2] = [
         ControlId::KeyboardClear,
     ),
     (
-        Mode::TwoPanels,
+        Mode::Commander,
         ControlId::KeyboardCommanderShortcut,
         ControlId::KeyboardCommanderClear,
     ),
@@ -192,7 +192,7 @@ const SHOW_SHORTCUTS: [(Mode, ControlId, ControlId); 2] = [
 fn shortcut_control(mode: Mode) -> ControlId {
     match mode {
         Mode::Search => ControlId::KeyboardShortcut,
-        Mode::TwoPanels => ControlId::KeyboardCommanderShortcut,
+        Mode::Commander => ControlId::KeyboardCommanderShortcut,
     }
 }
 
@@ -333,6 +333,9 @@ pub(super) struct SettingsDialog<'a> {
     /// change nothing.
     filling: Cell<bool>,
     balloon: OnceCell<Balloon>,
+    /// The balloon a change asked for, beside its control, which shows after
+    /// the message that made the change hides the previous one.
+    note: RefCell<Option<(Hwnd, String)>>,
     /// The keys pressed while the shortcut box has the focus, which reach
     /// the dialog instead of the box (DESIGN.md: The Keyboard page).
     capture: Cell<Option<(Mode, Capture)>>,
@@ -380,6 +383,7 @@ impl<'a> SettingsDialog<'a> {
             seen: RefCell::new(String::new()),
             filling: Cell::new(false),
             balloon: OnceCell::new(),
+            note: RefCell::new(None),
             capture: Cell::new(None),
             resets: Cell::new(false),
             saving: RefCell::new(None),
@@ -568,7 +572,6 @@ impl<'a> SettingsDialog<'a> {
             SettingsPage::Include => self.fill_include(values.include.as_mut()),
             SettingsPage::Visibility => self.fill_visibility(None),
         });
-        self.show_closed_note();
     }
 
     /// Sets the Performance page's controls from `speed`.
@@ -1136,20 +1139,6 @@ impl<'a> SettingsDialog<'a> {
         self.update_apply(dialog);
     }
 
-    /// The Keyboard page says under the shortcut whether it works after the
-    /// window closes, which follows Keep Gozler running on the General page.
-    fn show_closed_note(&self) {
-        let keeps_running = self.draft.borrow().edited.choices.keep_running;
-        let key = if keeps_running {
-            "settings_keyboard.running_note"
-        } else {
-            "settings_keyboard.closed_note"
-        };
-        if let Some(note) = self.control(SettingsPage::Keyboard, ControlId::KeyboardClosedNote) {
-            note.set_text(self.strings.text(key));
-        }
-    }
-
     /// Lists the commands that the filter keeps, with `selected` selected,
     /// or the first.
     fn fill_commands(&self, selected: Option<CommandId>) {
@@ -1190,7 +1179,7 @@ impl<'a> SettingsDialog<'a> {
                 .registered(if command == CommandId::ShowSearch {
                     Mode::Search
                 } else {
-                    Mode::TwoPanels
+                    Mode::Commander
                 })
                 .map(|show| show.text(&self.strings))
                 .into_iter()
@@ -1263,6 +1252,13 @@ impl<'a> SettingsDialog<'a> {
                 clear.set_enabled(shortcut.is_some());
             }
         }
+        self.show_shortcut_hint();
+    }
+
+    /// The line under the shortcut boxes, which says what taking a Windows
+    /// key over does for the shortcut being edited and is empty otherwise.
+    /// Its height is fixed, so the page never moves while the person types.
+    fn show_shortcut_hint(&self) {
         let capture = self.capture.take();
         let mode = capture.as_ref().map_or(Mode::Search, |(mode, _)| *mode);
         self.capture.set(capture);
@@ -1291,9 +1287,7 @@ impl<'a> SettingsDialog<'a> {
                 };
                 format!("{warning} {detail}")
             } else {
-                self.strings
-                    .text("settings_keyboard.shortcut_hint")
-                    .to_owned()
+                String::new()
             };
             hint.set_text(&text);
         }
@@ -1303,20 +1297,40 @@ impl<'a> SettingsDialog<'a> {
         let mut draft = self.draft.borrow_mut();
         match mode {
             Mode::Search => draft.edited.choices.show_shortcut = shortcut,
-            Mode::TwoPanels => draft.edited.choices.commander_shortcut = shortcut,
+            Mode::Commander => draft.edited.choices.commander_shortcut = shortcut,
         }
         drop(draft);
         self.show_shortcut();
     }
 
     /// Takes the keys pressed in the shortcut box: `Backspace` alone
-    /// removes the shortcut, as the line under the box says, and keys that
-    /// cannot show Gozler, `Win+L`, leave it as it is.
+    /// removes the shortcut, and keys that cannot show Gozler, `Win+L`,
+    /// leave it as it is. Keys that the other box holds move here, because
+    /// one shortcut cannot show both modes, and a balloon on the other box
+    /// says where they went.
     fn keys_captured(&self, mode: Mode, windows: bool, keystroke: Keystroke) {
         if !windows && keystroke == Keystroke::plain(Key::Backspace) {
             self.set_shortcut(mode, None);
         } else if let Some(shortcut) = ShowShortcut::pressed(windows, keystroke) {
+            let (other, command) = match mode {
+                Mode::Search => (Mode::Commander, "command.show_search"),
+                Mode::Commander => (Mode::Search, "command.show_commander"),
+            };
+            let moved = self.draft.borrow().edited.choices.show_shortcut(other) == Some(shortcut);
+            if moved {
+                self.set_shortcut(other, None);
+            }
             self.set_shortcut(mode, Some(shortcut));
+            if moved && let Some(cleared) = self.shortcut_box(other) {
+                let text = self.strings.format(
+                    "settings_keyboard.shortcut_moved",
+                    &[
+                        &shortcut.text(&self.strings),
+                        &without_access_key(self.strings.text(command)),
+                    ],
+                );
+                self.note.replace(Some((cleared.hwnd(), text)));
+            }
         }
     }
 
@@ -1608,6 +1622,16 @@ impl<'a> SettingsDialog<'a> {
                 }
             }
             SettingsPage::Keyboard => {
+                if let Some(page) = self.page(SettingsPage::Keyboard) {
+                    for control in [
+                        ControlId::KeyboardShortcut,
+                        ControlId::KeyboardCommanderShortcut,
+                    ] {
+                        if let Some(edit) = Edit::of_dialog(page, control.id()) {
+                            edit.set_cue(text("settings_keyboard.shortcut_hint"));
+                        }
+                    }
+                }
                 if let Some(list) = self.command_list() {
                     list.set_columns(&[
                         (text("settings_keyboard.command_column"), 62, false),
@@ -1694,8 +1718,9 @@ impl<'a> SettingsDialog<'a> {
 
     /// Gives `page`, whose window is `hwnd`, its tooltip: its Reset says
     /// which settings it restores, the Use Total Commander link says what it
-    /// does, the Service group's fix buttons say what their fix does, and
-    /// Clear says its name, because it can show only its icon.
+    /// does, the Service group's fix buttons say what their fix does, Clear
+    /// says its name, because it can show only its icon, and the shortcut
+    /// boxes say when their shortcut works.
     fn add_tooltips(&self, page: SettingsPage, hwnd: Hwnd) {
         let text = |key: &'static str| self.strings.text(key);
         let clear = without_access_key(text("button.clear"));
@@ -1711,6 +1736,14 @@ impl<'a> SettingsDialog<'a> {
             SettingsPage::Keyboard => &[
                 (ControlId::KeyboardClear, clear.as_str()),
                 (ControlId::KeyboardCommanderClear, clear.as_str()),
+                (
+                    ControlId::KeyboardShortcut,
+                    text("settings_keyboard.shortcut_tip"),
+                ),
+                (
+                    ControlId::KeyboardCommanderShortcut,
+                    text("settings_keyboard.shortcut_tip"),
+                ),
             ],
             // `refresh_index` gives these their tips, but Rebuild's.
             SettingsPage::Index => &[
@@ -2242,8 +2275,7 @@ impl<'a> SettingsDialog<'a> {
         } else {
             None
         };
-        let shortcuts = self.draft.borrow().edited.choices.shortcuts.clone();
-        let state = CommandShortcut::new(&self.strings, command, replaced, shortcuts);
+        let state = CommandShortcut::new(&self.strings, replaced);
         let captions = DialogCaptions::command_shortcut(
             &self.strings,
             &command_place(&self.strings, command),
@@ -2263,8 +2295,18 @@ impl<'a> SettingsDialog<'a> {
             .choices
             .shortcuts
             .add(command, keystroke, replaced);
-        if added.is_ok() {
+        if let Ok(moved) = added {
             self.fill_commands(Some(command));
+            if let (Some(from), Some(keys)) = (moved, self.key_list()) {
+                let text = self.strings.format(
+                    "settings_keyboard.shortcut_moved_from",
+                    &[
+                        &keystroke.text(&self.strings),
+                        &command_place(&self.strings, from),
+                    ],
+                );
+                self.note.replace(Some((keys.hwnd(), text)));
+            }
             let position = {
                 let draft = self.draft.borrow();
                 draft
@@ -2432,7 +2474,6 @@ impl<'a> SettingsDialog<'a> {
                 .check_box(page, control)
                 .is_some_and(CheckBox::is_checked);
             *value(&mut self.draft.borrow_mut().edited) = checked;
-            self.show_closed_note();
         } else if let Some((_, shown)) = VISIBILITY_BUTTONS.into_iter().find(|(c, _)| is(id, *c)) {
             if let Some(item) = self.selected_context_item() {
                 *self
@@ -2754,6 +2795,9 @@ impl DialogProc for SettingsDialog<'_> {
         if handled {
             if let Some(balloon) = self.balloon.get() {
                 balloon.hide();
+                if let Some((control, text)) = self.note.take() {
+                    balloon.show(control, &text);
+                }
             }
             self.update_apply(dialog);
         }
@@ -2851,27 +2895,17 @@ impl DialogProc for SettingsDialog<'_> {
 /// Settings > Keyboard's Add… and Edit… open (DESIGN.md: The Keyboard page).
 struct CommandShortcut<'a> {
     strings: &'a Strings,
-    command: CommandId,
     /// The shortcut Edit… changes; `None` for Add….
     replaced: Option<Keystroke>,
-    /// The page's shortcuts, which the new one must not repeat.
-    shortcuts: CommandShortcuts,
     balloon: OnceCell<Balloon>,
     chosen: Cell<Option<Keystroke>>,
 }
 
 impl<'a> CommandShortcut<'a> {
-    fn new(
-        strings: &'a Strings,
-        command: CommandId,
-        replaced: Option<Keystroke>,
-        shortcuts: CommandShortcuts,
-    ) -> CommandShortcut<'a> {
+    fn new(strings: &'a Strings, replaced: Option<Keystroke>) -> CommandShortcut<'a> {
         CommandShortcut {
             strings,
-            command,
             replaced,
-            shortcuts,
             balloon: OnceCell::new(),
             chosen: Cell::new(None),
         }
@@ -2925,9 +2959,21 @@ impl DialogProc for CommandShortcut<'_> {
 
     fn message(&self, dialog: Hwnd, message: DialogMessage) -> bool {
         match message {
+            // A key that Commander mode keeps is allowed, and the balloon
+            // says so only when the person picks one.
             DialogMessage::Edited { .. } => {
                 if let Some(balloon) = self.balloon.get() {
                     balloon.hide();
+                }
+                if let Some(hotkey) = Self::hotkey(dialog)
+                    && let HotkeyValue::Keys(keystroke) = hotkey.value()
+                    && kept_by_commander(keystroke)
+                    && let Some(balloon) = self.balloon.get()
+                {
+                    balloon.show(
+                        hotkey.hwnd(),
+                        self.strings.text("settings_keyboard.commander_keeps"),
+                    );
                 }
                 Self::update_ok(dialog);
                 true
@@ -2939,17 +2985,15 @@ impl DialogProc for CommandShortcut<'_> {
                     HotkeyValue::Unsupported => {
                         self.refuse(dialog, self.strings.text("settings_keyboard.unsupported"));
                     }
-                    HotkeyValue::Keys(keystroke) => {
-                        match self.shortcuts.check(self.command, keystroke) {
-                            Ok(()) => {
-                                self.chosen.set(Some(keystroke));
-                                dialog::end(dialog, DialogEnd::Ok);
-                            }
-                            Err(refusal) => {
-                                self.refuse(dialog, &refusal.message(self.strings, keystroke));
-                            }
+                    HotkeyValue::Keys(keystroke) => match CommandShortcuts::check(keystroke) {
+                        Ok(()) => {
+                            self.chosen.set(Some(keystroke));
+                            dialog::end(dialog, DialogEnd::Ok);
                         }
-                    }
+                        Err(refusal) => {
+                            self.refuse(dialog, &refusal.message(self.strings, keystroke));
+                        }
+                    },
                 }
                 true
             }
