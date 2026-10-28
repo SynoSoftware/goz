@@ -49,7 +49,7 @@ use crate::core::include::{
     AfterOk, IncludeDrive, SummaryRow, connected_drives, connected_volumes, include_drives,
     preview, summary_rows,
 };
-use crate::core::layout::column_sizing::{self, ColumnFit, ColumnSizing};
+use crate::core::layout::column_sizing::{ColumnFit, ColumnSizing};
 use crate::core::layout::{
     self, Body, CaptionWidths, ControlSizes, Dpi, FilterLayout, InspectorLayout, Layout,
     MessageArea, Px, Rect, ScrollRequest, Size, StatusLayout, ToolHeights,
@@ -671,19 +671,15 @@ impl MainWindow {
         controls.apply_glyphs(ToolHeights::new(dpi, TextMeter::new(&fonts.ui).height()));
         let (columns, order) = {
             let model = self.model.borrow();
-            let columns: Vec<(Column, Px)> = model
-                .columns()
-                .iter()
-                .map(|c| (*c, column_sizing::column_width(*c, dpi)))
-                .collect();
-            (columns, model.column_order())
+            (model.columns().to_vec(), model.column_order())
         };
-        for (index, (column, width)) in columns.into_iter().enumerate() {
+        // The fill when the window shows gives the widths.
+        for (index, column) in columns.into_iter().enumerate() {
             controls.search.list.insert_column(
                 index,
                 &ListColumn {
                     header: "",
-                    width,
+                    width: Px(0),
                     right_aligned: column.row().right_aligned,
                 },
             );
@@ -1469,10 +1465,10 @@ impl MainWindow {
         });
         let panel_widths = match &layout.body {
             Body::Commander { panels, .. } => std::array::from_fn(|index| {
-                let list = controls.panels.sides[index].list.hwnd();
-                let old_width = list.screen_rect().width;
+                let list = controls.panels.sides[index].list;
+                let old_width = list.hwnd().screen_rect().width;
                 (
-                    list.client_size().width + panels[index].list.width - old_width,
+                    list.fill_width() + panels[index].list.width - old_width,
                     panels[index].list.width < old_width,
                 )
             }),
@@ -1489,7 +1485,7 @@ impl MainWindow {
                     if before_move {
                         narrows.then_some(planned)
                     } else {
-                        let actual = controls.panels.sides[index].list.hwnd().client_size().width;
+                        let actual = controls.panels.sides[index].list.fill_width();
                         (!narrows || actual != planned).then_some(actual)
                     }
                 });
@@ -1497,7 +1493,7 @@ impl MainWindow {
                 if controls.search.column_sizing.borrow().is_dragging() {
                     for (side, width) in Side::BOTH.into_iter().zip(widths) {
                         if let Some(width) = width {
-                            controls.panels.fill_name_column_at(self, side, width);
+                            controls.panels.fill_name_column_at(side, width);
                         }
                     }
                 } else {
@@ -4388,6 +4384,9 @@ impl WindowProc for MainWindow {
             }
             Message::ExitSizeMove => {
                 self.controls().search.end_sizing(self);
+                if self.model.borrow().mode() == Mode::Commander {
+                    self.controls().panels.fill_panel_columns(self);
+                }
                 None
             }
             Message::DpiChanged { dpi, suggested } => {

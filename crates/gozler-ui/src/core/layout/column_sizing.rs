@@ -1,44 +1,37 @@
-//! Search's column widths: how a column fits its header and cells, how
-//! the fits fill the list's width, and when a fill happens (DESIGN.md:
-//! Results list). The window measures the texts and sets the widths that
-//! [`ColumnSizing`] answers with.
+//! Column widths: how a column fits its header and cells, how the fits
+//! fill the list's width, and when a fill of Search's list happens
+//! (DESIGN.md: Results list, A panel). The rules are TableView's, so a
+//! column's width comes only from what it shows. The window measures the
+//! texts and sets the widths that [`ColumnSizing`] and [`fill_widths`]
+//! answer with.
 
 use super::{Dip, Dpi, Px, cell_text_inset};
 use crate::core::model::Column;
-
-/// The width of `column` on a monitor of `dpi` until a fill gives it one.
-pub(crate) fn column_width(column: Column, dpi: Dpi) -> Px {
-    column.row().width.to_px(dpi)
-}
-
-/// The narrowest a fill makes a column, so its header still shows a few
-/// letters.
-const COLUMN_MIN_WIDTH: Dip = Dip(40);
 
 /// The space a header leaves on each side of its text.
 const HEADER_TEXT_MARGIN: Dip = Dip(6);
 
 /// What a column's header and the cells a fit measured ask of a fill
-/// (DESIGN.md: Results list). Each width is at least the header's and at
-/// least the narrowest a fill makes a column.
+/// (DESIGN.md: Results list).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct ColumnFit {
-    /// The width that shows every measured cell whole.
+    /// The width that shows the header and every measured cell whole.
     pub(crate) widest: Px,
-    /// The mean width of the measured cells, the column's share when the
-    /// list is too narrow for every widest width; the header's width when
-    /// no measured cell shows anything.
-    pub(crate) average: Px,
-    /// The narrowest a fill makes the column.
-    pub(crate) narrowest: Px,
+    /// No measured cell shows anything, so `widest` is the header's.
+    pub(crate) empty: bool,
+    /// Whether a fill may make the column narrower than `widest`.
+    pub(crate) shrinks: bool,
+    /// Whether a fill may make the column wider than `widest`.
+    pub(crate) grows: bool,
 }
 
 impl ColumnFit {
-    /// The fit of a column whose header text is `header` wide and whose
+    /// The fit of `column`, whose header text is `header` wide and whose
     /// measured cells that show anything have texts `texts` wide, in the
-    /// column `first` when it is the list's first, with each text starting
-    /// `label` after the column's left edge.
+    /// list's first column when `first`, with each text starting `label`
+    /// after the column's left edge.
     pub(crate) fn of(
+        column: Column,
         header: Px,
         texts: impl IntoIterator<Item = Px>,
         label: Px,
@@ -46,50 +39,18 @@ impl ColumnFit {
         dpi: Dpi,
     ) -> ColumnFit {
         let margin = HEADER_TEXT_MARGIN.to_px(dpi);
-        let narrowest = COLUMN_MIN_WIDTH.to_px(dpi);
-        let least = (header + margin + margin).max(narrowest);
-        let (mut widest, mut sum, mut count) = (least, 0_i64, 0_i64);
+        let mut widest = header + margin + margin;
+        let mut empty = true;
         for text in texts {
-            let cell = cell_width(text, label, first, dpi);
-            widest = widest.max(cell);
-            sum += i64::from(cell.0);
-            count += 1;
+            widest = widest.max(cell_width(text, label, first, dpi));
+            empty = false;
         }
-        let average = if count == 0 {
-            least
-        } else {
-            Px(i32::try_from(sum / count).expect("a mean of i32 widths fits in i32")).max(least)
-        };
+        let row = column.row();
         ColumnFit {
             widest,
-            average,
-            narrowest,
-        }
-    }
-
-    /// The fit of `column` before any row is read: its first width, as
-    /// though every column had content, so the first fill keeps the
-    /// columns' proportions until the rows arrive.
-    pub(crate) fn first(column: Column, dpi: Dpi) -> ColumnFit {
-        let width = column_width(column, dpi);
-        ColumnFit {
-            widest: width,
-            average: width,
-            narrowest: COLUMN_MIN_WIDTH.to_px(dpi),
-        }
-        .for_column(column)
-    }
-
-    /// This fit, kept at its widest when `column`'s cells are never cut
-    /// (`ColumnRow::whole`).
-    pub(crate) fn for_column(self, column: Column) -> ColumnFit {
-        if column.row().whole {
-            ColumnFit {
-                narrowest: self.widest,
-                ..self
-            }
-        } else {
-            self
+            empty,
+            shrinks: row.can_shrink,
+            grows: row.can_grow,
         }
     }
 }
@@ -103,70 +64,93 @@ pub(crate) fn cell_width(text: Px, label: Px, first: bool, dpi: Dpi) -> Px {
     label + inset + text + inset
 }
 
-/// The widths that make columns with these `fits` end at `width`
-/// (DESIGN.md: Results list): each column is
-/// `grow * clamp(share * average, narrowest, widest)`, where `share` makes
-/// the widths add up to `width` and `grow` is 1 until every column is at
-/// its widest, then the factor that takes them all to `width`. Sharing by
-/// the average keeps one long cell from taking the room of the other
-/// columns, and one factor for every column keeps a resize from making a
-/// column jump. When even the narrowest widths do not fit, the columns run
-/// past the edge.
+/// The widths that make columns with these `fits` end at `width`, as
+/// TableView's fill does (DESIGN.md: Results list). Spare width goes to
+/// the columns with content, because an empty column has nothing to show
+/// in more. A shortfall comes from the empty columns first, because a cut
+/// header hides less than a cut value. When no column is empty, or every
+/// column is, they all take part at once. A column that cannot grow keeps
+/// its fit, so when no column that takes part can grow, the columns end
+/// before the edge; when even the columns that cannot shrink do not fit,
+/// they run past it.
 pub(crate) fn fill_widths(fits: &[ColumnFit], width: Px) -> Vec<Px> {
-    let widest: f64 = fits.iter().map(|fit| f64::from(fit.widest.0)).sum();
-    let room = f64::from(width.0);
-    let grow = (room / widest.max(1.0)).max(1.0);
-    let shared = share(fits, room.min(widest));
-    let widths: Vec<f64> = shared.iter().map(|width| width * grow).collect();
-    whole_pixels(&widths, width)
-}
-
-/// The widths `clamp(share * average, narrowest, widest)` that add up to
-/// `room`, or the narrowest widths when even they do not fit. Each round
-/// tries one factor for the columns not yet held at a bound. When the
-/// clamped widths come out wider than the room, the columns that the
-/// factor took below their narrowest hold there; when narrower, those it
-/// took past their widest hold there; the others share what is left in
-/// the next round, so the answer is the one factor that fits.
-fn share(fits: &[ColumnFit], room: f64) -> Vec<f64> {
-    let mut held: Vec<Option<f64>> = vec![None; fits.len()];
-    loop {
-        let free: Vec<usize> = (0..fits.len()).filter(|&i| held[i].is_none()).collect();
-        if free.is_empty() {
-            return held.into_iter().flatten().collect();
-        }
-        let left = room - held.iter().flatten().sum::<f64>();
-        let weight: f64 = free.iter().map(|&i| f64::from(fits[i].average.0)).sum();
-        let factor = left.max(0.0) / weight.max(1.0);
-        let wanted = |i: usize| factor * f64::from(fits[i].average.0);
-        let clamped =
-            |i: usize| wanted(i).clamp(f64::from(fits[i].narrowest.0), f64::from(fits[i].widest.0));
-        let excess: f64 = free.iter().map(|&i| clamped(i) - wanted(i)).sum();
-        for &i in &free {
-            let (bound, asked) = (clamped(i), wanted(i));
-            let holds = if excess > 0.0 {
-                bound > asked
-            } else if excess < 0.0 {
-                bound < asked
-            } else {
-                true
-            };
-            if holds {
-                held[i] = Some(bound);
-            }
-        }
+    let mut widths: Vec<f64> = fits.iter().map(|fit| f64::from(fit.widest.0)).collect();
+    let mut change = f64::from(width.0) - widths.iter().sum::<f64>();
+    let all: Vec<usize> = (0..fits.len()).collect();
+    let empty: Vec<usize> = all.iter().copied().filter(|&i| fits[i].empty).collect();
+    let content: Vec<usize> = all.iter().copied().filter(|&i| !fits[i].empty).collect();
+    let steps = if empty.is_empty() || content.is_empty() {
+        vec![all]
+    } else if change > 0.0 {
+        vec![content]
+    } else {
+        vec![empty, content]
+    };
+    for step in steps {
+        change = scale(&mut widths, fits, &step, change);
     }
+    whole_pixels(&widths)
 }
 
-/// `widths` rounded down to whole pixels, with the pixels that leaves going
-/// one each to the first columns, so the columns end exactly at `width`
-/// whenever they fit in it.
-fn whole_pixels(widths: &[f64], width: Px) -> Vec<Px> {
+/// Changes the widths of the columns at `step` by `change` in all, by one
+/// factor, so the widest columns keep the most room and a resize makes no
+/// column jump. A column that the factor would take below its fit when it
+/// cannot shrink, below nothing, or past its fit when it cannot grow,
+/// stays at that bound, and the others share what is left. Answers the
+/// part of `change` that the columns could not take.
+fn scale(widths: &mut [f64], fits: &[ColumnFit], step: &[usize], change: f64) -> f64 {
+    let bounds = |i: usize| {
+        let fit = f64::from(fits[i].widest.0);
+        let least = if fits[i].shrinks { 0.0 } else { fit };
+        let most = if fits[i].grows { f64::INFINITY } else { fit };
+        (least, most)
+    };
+    let mut free: Vec<usize> = step.to_vec();
+    let mut left = change;
+    while !free.is_empty() && left != 0.0 {
+        let weight: f64 = free.iter().map(|&i| widths[i]).sum();
+        if weight <= 0.0 {
+            break;
+        }
+        let factor = 1.0 + left / weight;
+        let held: Vec<usize> = (free.iter().copied())
+            .filter(|&i| {
+                let (least, most) = bounds(i);
+                !(least..=most).contains(&(widths[i] * factor))
+            })
+            .collect();
+        if held.is_empty() {
+            for &i in &free {
+                widths[i] *= factor;
+            }
+            return 0.0;
+        }
+        for &i in &held {
+            let (least, most) = bounds(i);
+            let bound = (widths[i] * factor).clamp(least, most);
+            left -= bound - widths[i];
+            widths[i] = bound;
+        }
+        free.retain(|i| !held.contains(i));
+    }
+    left
+}
+
+/// `widths` in whole pixels that add up to their rounded sum, so the
+/// columns end exactly at the edge whenever they reach it: each rounded
+/// down, and the pixels that leaves going one each to the columns that
+/// lost the most.
+fn whole_pixels(widths: &[f64]) -> Vec<Px> {
     // Rounded down, so the sum is no wider than the widths it rounds.
     let mut pixels: Vec<Px> = widths.iter().map(|&w| Px(w as i32)).collect();
-    let left = width.0 - pixels.iter().map(|px| px.0).sum::<i32>();
-    for px in pixels.iter_mut().take(usize::try_from(left).unwrap_or(0)) {
-        px.0 += 1;
+    let total = widths.iter().sum::<f64>().round() as i32;
+    let left = total - pixels.iter().map(|px| px.0).sum::<i32>();
+    let mut by_loss: Vec<usize> = (0..widths.len()).collect();
+    by_loss.sort_by(|&a, &b| {
+        (widths[b] - widths[b].floor()).total_cmp(&(widths[a] - widths[a].floor()))
+    });
+    for &i in by_loss.iter().take(usize::try_from(left).unwrap_or(0)) {
+        pixels[i].0 += 1;
     }
     pixels
 }
@@ -187,7 +171,7 @@ pub(crate) struct ColumnSizing {
     /// which it gets again when shown, for the window's life.
     hidden: Vec<(Column, Px, Dpi)>,
     /// Whether the columns have filled the list around rows; until then
-    /// they hold their first widths.
+    /// they fit their headers.
     filled_around_rows: bool,
 }
 
@@ -249,7 +233,7 @@ impl ColumnSizing {
 
     /// The rows the list shows first arrived, with the list `width` wide:
     /// the widths that fit them, once, because the window shows before any
-    /// row, when only the columns' first widths stand for their fits.
+    /// row, when the columns fit only their headers.
     pub(crate) fn rows_arrived(
         &mut self,
         width: Px,
@@ -281,15 +265,13 @@ impl ColumnSizing {
     }
 
     /// The width of `column`, shown on a monitor of `dpi`: the width it
-    /// had when hidden, as TableView's columns do, or its first width.
-    pub(crate) fn column_shown(&mut self, column: Column, dpi: Dpi) -> Px {
+    /// had when hidden, as TableView's columns do, or `None` for a column
+    /// not hidden before, which then fits its header and rows.
+    pub(crate) fn column_shown(&mut self, column: Column, dpi: Dpi) -> Option<Px> {
         self.forget_drag_fits();
         (self.hidden.iter())
             .find(|(hidden, ..)| *hidden == column)
-            .map_or_else(
-                || column_width(column, dpi),
-                |(_, width, then)| width.rescale(*then, dpi),
-            )
+            .map(|(_, width, then)| width.rescale(*then, dpi))
     }
 
     fn fill(&mut self, width: Px, measure: impl FnOnce() -> Vec<ColumnFit>) -> Vec<Px> {
@@ -315,19 +297,29 @@ mod tests {
         Dpi::new(dpi).expect("not zero")
     }
 
-    fn fit(widest: i32, average: i32) -> ColumnFit {
+    fn fit(widest: i32) -> ColumnFit {
         ColumnFit {
             widest: Px(widest),
-            average: Px(average),
-            narrowest: Px(40),
+            empty: false,
+            shrinks: true,
+            grows: true,
         }
     }
 
-    /// A column whose cells are never cut, such as Size.
-    fn whole(widest: i32, average: i32) -> ColumnFit {
+    /// A column that a fill neither shrinks nor grows, such as Size.
+    fn whole(widest: i32) -> ColumnFit {
         ColumnFit {
-            narrowest: Px(widest),
-            ..fit(widest, average)
+            shrinks: false,
+            grows: false,
+            ..fit(widest)
+        }
+    }
+
+    /// A column whose measured rows show nothing, so its fit is its header.
+    fn empty(header: i32) -> ColumnFit {
+        ColumnFit {
+            empty: true,
+            ..fit(header)
         }
     }
 
@@ -336,29 +328,42 @@ mod tests {
     fn measure(calls: &Cell<u32>) -> impl Fn() -> Vec<ColumnFit> + '_ {
         || {
             calls.set(calls.get() + 1);
-            vec![fit(100, 100), fit(300, 300)]
+            vec![fit(100), fit(300)]
         }
     }
 
-    /// Name, Path with one long path, Size and Date modified in a list too
-    /// narrow for them. Shared by the widest cell, Path would take most of
-    /// the room and cut Size and Date; shared by the average, Size stays
-    /// whole, Date stops at its widest, and Name and Path share the rest.
+    /// In a list too narrow for the fits, the columns with content shrink
+    /// by one factor, and Size, which cannot shrink, keeps its fit.
     #[test]
-    fn one_long_cell_does_not_take_the_room_of_the_others() {
-        let fits = [fit(300, 200), fit(1200, 500), whole(70, 60), fit(120, 120)];
+    fn a_shortfall_scales_the_columns_that_can_shrink() {
+        let fits = [fit(300), fit(900), whole(70)];
+        assert_eq!(fill_widths(&fits, Px(670)), [Px(150), Px(450), Px(70)]);
+    }
+
+    /// Spare width goes to the columns with content that can grow, by one
+    /// factor; an empty column and Size keep their fits.
+    #[test]
+    fn spare_width_goes_to_the_columns_with_content() {
+        let fits = [fit(200), empty(60), whole(70), fit(100)];
         assert_eq!(
-            fill_widths(&fits, Px(1000)),
-            [Px(232), Px(578), Px(70), Px(120)]
+            fill_widths(&fits, Px(730)),
+            [Px(400), Px(60), Px(70), Px(200)]
         );
     }
 
-    /// When even the narrowest widths do not fit, every column is at its
-    /// narrowest and the columns run past the edge.
+    /// A shortfall comes from the empty columns first.
     #[test]
-    fn columns_below_their_narrowest_run_past_the_edge() {
-        let fits = [fit(300, 200), fit(1200, 500), whole(70, 60)];
-        assert_eq!(fill_widths(&fits, Px(100)), [Px(40), Px(40), Px(70)]);
+    fn a_shortfall_comes_from_the_empty_columns_first() {
+        let fits = [fit(300), empty(100), fit(100)];
+        assert_eq!(fill_widths(&fits, Px(450)), [Px(300), Px(50), Px(100)]);
+    }
+
+    /// When even the columns that cannot shrink do not fit, the columns
+    /// run past the edge.
+    #[test]
+    fn columns_that_cannot_shrink_run_past_the_edge() {
+        let fits = [fit(300), whole(70), whole(120)];
+        assert_eq!(fill_widths(&fits, Px(100)), [Px(0), Px(70), Px(120)]);
     }
 
     /// Each fill measures every shown cell and sets every width, so a
@@ -409,7 +414,7 @@ mod tests {
     }
 
     /// The first rows fill the columns once, and a drag that follows
-    /// measures them rather than scaling fits of the first widths.
+    /// measures them rather than scaling fits of the headers alone.
     #[test]
     fn the_first_rows_fill_once_and_a_drag_measures_them() {
         let calls = Cell::new(0);
@@ -427,10 +432,7 @@ mod tests {
     fn a_column_shown_again_gets_its_width_back() {
         let mut sizing = ColumnSizing::default();
         sizing.column_hidden(Column::Size, Px(90), dpi(96));
-        assert_eq!(sizing.column_shown(Column::Size, dpi(192)), Px(180));
-        assert_eq!(
-            sizing.column_shown(Column::Path, dpi(96)),
-            column_width(Column::Path, dpi(96))
-        );
+        assert_eq!(sizing.column_shown(Column::Size, dpi(192)), Some(Px(180)));
+        assert_eq!(sizing.column_shown(Column::Path, dpi(96)), None);
     }
 }

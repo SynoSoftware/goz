@@ -470,15 +470,6 @@ pub(crate) enum SizeFormat {
 }
 
 impl SizeFormat {
-    /// Later rows do not refill the columns, so Size reserves room for its
-    /// full range and both forms of the unit before those rows arrive.
-    pub(crate) fn width_samples(self, strings: &Strings, numbers: &dyn Numbers) -> [String; 2] {
-        [
-            self.text(strings, numbers, 1),
-            self.text(strings, numbers, u64::MAX),
-        ]
-    }
-
     /// The choices of its list on the General page, from the smallest unit
     /// to the largest.
     pub(crate) const ALL: [SizeFormat; 3] = [SizeFormat::Bytes, SizeFormat::Kb, SizeFormat::Mb];

@@ -276,19 +276,12 @@ impl Search {
     }
 
     /// The fit of each of the shown columns at `indexes`, from its header
-    /// and the cells of the rows the list shows and one row above and below
-    /// them, which are the rows the person reads and those a small scroll
-    /// brings (DESIGN.md: Results list). A column without rows keeps its
-    /// first width, except Size, whose samples cover later values too.
+    /// and its cells in [`ListView::fit_rows`].
     pub(super) fn fits_of(&self, window: &MainWindow, indexes: Range<usize>) -> Vec<ColumnFit> {
         let created = window.created();
         let list = created.controls.search.list;
         let dpi = created.metrics.get().dpi;
-        let shown = list.visible_rows();
-        // The shown rows end with a part row, or with the row below them.
-        let below = u64::from(list.shows_part_row());
-        let rows = shown.start.saturating_sub(1)..(shown.end + below).min(list.count());
-        let label = list.first_label_offset(rows.start).unwrap_or_default();
+        let (rows, label) = list.fit_rows();
         // The model is borrowed while the texts are formatted, and the
         // measuring follows.
         let (columns, headers, cells) = {
@@ -308,7 +301,7 @@ impl Search {
             let cells: Vec<Vec<(String, Vec<Range<usize>>)>> = columns
                 .iter()
                 .map(|&column| {
-                    let mut cells: Vec<_> = items
+                    items
                         .iter()
                         .map(|&(row, item)| {
                             (
@@ -324,15 +317,7 @@ impl Search {
                                 model.matched_in_cell(row, column),
                             )
                         })
-                        .collect();
-                    if column == Column::Size {
-                        cells.extend(
-                            sizes
-                                .width_samples(strings, &*numbers)
-                                .map(|text| (text, Vec::new())),
-                        );
-                    }
-                    cells
+                        .collect()
                 })
                 .collect();
             (columns.to_vec(), headers, cells)
@@ -346,22 +331,19 @@ impl Search {
             .zip(columns)
             .zip(indexes)
             .map(|(((header, cells), column), index)| {
-                if cells.is_empty() {
-                    return ColumnFit::first(column, dpi);
-                }
                 let first = index == 0;
                 let label = if first { label } else { Px(0) };
                 let texts = (cells.iter())
                     .filter(|(text, _)| !text.is_empty())
                     .map(|(text, parts)| matched_width(&plain, &bold, text, parts));
                 ColumnFit::of(
+                    column,
                     plain.plain_width(header.compact()),
                     texts,
                     label,
                     first,
                     dpi,
                 )
-                .for_column(column)
             })
             .collect()
     }

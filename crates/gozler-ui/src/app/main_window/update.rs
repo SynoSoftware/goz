@@ -282,11 +282,13 @@ impl MainWindow {
             Effect::RunSetup(setup) => self.run_setup(setup),
             Effect::ShowColumn { index, column } => {
                 let header = captions::header(self.model.borrow().strings(), column);
-                let width = controls
-                    .search
-                    .column_sizing
-                    .borrow_mut()
-                    .column_shown(column, hwnd.dpi());
+                let width = (controls.search.column_sizing.borrow_mut())
+                    .column_shown(column, hwnd.dpi())
+                    .or_else(|| {
+                        let fit = controls.search.fits_of(self, index..index + 1);
+                        fit.first().map(|fit| fit.widest)
+                    })
+                    .unwrap_or_default();
                 controls.search.list.insert_column(
                     index,
                     &ListColumn {
@@ -342,11 +344,10 @@ impl MainWindow {
             }
             Effect::ReleaseOperations => self.release_operations(),
             Effect::FetchVisible(list) => self.fetch_visible(list),
-            Effect::FillFirstRows(list) => {
-                if list == List::Search {
-                    controls.search.fill_around_first_rows(self);
-                }
-            }
+            Effect::FillFirstRows(list) => match list {
+                List::Search => controls.search.fill_around_first_rows(self),
+                List::Panel(side) => controls.panels.fill_panel(self, side),
+            },
             Effect::EnterFirst(ask) => self.defer(hwnd, ModalStep::EnterFirst(ask)),
             Effect::ReadMemory => {
                 let accepted = self.read_app_memory();

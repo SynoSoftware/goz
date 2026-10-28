@@ -13,10 +13,10 @@ use crate::core::ids::ControlId;
 use crate::core::ids::DialogId;
 use crate::core::layout::column_sizing::{self, ColumnFit};
 use crate::core::layout::{Body, PanelLayout, Px, Rect};
-use crate::core::model::{Accepted, Areas, Column, Effect, TakenShown};
+use crate::core::model::{Accepted, Areas, Effect, TakenShown};
 use crate::core::open::{Entries, EntryAction};
 use crate::core::panel::{
-    self, Entered, Entry, FolderChange, LookIn, PanelColumn, PanelFollow, PanelUpdate,
+    self, Entered, FolderChange, LookIn, PanelColumn, PanelFollow, PanelUpdate,
     Panels as PanelState, Place, QuickAction, ReadAsk, ReadChange, ReadEvent, ReadFailure, Row,
     Side, TakenRows, UpdatedKind, View,
 };
@@ -48,24 +48,6 @@ const SETTLE_MS: u32 = 500;
 /// it, so a panel asks for its sizes once more this long after an
 /// operation in it ends.
 const AGAIN_MS: u32 = 2_000;
-
-/// Entries whose Ext, Size and Date modified are about the widest a panel
-/// shows: an extension of 7 letters, such as "torrent", a size of 10 digits
-/// in KB, as a folder of a few TB shows, and a date late in a year at each
-/// hour of a day, because which hour shows two digits and which day part
-/// is wider depend on the time zone and the locale.
-fn widest() -> impl Iterator<Item = Entry> {
-    const HOUR: i64 = 36_000_000_000;
-    (0..24).map(|hour| {
-        let name = "x.torrent".encode_utf16().collect();
-        Entry::new(
-            name,
-            0x20,
-            9_999_999_999 * 1024,
-            134_429_400_000_000_000 + hour * HOUR,
-        )
-    })
-}
 
 /// The drive menu's item IDs: a drive's is this plus its letter's index,
 /// a folder's [`FOLDER_IDS`] plus its place in the menu.
@@ -165,13 +147,13 @@ impl PanelControls {
             folder: Label::create_right_path(parent, folder)?,
             kind: Cell::new(None),
         };
-        let dpi = parent.dpi();
+        // The panel's fills give the widths.
         for (index, column) in PanelColumn::FOLDER.into_iter().enumerate() {
             controls.list.insert_column(
                 index,
                 &ListColumn {
                     header: "",
-                    width: column_sizing::column_width(column.search_column(), dpi),
+                    width: Px(0),
                     right_aligned: column.right_aligned(),
                 },
             );
@@ -463,7 +445,6 @@ impl Panels {
             keep_action,
         );
         self.show_panel_sort(window, side);
-        self.fill_name_column(window, side);
     }
 
     /// Shows everything of `side` but its rows: the drive button, the path
@@ -695,26 +676,30 @@ impl Panels {
             return;
         }
         if shown.is_none() != wanted.is_none() {
-            match wanted {
-                Some(_) => {
-                    let header = {
-                        let model = window.model.borrow();
-                        captions::panel_headers(model.strings(), &[PanelColumn::Folder])
-                    };
-                    let dpi = window.created().metrics.get().dpi;
-                    c.list.insert_column(
-                        FOLDER_COLUMN,
-                        &ListColumn {
-                            header: &header[0].full,
-                            width: column_sizing::column_width(Column::Path, dpi),
-                            right_aligned: false,
-                        },
-                    );
+            // The header would paint the column at the width it is inserted
+            // with, before the fill gives it its own. The fill stays last,
+            // because its own `draw_once_after` turns drawing on again.
+            c.list.draw_once_after(|| {
+                match wanted {
+                    Some(_) => {
+                        let header = {
+                            let model = window.model.borrow();
+                            captions::panel_headers(model.strings(), &[PanelColumn::Folder])
+                        };
+                        c.list.insert_column(
+                            FOLDER_COLUMN,
+                            &ListColumn {
+                                header: &header[0].full,
+                                width: Px(0),
+                                right_aligned: false,
+                            },
+                        );
+                    }
+                    None => c.list.delete_column(FOLDER_COLUMN),
                 }
-                None => c.list.delete_column(FOLDER_COLUMN),
-            }
-            self.show_panel_sort(window, side);
-            self.fill_panel_columns(window);
+                self.show_panel_sort(window, side);
+                self.fill_panel_columns(window);
+            });
         }
     }
 
@@ -755,145 +740,127 @@ impl Panels {
         controls.key_bar.set_captions(captions);
     }
 
-    /// Sizes each panel's columns to its list: Ext, Size and Date modified
-    /// fit the [`widest`] samples, in a selected row's font, so the widths
-    /// stay the same in both panels and every folder, and Name takes the
-    /// rest, or shares it with a search panel's Folder (DESIGN.md: A panel,
-    /// Search in a panel).
+    /// Fills each panel's list with its columns (DESIGN.md: A panel).
     pub(super) fn fill_panel_columns(&self, window: &MainWindow) {
         self.fill_panel_columns_at(
             window,
-            Side::BOTH.map(|side| Some(self.panel(side).list.hwnd().client_size().width)),
+            Side::BOTH.map(|side| Some(self.panel(side).list.fill_width())),
         );
     }
 
     pub(super) fn fill_panel_columns_at(&self, window: &MainWindow, available: [Option<Px>; 2]) {
-        if available.iter().all(Option::is_none) {
-            return;
+        for (side, available) in Side::BOTH.into_iter().zip(available) {
+            if let Some(available) = available {
+                self.fill_panel_at(window, side, available);
+            }
         }
+    }
+
+    /// Fills `side`'s list with its columns when its rows changed.
+    pub(super) fn fill_panel(&self, window: &MainWindow, side: Side) {
+        self.fill_panel_at(window, side, self.panel(side).list.fill_width());
+    }
+
+    /// Fills `available`, the list's [`ListView::fill_width`], with `side`'s
+    /// columns as Search fills its list ([`column_sizing::fill_widths`]),
+    /// so the rows reach the divider and a folder whose rows bring the
+    /// vertical scroll bar brings no horizontal one.
+    fn fill_panel_at(&self, window: &MainWindow, side: Side, available: Px) {
+        let widths = column_sizing::fill_widths(&self.panel_fits(window, side), available);
+        self.set_panel_widths(side, widths.into_iter().enumerate().collect());
+    }
+
+    /// The fits of `side`'s columns: each fits its header and its cells in
+    /// [`ListView::fit_rows`], within the limits of Search's column of the
+    /// same kind, as Search's columns do.
+    fn panel_fits(&self, window: &MainWindow, side: Side) -> Vec<ColumnFit> {
         let created = window.created();
         let dpi = created.metrics.get().dpi;
-        let fitted = [
-            PanelColumn::Ext,
-            PanelColumn::Size,
-            PanelColumn::DateModified,
-        ];
-        let (samples, headers) = {
+        let c = self.panel(side);
+        let list = c.list;
+        let (rows, label) = list.fit_rows();
+        // The model is borrowed while the texts are formatted, and the
+        // measuring follows.
+        let (headers, cells) = {
             let model = window.model.borrow();
             let numbers = window.numbers.borrow();
-            let widest: Vec<Entry> = widest().collect();
+            let dates = window.dates.borrow();
+            let strings = model.strings();
             let sizes = model.choices().size_format;
-            let panel = model.panels().panel(Side::Left);
-            let samples: Vec<Vec<String>> = (fitted.iter())
-                .map(|column| {
-                    let mut samples: Vec<_> = widest
-                        .iter()
-                        .map(|entry| {
-                            let row = Row::Entry(entry);
+            let panels = model.panels();
+            let panel = panels.panel(side);
+            let cells: Vec<Vec<String>> = (c.columns().iter())
+                .map(|&column| {
+                    (rows.clone())
+                        .filter_map(|index| shown_or_taken(panels, side, index))
+                        .map(|row| {
                             captions::panel_cell(
-                                model.strings(),
-                                &*numbers,
-                                sizes,
-                                &window.dates.borrow(),
-                                panel,
-                                row,
-                                *column,
+                                strings, &*numbers, sizes, &dates, panel, row, column,
                             )
                             .full
                         })
-                        .collect();
-                    if *column == PanelColumn::Size {
-                        samples.extend(sizes.width_samples(model.strings(), &*numbers));
-                    }
-                    samples
+                        .collect()
                 })
                 .collect();
-            (samples, captions::panel_headers(model.strings(), &fitted))
+            (captions::panel_headers(strings, c.columns()), cells)
         };
-        let widths: Vec<Px> = {
-            let fonts = created.fonts.borrow();
-            let plain = TextMeter::new(&fonts.ui);
-            samples
-                .iter()
-                .zip(&headers)
-                .map(|(column, header)| {
-                    let texts = column.iter().map(|sample| plain.width(sample));
-                    ColumnFit::of(
-                        plain.plain_width(header.compact()),
-                        texts,
-                        Px(0),
-                        false,
-                        dpi,
-                    )
-                    .widest
-                })
-                .collect()
-        };
-        for (side, available) in Side::BOTH.into_iter().zip(available) {
-            let Some(available) = available else {
-                continue;
-            };
-            let c = self.panel(side);
-            let fitted_widths = (c.columns().iter().enumerate())
-                .filter_map(|(index, column)| {
-                    let fit = fitted.iter().position(|f| f == column)?;
-                    Some((index, widths[fit]))
-                })
-                .collect();
-            self.set_panel_widths(window, side, available, fitted_widths);
-        }
+        let fonts = created.fonts.borrow();
+        let plain = TextMeter::new(&fonts.ui);
+        (c.columns().iter().zip(headers).zip(cells).enumerate())
+            .map(|(index, ((column, header), cells))| {
+                let first = index == 0;
+                let label = if first { label } else { Px(0) };
+                let texts = (cells.iter())
+                    .filter(|text| !text.is_empty())
+                    .map(|text| plain.width(text));
+                ColumnFit::of(
+                    column.search_column(),
+                    plain.plain_width(header.compact()),
+                    texts,
+                    label,
+                    first,
+                    dpi,
+                )
+            })
+            .collect()
     }
 
-    /// Gives Name the room the other columns leave in `side`'s list.
-    pub(super) fn fill_name_column(&self, window: &MainWindow, side: Side) {
-        self.fill_name_column_at(
-            window,
-            side,
-            self.panel(side).list.hwnd().client_size().width,
-        );
-    }
-
-    pub(super) fn fill_name_column_at(&self, window: &MainWindow, side: Side, width: Px) {
-        self.set_panel_widths(window, side, width, Vec::new());
-    }
-
-    /// Gives `side`'s columns `widths`, as column index and width, and Name
-    /// the room the other columns leave, to the list's edge or its scroll
-    /// bar, so the rows reach the divider; a search panel's Name and Folder
-    /// share it 1.3 to 1. The list draws once, and only when a width
-    /// changes, because each width it takes draws every row it shows,
-    /// twice when the horizontal scroll bar comes and goes.
-    pub(super) fn set_panel_widths(
-        &self,
-        window: &MainWindow,
-        side: Side,
-        available: Px,
-        mut widths: Vec<(usize, Px)>,
-    ) {
+    /// Gives Name the room the other columns leave in `side`'s list,
+    /// `width` wide, while the person drags the window's border, because
+    /// the rows the list shows change with its height and fits measured on
+    /// them would move every column. A search panel's Name and Folder
+    /// share the room as they shared it before.
+    pub(super) fn fill_name_column_at(&self, side: Side, width: Px) {
         let c = self.panel(side);
-        let dpi = window.created().metrics.get().dpi;
         let shared =
             |column: &PanelColumn| matches!(column, PanelColumn::Name | PanelColumn::Folder);
         let others = (c.columns().iter().enumerate())
             .filter(|(_, column)| !shared(column))
-            .fold(Px(0), |sum, (index, _)| {
-                let given = widths.iter().find(|(column, _)| *column == index);
-                sum + given.map_or_else(|| c.list.column_width(index), |(_, width)| *width)
-            });
-        let room =
-            (available - others).max(Px(column_sizing::column_width(Column::Name, dpi).0 / 2));
-        match c.columns().iter().position(|c| *c == PanelColumn::Folder) {
+            .fold(Px(0), |sum, (index, _)| sum + c.list.column_width(index));
+        let room = (width - others).max(Px(0));
+        let widths = match c.columns().iter().position(|c| *c == PanelColumn::Folder) {
             Some(folder) => {
-                let name = Px(room.0 * 13 / 23);
-                widths.extend([(0, name), (folder, room - name)]);
+                let (name, path) = (c.list.column_width(0), c.list.column_width(folder));
+                let name =
+                    i64::from(room.0) * i64::from(name.0) / i64::from((name + path).0.max(1));
+                let name = Px(i32::try_from(name).expect("a part of the room fits in i32"));
+                vec![(0, name), (folder, room - name)]
             }
-            None => widths.push((0, room)),
-        }
-        widths.retain(|(index, width)| c.list.column_width(*index) != *width);
+            None => vec![(0, room)],
+        };
+        self.set_panel_widths(side, widths);
+    }
+
+    /// Gives `side`'s columns `widths`, as column index and width. The list
+    /// draws once, and only when a width changes, because each width it
+    /// takes draws every row it shows.
+    fn set_panel_widths(&self, side: Side, mut widths: Vec<(usize, Px)>) {
+        let list = self.panel(side).list;
+        widths.retain(|(index, width)| list.column_width(*index) != *width);
         if !widths.is_empty() {
-            c.list.draw_once_after(|| {
+            list.draw_once_after(|| {
                 for (index, width) in widths {
-                    c.list.set_column_width(index, width);
+                    list.set_column_width(index, width);
                 }
             });
         }
@@ -1175,6 +1142,9 @@ impl Panels {
             scroll,
             !matches!(update.kind, UpdatedKind::Listed { again: false }),
         );
+        if listed || matches!(update.kind, UpdatedKind::Sizes) {
+            self.fill_panel(window, side);
+        }
         if matches!(
             update.kind,
             UpdatedKind::Listed { .. } | UpdatedKind::Watch | UpdatedKind::Await
@@ -1409,6 +1379,7 @@ impl Panels {
             let hwnd = window.controls().search.row.input.hwnd().parent();
             self.apply_panel_update(window, hwnd, side, update);
         } else {
+            self.fill_panel(window, side);
             self.show_panel(window, side);
         }
         window.start_list_passes();

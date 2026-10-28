@@ -509,9 +509,22 @@ impl ListView {
         top..top + page
     }
 
+    /// The rows a column's fit measures: those the list shows and one row
+    /// above and below them, which a small scroll brings; and how far the
+    /// first column's text starts past its icon on the first of them
+    /// (DESIGN.md: Results list).
+    pub(crate) fn fit_rows(self) -> (Range<u64>, Px) {
+        let shown = self.visible_rows();
+        // The shown rows end with a part row, or with the row below them.
+        let below = u64::from(self.shows_part_row());
+        let rows = shown.start.saturating_sub(1)..(shown.end + below).min(self.count());
+        let label = self.first_label_offset(rows.start).unwrap_or_default();
+        (rows, label)
+    }
+
     /// Whether the last of [`Self::visible_rows`] shows in part, and is not
     /// the row below the whole rows.
-    pub(crate) fn shows_part_row(self) -> bool {
+    fn shows_part_row(self) -> bool {
         let row = self.visible_rows().end - 1;
         let mut rect = RECT {
             left: LVIR_BOUNDS as i32,
@@ -540,7 +553,7 @@ impl ListView {
     /// How far the first column's text area starts after the column's left
     /// edge, past the row's icon, measured on `row`; `None` when the list
     /// does not hold it.
-    pub(crate) fn first_label_offset(self, row: u64) -> Option<Px> {
+    fn first_label_offset(self, row: u64) -> Option<Px> {
         let mut label = RECT {
             left: LVIR_LABEL as i32,
             ..RECT::default()
