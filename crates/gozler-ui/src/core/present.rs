@@ -185,6 +185,9 @@ pub(crate) enum Cover {
     Early,
     /// The client changed size, so the old picture would not fit.
     Resized,
+    /// No earlier pass measured the client, so it went without the cover,
+    /// as after a resize.
+    First,
     /// The pass paints too little to need it.
     Small,
     /// The pass paints one window, which paints in one step without it.
@@ -264,6 +267,7 @@ impl Frame {
                 Some(Cover::Shown) => "shown",
                 Some(Cover::Early) => "early",
                 Some(Cover::Resized) => "resized",
+                Some(Cover::First) => "first",
                 Some(Cover::Small) => "small",
                 Some(Cover::Single) => "single",
                 Some(Cover::CopyFailed) => "copy_failed",

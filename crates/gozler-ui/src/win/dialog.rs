@@ -12,7 +12,9 @@ use super::controls::{Button, TreeItem, has_image};
 use super::gdi::{Font, TextMeter, icons_shown};
 use super::notify::DispInfo;
 use super::{Hwnd, wide};
-use crate::core::captions::{ButtonIcon, DialogCaptions, Guard, Question, QuestionBody};
+use crate::core::captions::{
+    ButtonIcon, DialogCaptions, DialogItem, Guard, Question, QuestionBody,
+};
 use crate::core::commands::Keystroke;
 use crate::core::glyph::Glyph;
 use crate::core::ids::DialogId;
@@ -514,6 +516,14 @@ pub(crate) fn end(dialog: Hwnd, end: DialogEnd) {
     };
     // SAFETY: plain values.
     let _ = unsafe { EndDialog(dialog.0, result) };
+}
+
+/// Enables or disables `dialog`'s OK button, or the button that stands in
+/// its place, such as Delete.
+pub(crate) fn set_ok_enabled(dialog: Hwnd, enabled: bool) {
+    if let Some(ok) = item(dialog, DialogItem::Ok.id()) {
+        ok.set_enabled(enabled);
+    }
 }
 
 /// The dialog's control `id`.

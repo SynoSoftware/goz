@@ -24,7 +24,7 @@ use super::fetch::{Ask, ChunkAsk, FromSnapshot, Generation, Outcome};
 use super::model::Column;
 use super::query::{self, Filters, Matching};
 use super::search_list::{Deselect, SearchList};
-use super::selection::{DragEntry, RowSelection, wide_path};
+use super::selection::{DragEntry, RowSelection, push_rows, wide_path};
 use super::work::{self, Pass, Retirement};
 use gozler_core::fold::fold;
 use gozler_core::proto::ResultItem;
@@ -515,8 +515,12 @@ pub(crate) enum ReadChange {
     Pending,
     /// An older reading, which changes nothing.
     Stale,
-    /// The rows went: a new folder opened, and the list says "Reading…",
-    /// or the shown drive is not ready.
+    /// A Go's folder opened. The panel still shows the folder it leaves,
+    /// until the listing replaces it at once, or the window shows the new
+    /// folder reading ([`Panels::show_reading`]).
+    Opened,
+    /// The rows went: the folder a Go opened is read, and the list says
+    /// "Reading…", or the shown drive is not ready.
     Cleared,
     /// The listing replaced the rows; the list shows `place`. `again` when
     /// it was the shown folder read again in the same order, whose rows
@@ -572,6 +576,20 @@ struct Read {
     nearest: bool,
     /// The sort its listing comes in.
     sort: SortSpec,
+    reached: Reached,
+}
+
+/// How far a Go got. The panel keeps showing the folder it leaves until the
+/// listing's rows replace it, or until [`Panels::show_reading`] shows the
+/// opened folder reading.
+#[derive(Clone, Debug)]
+enum Reached {
+    Asked,
+    /// The folder opened, and its listing has not come.
+    Opened(String),
+    /// The listing came, and its rows are being worked out. Showing the
+    /// folder reading now would drop them.
+    Listed(String),
 }
 
 /// What the panel's status line counts (DESIGN.md: A panel).
@@ -807,10 +825,27 @@ impl Panel {
         self.read.as_ref().map(|read| read.generation)
     }
 
+    /// The folder a Go reads, while it reads: the one it opened, or else the
+    /// path it asked for.
+    fn going_to(&self) -> Option<&str> {
+        let read = (self.read.as_ref()).filter(|read| matches!(read.kind, ReadKind::Go { .. }))?;
+        Some(match &read.reached {
+            Reached::Asked => &read.path,
+            Reached::Opened(folder) | Reached::Listed(folder) => folder,
+        })
+    }
+
     /// The folder that `F5` and `F6` offer to copy or move to when this is
     /// the other panel: the open folder, also while it is still read; none
     /// for a search, a drive that is not ready or a folder not yet open.
     pub(crate) fn destination(&self) -> Option<&str> {
+        if let Some(Read {
+            reached: Reached::Opened(folder) | Reached::Listed(folder),
+            ..
+        }) = &self.read
+        {
+            return Some(folder);
+        }
         match self.view {
             View::Reading | View::Folder if !self.folder.is_empty() => Some(&self.folder),
             _ => None,
@@ -1072,6 +1107,13 @@ impl Panel {
     #[cfg(test)]
     pub(crate) fn keeps(&self, id: OperationId) -> bool {
         self.observing || self.rows.keeps(id)
+    }
+
+    /// Whether the rows may still change before a command can act on them:
+    /// they are being worked out, or a Go reads, whose listing replaces the
+    /// rows the panel still shows. Nothing acts on them then.
+    pub(crate) fn rows_pending(&self) -> bool {
+        self.going_to().is_some() || self.is_calculating()
     }
 
     pub(crate) fn is_calculating(&self) -> bool {
@@ -1578,7 +1620,7 @@ impl Panels {
     pub(crate) fn take_count(&mut self, side: Side) -> Option<Counting> {
         let panel = self.panel_mut(side);
         if matches!(panel.view, View::Folder)
-            && !panel.is_calculating()
+            && !panel.rows_pending()
             && matches!(panel.counted, CountState::Needed)
         {
             panel.counted = CountState::Running;
@@ -1663,6 +1705,7 @@ impl Panels {
             path: path.clone(),
             nearest,
             sort,
+            reached: Reached::Asked,
         });
         ReadAsk {
             generation,
@@ -1739,15 +1782,8 @@ impl Panels {
     /// nothing for a search panel.
     pub(crate) fn read_again(&mut self, side: Side) -> Option<ReadAsk> {
         let panel = self.panel(side);
-        let going = matches!(
-            &panel.read,
-            Some(Read {
-                kind: ReadKind::Go { .. },
-                ..
-            })
-        );
         let folder = panel.folder.clone();
-        if folder.is_empty() || going {
+        if folder.is_empty() || panel.going_to().is_some() {
             return None;
         }
         let kind = match self.panel(side).view {
@@ -1813,7 +1849,10 @@ impl Panels {
 
     /// The parent folder of `side`, with the folder it came from focused.
     pub(crate) fn go_up(&mut self, side: Side) -> Option<ReadAsk> {
-        let folder = self.panel(side).folder.clone();
+        // While a Go reads, the panel still shows the folder it leaves, and
+        // `Backspace` goes up from the one the person goes to.
+        let panel = self.panel(side);
+        let folder = panel.going_to().unwrap_or(&panel.folder).to_owned();
         if folder.is_empty() || is_root(&folder) {
             return None;
         }
@@ -1833,6 +1872,11 @@ impl Panels {
             File(ChosenEntry),
         }
         let panel = self.panel(side);
+        // The rows still shown while a Go reads belong to the folder it
+        // leaves.
+        if panel.going_to().is_some() {
+            return Entered::Nothing;
+        }
         let target = match self.row(side, row) {
             None => return Entered::Nothing,
             Some(Row::Up) => Target::Up,
@@ -1981,8 +2025,39 @@ impl Panels {
         event: ReadEvent,
         focused: Option<u64>,
     ) -> ReadAccepted {
+        self.accepted(side, |panels| panels.apply_read(side, event, focused))
+    }
+
+    /// The listing of the folder that `side`'s Go opened has not come soon
+    /// after it opened: the panel shows that folder, reading, without rows
+    /// (DESIGN.md: A panel).
+    pub(crate) fn show_reading(&mut self, side: Side) -> ReadAccepted {
+        self.accepted(side, |panels| {
+            let panel = panels.panel_mut(side);
+            let Some(Read {
+                reached: Reached::Opened(folder),
+                ..
+            }) = panel.read.clone()
+            else {
+                return ReadChange::Stale;
+            };
+            panel.folder = folder;
+            panel.set_view(View::Reading);
+            panel.clear();
+            panel.free = None;
+            ReadChange::Cleared
+        })
+    }
+
+    /// The change `apply` makes to `side`, and whether it ended the panel's
+    /// search.
+    fn accepted(
+        &mut self,
+        side: Side,
+        apply: impl FnOnce(&mut Self) -> ReadChange,
+    ) -> ReadAccepted {
         let searched = self.search(side).is_some();
-        let change = self.apply_read(side, event, focused);
+        let change = apply(self);
         ReadAccepted {
             change,
             search_ended: searched && self.search(side).is_none(),
@@ -2008,11 +2083,10 @@ impl Panels {
         match event {
             ReadEvent::Opened { folder, .. } => match read.kind {
                 ReadKind::Go { .. } => {
-                    panel.folder = folder;
-                    panel.set_view(View::Reading);
-                    panel.clear();
-                    panel.free = None;
-                    ReadChange::Cleared
+                    if let Some(read) = &mut panel.read {
+                        read.reached = Reached::Opened(folder);
+                    }
+                    ReadChange::Opened
                 }
                 ReadKind::Again => ReadChange::Stale,
             },
@@ -2030,6 +2104,11 @@ impl Panels {
                     panel.retired.push(entries, items);
                     panel.reread = true;
                     return ReadChange::Pending;
+                }
+                if let Some(read) = &mut panel.read
+                    && matches!(read.kind, ReadKind::Go { .. })
+                {
+                    read.reached = Reached::Listed(folder.clone());
                 }
                 let same = matches!((&read.kind, &panel.view), (ReadKind::Again, View::Folder))
                     && folder_key(&folder) == folder_key(&panel.folder);
@@ -2130,8 +2209,7 @@ impl Panels {
         let mut scratch = MaskScratch::default();
         let mut name = Vec::new();
         let mut was = panel.selected.iter().peekable();
-        let mut selected: Vec<Range<u64>> = Vec::new();
-        let mut count = 0;
+        let mut selected = Vec::new();
         for row in 0..panel.count() {
             while was.next_if(|rows| rows.end <= row).is_some() {}
             let mut is = was.peek().is_some_and(|rows| rows.contains(&row));
@@ -2144,16 +2222,11 @@ impl Panels {
                     is = select;
                 }
             }
-            if !is {
-                continue;
-            }
-            count += 1;
-            match selected.last_mut() {
-                Some(last) if last.end == row => last.end = row + 1,
-                _ => selected.push(row..row + 1),
+            if is {
+                push_rows(&mut selected, row..row + 1);
             }
         }
-        self.set_selected(side, RowSelection::new(selected, count));
+        self.set_selected(side, RowSelection::from(selected));
         Some(self.place(side))
     }
 
@@ -2205,7 +2278,7 @@ impl Panels {
     /// panel's selection is read.
     pub(crate) fn chosen_count(&self, side: Side) -> usize {
         let panel = self.panel(side);
-        if panel.is_calculating() {
+        if panel.rows_pending() {
             return 0;
         }
         match (panel.search(), panel.selected.as_slice()) {
@@ -2221,7 +2294,7 @@ impl Panels {
     /// are.
     pub(crate) fn chosen_source(&self, side: Side) -> Option<super::open::Entries> {
         let panel = self.panel(side);
-        if panel.is_calculating() {
+        if panel.rows_pending() {
             return None;
         }
         match panel.search() {
@@ -2256,7 +2329,7 @@ impl Panels {
     /// row.
     pub(crate) fn focused(&self, side: Side) -> Option<ChosenEntry> {
         let panel = self.panel(side);
-        if panel.is_calculating() {
+        if panel.rows_pending() {
             return None;
         }
         let row = panel.focused?;
@@ -2323,7 +2396,7 @@ impl Panels {
     /// `None` while no row shows it.
     pub(crate) fn show_awaited(&mut self, side: Side) -> Option<Place> {
         let panel = self.panel_mut(side);
-        if panel.is_calculating() {
+        if panel.rows_pending() {
             return None;
         }
         let (place, selected) = panel.awaited_place.take()?;
@@ -3660,9 +3733,11 @@ pub(crate) mod tests {
                 .accept_calculation(Side::Left, calculating.run())
                 .is_none()
         );
-        assert!(matches!(panels.panel(Side::Left).view(), View::Cancelled));
-        assert_eq!(panels.panel(Side::Left).path_box(), r"E:\large");
-        assert_eq!(panels.panel(Side::Left).count(), 0);
+        // The folder opened but its listing never applied, so the panel
+        // still shows the folder it was leaving.
+        assert!(matches!(panels.panel(Side::Left).view(), View::Folder));
+        assert_eq!(panels.panel(Side::Left).path_box(), r"C:\old");
+        assert_eq!(names(&panels, Side::Left), ["..", "keep.txt"]);
         assert_eq!(
             panels.panel(Side::Right).reading_generation(),
             Some(other.generation)
@@ -3710,11 +3785,33 @@ pub(crate) mod tests {
             folder: r"C:\a".to_owned(),
         };
         panels.accept_read(Side::Left, opened, None);
+        panels.show_reading(Side::Left);
         assert!(matches!(
             fail(&mut panels, r"E:\x"),
             ReadChange::Refused { .. }
         ));
         assert!(matches!(panels.panel(Side::Left).view(), View::Reading));
+    }
+
+    /// A Go keeps the folder it leaves on screen until the listing replaces
+    /// it, so the list never shows empty in between, and commands wait for
+    /// the new rows (DESIGN.md: A panel).
+    #[test]
+    fn a_go_shows_the_old_rows_until_its_listing() {
+        let mut panels = showing(r"C:\old", vec![file("keep.txt", 1, 0)]);
+        let ask = panels.go(Side::Left, r"C:\new".to_owned(), None);
+        let opened = ReadEvent::Opened {
+            generation: ask.generation,
+            folder: ask.path.clone(),
+        };
+        assert_eq!(
+            panels.accept_read(Side::Left, opened, None).change,
+            ReadChange::Opened
+        );
+        assert_eq!(names(&panels, Side::Left), ["..", "keep.txt"]);
+        assert_eq!(panels.chosen_count(Side::Left), 0);
+        complete(&mut panels, &ask, r"C:\new", vec![file("new.txt", 1, 0)]);
+        assert_eq!(names(&panels, Side::Left), ["..", "new.txt"]);
     }
 
     /// `F5` and `F6` offer the other panel's folder as soon as it opens,

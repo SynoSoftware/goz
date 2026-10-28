@@ -2,8 +2,8 @@ use super::{
     Button, ButtonIcon, Cell, Column, ColumnFit, ColumnSizing, CommandId, ControlId, CustomDraw,
     DEFERRED, DispInfo, Dpi, DrawAnswer, DrawStage, DropDownList, Edit, Entries, Hwnd, LRESULT,
     Label, Layout, List, ListButton, ListCaption, ListNotify, ListView, MainWindow, MatchMode,
-    Matching, MenuItem, Px, Range, Rect, RefCell, SELECTION_LIMIT, Selected, SortDir, TextMeter,
-    Tool, Toolbar, Tooltip, captions, clear_glyph, layout, matched_width, win,
+    Matching, MeasuredColumn, MenuItem, Px, Range, Rect, RefCell, SELECTION_LIMIT, Selected,
+    SortDir, Tool, Toolbar, Tooltip, captions, clear_glyph, layout, measure_fits, win,
 };
 
 pub(super) struct Search {
@@ -192,15 +192,10 @@ impl Search {
     /// Fills the list's width with its columns when the width changed
     /// ([`ColumnSizing::resized`]).
     pub(super) fn fill_on_resize(&self, window: &MainWindow, width: Px) {
-        let width = self.fill_width() + width - self.list.hwnd().screen_rect().width;
+        let width = self.list.fill_width_at(width);
         let widths = (self.column_sizing.borrow_mut()).resized(width, || self.column_fits(window));
-        if let Some(widths) = widths
-            && widths
-                .iter()
-                .enumerate()
-                .any(|(index, width)| self.list.column_width(index) != *width)
-        {
-            self.list.draw_once_after(|| self.set_column_widths(widths));
+        if let Some(widths) = widths {
+            self.list.set_column_widths(widths.into_iter().enumerate());
         }
     }
 
@@ -211,8 +206,7 @@ impl Search {
         let widths =
             (self.column_sizing.borrow_mut()).drag_ended(width, || self.column_fits(window));
         if let Some(widths) = widths {
-            let list = self.list;
-            list.draw_once_after(|| self.set_column_widths(widths));
+            self.list.set_column_widths(widths.into_iter().enumerate());
         }
     }
 
@@ -234,27 +228,13 @@ impl Search {
         let widths =
             (self.column_sizing.borrow_mut()).rows_arrived(width, || self.column_fits(window));
         if let Some(widths) = widths {
-            // A list that draws itself paints every row it shows for each
-            // width it sets, and its first paints shape every text afresh.
-            let list = self.list;
-            list.draw_once_after(|| self.set_column_widths(widths));
+            self.list.set_column_widths(widths.into_iter().enumerate());
         }
     }
 
     /// The width the list's columns fill.
     pub(super) fn fill_width(&self) -> Px {
         self.list.fill_width()
-    }
-
-    /// Gives the columns `widths`, each only when it differs from the
-    /// column's, because each width that the list takes draws it again.
-    pub(super) fn set_column_widths(&self, widths: Vec<Px>) {
-        let list = self.list;
-        for (index, width) in widths.into_iter().enumerate() {
-            if list.column_width(index) != width {
-                list.set_column_width(index, width);
-            }
-        }
     }
 
     /// Fits the column at `index` to its header and the rows it shows, as
@@ -278,13 +258,10 @@ impl Search {
     /// The fit of each of the shown columns at `indexes`, from its header
     /// and its cells in [`ListView::fit_rows`].
     pub(super) fn fits_of(&self, window: &MainWindow, indexes: Range<usize>) -> Vec<ColumnFit> {
-        let created = window.created();
-        let list = created.controls.search.list;
-        let dpi = created.metrics.get().dpi;
-        let (rows, label) = list.fit_rows();
+        let (rows, label) = window.created().controls.search.list.fit_rows();
         // The model is borrowed while the texts are formatted, and the
         // measuring follows.
-        let (columns, headers, cells) = {
+        let measured = {
             let model = window.model.borrow();
             let numbers = window.numbers.borrow();
             let strings = model.strings();
@@ -294,15 +271,12 @@ impl Search {
             let items: Vec<_> = rows
                 .filter_map(|row| Some((row, results.row(row)?)))
                 .collect();
-            let headers: Vec<_> = columns
-                .iter()
-                .map(|column| captions::header(strings, *column))
-                .collect();
-            let cells: Vec<Vec<(String, Vec<Range<usize>>)>> = columns
-                .iter()
-                .map(|&column| {
-                    items
-                        .iter()
+            (columns.iter().zip(indexes))
+                .map(|(&column, index)| MeasuredColumn {
+                    column,
+                    first: index == 0,
+                    header: captions::header(strings, column),
+                    cells: (items.iter())
                         .map(|&(row, item)| {
                             (
                                 crate::core::text::cell(
@@ -317,35 +291,11 @@ impl Search {
                                 model.matched_in_cell(row, column),
                             )
                         })
-                        .collect()
+                        .collect(),
                 })
-                .collect();
-            (columns.to_vec(), headers, cells)
+                .collect::<Vec<_>>()
         };
-        let fonts = created.fonts.borrow();
-        let plain = TextMeter::new(&fonts.ui);
-        let bold = TextMeter::new(&fonts.bold);
-        headers
-            .iter()
-            .zip(cells)
-            .zip(columns)
-            .zip(indexes)
-            .map(|(((header, cells), column), index)| {
-                let first = index == 0;
-                let label = if first { label } else { Px(0) };
-                let texts = (cells.iter())
-                    .filter(|(text, _)| !text.is_empty())
-                    .map(|(text, parts)| matched_width(&plain, &bold, text, parts));
-                ColumnFit::of(
-                    column,
-                    plain.plain_width(header.compact()),
-                    texts,
-                    label,
-                    first,
-                    dpi,
-                )
-            })
-            .collect()
+        measure_fits(window, measured, label)
     }
 
     /// The arrow on the sorted column's header (DESIGN.md: Results list).
@@ -652,7 +602,7 @@ impl Search {
             // The list draws as the focused list while the box has the
             // focus, because Enter in the box opens its focused row
             // (`CustomDraw::answer`).
-            self.list.redraw_rows(self.list.visible_rows());
+            self.list.redraw_visible();
         }
         if gained {
             // The click places the caret after the focus arrives, so the

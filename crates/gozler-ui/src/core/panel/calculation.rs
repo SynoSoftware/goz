@@ -4,6 +4,7 @@
 use super::rows::{Focus, Remembered, ranges};
 use super::*;
 use crate::core::search_list::Ended;
+use crate::core::selection::row_count;
 
 #[derive(Clone, Debug)]
 pub(super) struct Interaction {
@@ -323,7 +324,7 @@ impl Calculation {
                 selected = Arc::new(ranges(&positions));
             }
             let shared = RowSelection {
-                count: selected.iter().map(|range| range.end - range.start).sum(),
+                count: row_count(&selected),
                 positions: Arc::clone(&selected),
             };
             Some((
@@ -335,11 +336,7 @@ impl Calculation {
             ))
         });
         let selected = RowSelection {
-            count: place
-                .selected
-                .iter()
-                .map(|range| range.end - range.start)
-                .sum(),
+            count: row_count(&place.selected),
             positions: Arc::clone(&place.selected),
         };
         Calculated {

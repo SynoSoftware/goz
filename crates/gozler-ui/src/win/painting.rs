@@ -238,13 +238,10 @@ fn presents(call: &str, file: &str, function: &str) -> bool {
             (file, function),
             ("win/present.rs", "publish" | "raise_cover" | "scroll_now")
         ),
-        // `mark_after` turns drawing off on one control around a setter;
-        // dialogs and the lists' column widths batch their changes with
-        // `redraw_after`.
-        "WM_SETREDRAW" => matches!(
-            (file, function),
-            ("win/present.rs", "mark_rect_after") | ("win/mod.rs", "redraw_after")
-        ),
+        // `mark_after` turns drawing off on one control around a setter,
+        // and dialogs and the lists' column widths batch their changes with
+        // `redraw_after`; both through `with_drawing_off`.
+        "WM_SETREDRAW" => matches!((file, function), ("win/present.rs", "with_drawing_off")),
         // The window procedures that receive the message, which send nothing.
         "WM_VSCROLL"
             if matches!(

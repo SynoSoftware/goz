@@ -12,6 +12,7 @@ pub(super) enum Timer {
     Save,
     PanelSettle(Side),
     PanelAgain(Side),
+    PanelReading(Side),
     OperationsPoll,
     Dates,
     Clipboard,
@@ -44,6 +45,8 @@ const IDS: &[(Timer, usize)] = &[
     (Timer::Work, 23),
     (Timer::NativeSelection, 24),
     (Timer::OperationDelivery, 25),
+    (Timer::PanelReading(Side::Left), 26),
+    (Timer::PanelReading(Side::Right), 27),
 ];
 
 impl Timer {

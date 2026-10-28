@@ -162,6 +162,23 @@ impl ListView {
         send(self.0, LVM_SETCOLUMNWIDTH, index, width.0 as isize);
     }
 
+    /// Gives each column at an index of `widths` its width, and draws the
+    /// list once when any width changes. A list paints every row it shows
+    /// for each width it takes, so a width the column has already is not
+    /// set again.
+    pub(crate) fn set_column_widths(self, widths: impl IntoIterator<Item = (usize, Px)>) {
+        let changed: Vec<_> = (widths.into_iter())
+            .filter(|&(index, width)| self.column_width(index) != width)
+            .collect();
+        if !changed.is_empty() {
+            self.draw_once_after(|| {
+                for (index, width) in changed {
+                    self.set_column_width(index, width);
+                }
+            });
+        }
+    }
+
     pub(crate) fn delete_column(self, index: usize) {
         send(self.0, LVM_DELETECOLUMN, index, 0);
     }
@@ -233,7 +250,7 @@ impl ListView {
     /// empty list redraws whole, because its empty-list text may change.
     pub(crate) fn set_count(self, count: u64) {
         if count != 0 && count == self.count() {
-            self.redraw_rows(self.visible_rows());
+            self.redraw_visible();
             return;
         }
         crate::win::present::mark_after(self.0, || {
@@ -496,6 +513,11 @@ impl ListView {
         );
     }
 
+    /// Redraws the rows the list shows now.
+    pub(crate) fn redraw_visible(self) {
+        self.redraw_rows(self.visible_rows());
+    }
+
     /// The rows the list shows now, a partly shown last row included.
     pub(crate) fn visible_rows(self) -> Range<u64> {
         let whole = self.whole_rows();
@@ -534,6 +556,13 @@ impl ListView {
         // fills in.
         let held = unsafe { send_pointer(self.0, LVM_GETITEMRECT, row as usize, &raw mut rect) };
         held != 0 && rect.top < self.0.client_size().height.0
+    }
+
+    /// The width the columns fill once a resize gives the list the outer
+    /// width `width`: [`Self::fill_width`], changed by as much as the
+    /// list's width changes.
+    pub(crate) fn fill_width_at(self, width: Px) -> Px {
+        self.fill_width() + width - self.0.screen_rect().width
     }
 
     /// The width the columns fill: the list's inside less a vertical scroll

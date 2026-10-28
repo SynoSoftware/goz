@@ -6,6 +6,7 @@ use super::calculation::End;
 use super::{
     Awaited, Entry, FolderChange, Outcome, Place, Row, Totals, changes_sizes, ends_in, last_name,
 };
+use crate::core::selection::push_rows;
 use gozler_core::fold::fold_into;
 use gozler_core::types::{SortDir, SortKey, SortSpec};
 use gozler_core::wtf8;
@@ -744,10 +745,8 @@ fn is_short_name(name: &[u16]) -> bool {
 pub(super) fn ranges(rows: &[u64]) -> Vec<Range<u64>> {
     let mut out: Vec<Range<u64>> = Vec::new();
     for &row in rows {
-        match out.last_mut() {
-            Some(last) if last.end == row => last.end = row + 1,
-            Some(last) if last.end > row => {}
-            _ => out.push(row..row + 1),
+        if out.last().is_none_or(|last| last.end <= row) {
+            push_rows(&mut out, row..row + 1);
         }
     }
     out

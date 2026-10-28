@@ -163,9 +163,7 @@ impl Synchronize<'_> {
             compare.set_enabled(filled && !committing);
         }
         let ready = self.preview.borrow().can_commit();
-        if let Some(commit) = dialog::item(dialog, DialogItem::Ok.id()) {
-            commit.set_enabled(ready);
-        }
+        dialog::set_ok_enabled(dialog, ready);
     }
 
     fn compare(&self, dialog: Hwnd) {

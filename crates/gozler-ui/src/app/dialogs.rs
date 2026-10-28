@@ -215,9 +215,10 @@ impl CustomDate {
 
     /// OK stays disabled while neither check box is on (DESIGN.md: Dialogs).
     fn update_ok(dialog: Hwnd) {
-        if let Some(ok) = dialog::item(dialog, DialogItem::Ok.id()) {
-            ok.set_enabled(!matches!(Self::read(dialog), Err(DateRangeError::Neither)));
-        }
+        dialog::set_ok_enabled(
+            dialog,
+            !matches!(Self::read(dialog), Err(DateRangeError::Neither)),
+        );
     }
 }
 
@@ -335,9 +336,10 @@ impl CustomSize {
     /// OK stays disabled while both fields are empty, as Custom date's
     /// while neither check box is on.
     fn update_ok(&self, dialog: Hwnd) {
-        if let Some(ok) = dialog::item(dialog, DialogItem::Ok.id()) {
-            ok.set_enabled(!matches!(self.read(dialog), Err(SizeRangeError::Neither)));
-        }
+        dialog::set_ok_enabled(
+            dialog,
+            !matches!(self.read(dialog), Err(SizeRangeError::Neither)),
+        );
     }
 
     /// Points the balloon `text` at the field `field` and focuses it.
@@ -506,9 +508,7 @@ impl Transfer {
     /// Copy or Move stays disabled while the box is empty.
     fn update_ok(&self, dialog: Hwnd) {
         let empty = Transfer::path(dialog).is_none_or(|path| path.text().trim().is_empty());
-        if let Some(ok) = dialog::item(dialog, DialogItem::Ok.id()) {
-            ok.set_enabled(!empty);
-        }
+        dialog::set_ok_enabled(dialog, !empty);
         for id in [ControlId::TransferMirror, ControlId::TransferSync] {
             if let Some(button) = dialog::item(dialog, id.id()) {
                 button.set_enabled(
@@ -741,9 +741,7 @@ impl<'a> NewFolder<'a> {
     fn update_ok(dialog: Hwnd) {
         let empty =
             NewFolder::name(dialog).is_none_or(|name| typed::trimmed(&name.text()).is_empty());
-        if let Some(ok) = dialog::item(dialog, DialogItem::Ok.id()) {
-            ok.set_enabled(!empty);
-        }
+        dialog::set_ok_enabled(dialog, !empty);
     }
 
     /// Takes out the characters that no name holds as they are typed, and
@@ -862,9 +860,7 @@ impl DeleteUnseen {
     }
 
     fn update_ok(&self, dialog: Hwnd) {
-        if let Some(ok) = dialog::item(dialog, DialogItem::Ok.id()) {
-            ok.set_enabled(self.typed(dialog));
-        }
+        dialog::set_ok_enabled(dialog, self.typed(dialog));
     }
 }
 
@@ -940,9 +936,7 @@ impl SelectFiles {
     fn update_ok(dialog: Hwnd) {
         let valid =
             SelectFiles::mask(dialog).is_some_and(|mask| NameMask::parse(&mask.text()).is_ok());
-        if let Some(ok) = dialog::item(dialog, DialogItem::Ok.id()) {
-            ok.set_enabled(valid);
-        }
+        dialog::set_ok_enabled(dialog, valid);
     }
 }
 

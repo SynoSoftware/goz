@@ -50,9 +50,30 @@ impl RowSelection {
 impl From<Vec<Range<u64>>> for RowSelection {
     fn from(mut positions: Vec<Range<u64>>) -> Self {
         positions.retain(|range| !range.is_empty());
-        let count = positions.iter().map(|range| range.end - range.start).sum();
+        let count = row_count(&positions);
         Self::new(positions, count)
     }
+}
+
+/// Adds `rows`, which start at or after the end of the last of `ranges`,
+/// to `ranges`, sorted rows as ranges that do not touch: the last range
+/// grows when `rows` start where it ends. Whether a range was added.
+pub(crate) fn push_rows(ranges: &mut Vec<Range<u64>>, rows: Range<u64>) -> bool {
+    match ranges.last_mut() {
+        Some(last) if last.end == rows.start => {
+            last.end = rows.end;
+            false
+        }
+        _ => {
+            ranges.push(rows);
+            true
+        }
+    }
+}
+
+/// How many rows `ranges` hold.
+pub(crate) fn row_count(ranges: &[Range<u64>]) -> u64 {
+    ranges.iter().map(|range| range.end - range.start).sum()
 }
 
 #[derive(Debug, PartialEq)]

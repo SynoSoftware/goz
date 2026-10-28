@@ -1,7 +1,7 @@
 //! Notification bookkeeping moves through one owned pass. Native controls
 //! confirm the resulting ranges; an invalid cache requires a fresh native read.
 
-use super::{RowSelection, RowsChange, ToldRows};
+use super::{RowSelection, RowsChange, ToldRows, push_rows, row_count};
 use crate::core::work::Retirement;
 use std::collections::{LinkedList, VecDeque};
 
@@ -90,12 +90,9 @@ impl Telling {
                 (cache, positions)
             }
             Input::Read { chunks, .. } => {
-                let mut positions: Vec<std::ops::Range<u64>> = Vec::new();
+                let mut positions = Vec::new();
                 for range in chunks.into_iter().flatten() {
-                    match positions.last_mut() {
-                        Some(last) if last.end == range.start => last.end = range.end,
-                        _ => positions.push(range),
-                    }
+                    push_rows(&mut positions, range);
                 }
                 (ToldRows::read(&positions), positions)
             }
@@ -107,7 +104,7 @@ impl Telling {
                 };
             }
         };
-        let count = positions.iter().map(|range| range.end - range.start).sum();
+        let count = row_count(&positions);
         Told {
             key: self.key,
             cache,

@@ -232,7 +232,7 @@ impl Panels {
     pub(crate) fn take_quick(&mut self, side: Side) -> Option<Finding> {
         let taken = Arc::clone(&self.taken);
         let panel = self.panel_mut(side);
-        if panel.quick.running.is_some() || panel.is_calculating() {
+        if panel.quick.running.is_some() || panel.rows_pending() {
             return None;
         }
         let action = panel.quick.pending.pop_front()?;

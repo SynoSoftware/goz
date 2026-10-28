@@ -56,24 +56,41 @@ use windows::core::{BOOL, PCWSTR, w};
 thread_local! {
     static UPDATES: RefCell<Updates> = RefCell::new(Updates::default());
     /// The window whose updates are published, until its `WM_DESTROY`.
-    static MAIN: Cell<Option<Hwnd>> = const { Cell::new(None) };
-    /// The main window's cover ([`create_cover`]), when Windows made it.
-    static COVER: Cell<Option<Hwnd>> = const { Cell::new(None) };
-    /// The client's size at the last pass that wanted the cover.
-    static COVERED_SIZE: Cell<(i32, i32)> = const { Cell::new((0, 0)) };
-    static FRAMES: RefCell<Option<SyncSender<Frame>>> = const { RefCell::new(None) };
-    /// The records that found the channel full since the last one sent.
-    static DROPPED: Cell<usize> = const { Cell::new(0) };
+    static MAIN: Cell<Option<Main>> = const { Cell::new(None) };
+    static FRAMES: RefCell<Option<FrameLog>> = const { RefCell::new(None) };
     static DEFERRED_PAINT: Cell<DeferredPaint> = const {
         Cell::new(DeferredPaint { since: None, present: Present::Idle })
     };
     /// The buffer of `find_marked`, kept so that a message allocates
     /// nothing for it.
     static WINDOWS: RefCell<Vec<Hwnd>> = const { RefCell::new(Vec::new()) };
-    /// The windows that painted during the open update's changes.
-    static EARLY: RefCell<Vec<Marked>> = const { RefCell::new(Vec::new()) };
-    /// The cover, when [`cover_now`] showed it during the open update.
-    static RAISED: Cell<Option<Hwnd>> = const { Cell::new(None) };
+    static OPEN: RefCell<OpenUpdate> = const {
+        RefCell::new(OpenUpdate { early: Vec::new(), raised: None })
+    };
+}
+
+#[derive(Clone, Copy)]
+struct Main {
+    window: Hwnd,
+    /// The cover ([`create_cover`]), when Windows made it.
+    cover: Option<Hwnd>,
+    /// The client's size at the last pass that wanted the cover.
+    covered_size: Option<(i32, i32)>,
+}
+
+struct FrameLog {
+    frames: SyncSender<Frame>,
+    /// The records that found the channel full since the last one sent.
+    dropped: usize,
+}
+
+/// What the open update did before its paint pass, which [`finish`] takes.
+#[derive(Default)]
+struct OpenUpdate {
+    /// The windows that painted during the update's changes.
+    early: Vec<Marked>,
+    /// The cover, when [`cover_now`] showed it.
+    raised: Option<Hwnd>,
 }
 
 /// The message the presenter posts to the main window when an update
@@ -83,8 +100,11 @@ pub(crate) const PRESENT: u32 = super::wake::WAKE + 11;
 /// Names the main window, whose marked windows the presenter publishes,
 /// and makes its cover.
 pub(crate) fn set_main_window(main: Hwnd) {
-    MAIN.set(Some(main));
-    COVER.set(create_cover(main));
+    MAIN.set(Some(Main {
+        window: main,
+        cover: create_cover(main),
+        covered_size: None,
+    }));
 }
 
 /// Makes the cover: a static control as a popup that `main` owns, which
@@ -157,7 +177,7 @@ fn set_flag(window: Hwnd, attribute: DWMWINDOWATTRIBUTE, on: bool) -> Option<()>
 /// receiver writes `ui-frames.log`. A send never waits: a full channel
 /// counts the record as dropped, and the next record carries the count.
 pub(crate) fn log_frames(frames: SyncSender<Frame>) {
-    FRAMES.set(Some(frames));
+    FRAMES.set(Some(FrameLog { frames, dropped: 0 }));
 }
 
 /// How many [`Frame`] ticks make a second.
@@ -203,10 +223,10 @@ pub(super) unsafe fn enter(window: HWND, message: u32, lparam: LPARAM) -> Scope 
     // The cover asks its owner for colours too, and paints only itself.
     // SAFETY: the caller's promise.
     if let Some(control) = unsafe { painting(message, lparam) }
-        && COVER.get() != Some(control)
+        && MAIN.get().and_then(|main| main.cover) != Some(control)
         && UPDATES.with_borrow(Updates::is_open)
     {
-        EARLY.with_borrow_mut(|early| {
+        OPEN.with_borrow_mut(|OpenUpdate { early, .. }| {
             if !early
                 .iter()
                 .any(|marked| marked.window == control.0.0 as isize)
@@ -232,9 +252,8 @@ pub(super) unsafe fn enter(window: HWND, message: u32, lparam: LPARAM) -> Scope 
             present: Present::Arrived,
             ..DEFERRED_PAINT.get()
         }),
-        WM_DESTROY if MAIN.get() == Some(Hwnd(window)) => {
+        WM_DESTROY if MAIN.get().is_some_and(|main| main.window == Hwnd(window)) => {
             MAIN.set(None);
-            COVER.set(None);
             UPDATES.with_borrow_mut(Updates::forget);
         }
         _ => {}
@@ -362,16 +381,7 @@ pub(crate) fn mark_rect_after<T>(
     }
     let mut children = Vec::new();
     super::dialog::add_descendants(control, &mut children);
-    let marked: Vec<(Hwnd, RECT)> = children
-        .into_iter()
-        .filter_map(|child| {
-            let mut rect = RECT::default();
-            // SAFETY: `rect` is a local the call fills in.
-            unsafe { GetUpdateRect(child.0, Some(&raw mut rect), false) }
-                .as_bool()
-                .then_some((child, rect))
-        })
-        .collect();
+    let marked: Vec<(Hwnd, RECT)> = update_rects(children).collect();
     // Drawing off drops the control's own marks too, such as a part that an
     // earlier status text of the same update marked, so marking one part
     // marks them again. A region, because the bounding box of two parts can
@@ -385,13 +395,10 @@ pub(crate) fn mark_rect_after<T>(
         // SAFETY: `region` is a valid region the call fills in.
         unsafe { GetUpdateRgn(control.0, region, false) };
     }
-    // SAFETY: plain values.
-    unsafe { SendMessageW(control.0, WM_SETREDRAW, Some(WPARAM(0)), None) };
-    let result = change();
+    let result = with_drawing_off(control, change);
     // SAFETY: plain values; each rectangle and region outlives the call that
     // reads it, and the kept region is this function's to delete.
     unsafe {
-        SendMessageW(control.0, WM_SETREDRAW, Some(WPARAM(1)), None);
         if let Some(region) = kept {
             let _ = RedrawWindow(
                 Some(control.0),
@@ -422,6 +429,29 @@ pub(crate) fn mark_rect_after<T>(
     result
 }
 
+/// Runs `change` with `window`'s drawing off (`WM_SETREDRAW`), so nothing
+/// it changes paints until the caller invalidates what should.
+pub(super) fn with_drawing_off<T>(window: Hwnd, change: impl FnOnce() -> T) -> T {
+    // SAFETY: plain values.
+    unsafe { SendMessageW(window.0, WM_SETREDRAW, Some(WPARAM(0)), None) };
+    let result = change();
+    // SAFETY: plain values.
+    unsafe { SendMessageW(window.0, WM_SETREDRAW, Some(WPARAM(1)), None) };
+    result
+}
+
+/// The windows among `windows` with a part waiting to paint, each with the
+/// bounds of that part in its own client coordinates.
+fn update_rects(windows: impl IntoIterator<Item = Hwnd>) -> impl Iterator<Item = (Hwnd, RECT)> {
+    windows.into_iter().filter_map(|window| {
+        let mut rect = RECT::default();
+        // SAFETY: `rect` is a local the call fills in.
+        unsafe { GetUpdateRect(window.0, Some(&raw mut rect), false) }
+            .as_bool()
+            .then_some((window, rect))
+    })
+}
+
 /// Shows the cover now, while the open update still makes its changes, for
 /// a change of `area` pixels in `window`, the main window or one of its
 /// controls, that paints at once inside native code; the update's paint
@@ -432,14 +462,14 @@ pub(crate) fn cover_now(window: Hwnd, area: i64) {
     let Some(main) = MAIN.get() else {
         return;
     };
-    let wanted = RAISED.get().is_none()
+    let wanted = OPEN.with_borrow(|open| open.raised.is_none())
         && is_shown_in_main(window)
-        && main.is_on_screen()
+        && main.window.is_on_screen()
         && UPDATES.with_borrow(Updates::is_open);
-    if let Some(cover) = COVER.get().filter(|_| wanted)
-        && raise_cover(main, cover, area) == Cover::Shown
+    if let Some(cover) = main.cover.filter(|_| wanted)
+        && raise_cover(main.window, cover, area) == Cover::Shown
     {
-        RAISED.set(Some(cover));
+        OPEN.with_borrow_mut(|open| open.raised = Some(cover));
     }
 }
 
@@ -449,7 +479,7 @@ fn is_shown_in_main(window: Hwnd) -> bool {
         .get()
         .filter(|_| window.styles().0.contains(WS_VISIBLE));
     // SAFETY: plain values.
-    main.is_some_and(|main| unsafe { GetAncestor(window.0, GA_ROOT) } == main.0)
+    main.is_some_and(|main| unsafe { GetAncestor(window.0, GA_ROOT) } == main.window.0)
 }
 
 /// Runs `scroll`, a native message that scrolls `list`, and paints the
@@ -502,9 +532,9 @@ fn finish(ended: Option<Start>) {
         deferred.present = Present::Idle;
         DEFERRED_PAINT.set(deferred);
     }
-    let early = EARLY.take();
-    let raised = Raised(RAISED.take());
-    let Some(main) = MAIN.get() else {
+    let OpenUpdate { early, raised } = OPEN.take();
+    let raised = Raised(raised);
+    let Some(Main { window: main, .. }) = MAIN.get() else {
         return;
     };
     let changed = ticks();
@@ -555,26 +585,27 @@ fn finish(ended: Option<Start>) {
         return;
     }
     let end = ticks();
-    let frame = Frame {
-        start,
-        end,
-        change: changed - start.ticks,
-        paint,
-        raise,
-        redraw,
-        cycles: gozler_winfs::thread_cycles().saturating_sub(start.cycles),
-        marked,
-        published,
-        early,
-        dropped: DROPPED.get(),
-    };
-    FRAMES.with_borrow(|frames| {
-        if let Some(frames) = frames {
-            match frames.try_send(frame) {
-                Ok(()) => DROPPED.set(0),
-                Err(TrySendError::Full(_)) => DROPPED.set(DROPPED.get() + 1),
-                Err(TrySendError::Disconnected(_)) => {}
-            }
+    FRAMES.with_borrow_mut(|log| {
+        let Some(log) = log else {
+            return;
+        };
+        let frame = Frame {
+            start,
+            end,
+            change: changed - start.ticks,
+            paint,
+            raise,
+            redraw,
+            cycles: gozler_winfs::thread_cycles().saturating_sub(start.cycles),
+            marked,
+            published,
+            early,
+            dropped: log.dropped,
+        };
+        match log.frames.try_send(frame) {
+            Ok(()) => log.dropped = 0,
+            Err(TrySendError::Full(_)) => log.dropped += 1,
+            Err(TrySendError::Disconnected(_)) => {}
         }
     });
 }
@@ -588,27 +619,19 @@ fn find_marked(main: Hwnd, marked: &mut Vec<Marked>) {
     windows.push(main);
     super::dialog::add_descendants(main, &mut windows);
     marked.clear();
-    marked.extend(
-        windows
-            .iter()
-            .filter(|window| window.is_visible())
-            .filter_map(|&window| {
-                let mut rect = RECT::default();
-                // SAFETY: `rect` is a local the calls fill in and convert; it
-                // holds the two points MapWindowPoints converts.
-                unsafe {
-                    if !GetUpdateRect(window.0, Some(&raw mut rect), false).as_bool() {
-                        return None;
-                    }
-                    let points = std::slice::from_raw_parts_mut((&raw mut rect).cast::<POINT>(), 2);
-                    MapWindowPoints(Some(window.0), None, points);
-                }
-                Some(Marked {
-                    window: window.0.0 as isize,
-                    rect: from_rect(rect),
-                })
-            }),
-    );
+    let visible = windows.iter().copied().filter(|window| window.is_visible());
+    marked.extend(update_rects(visible).map(|(window, mut rect)| {
+        // SAFETY: `rect` is a local that holds the two points
+        // MapWindowPoints converts.
+        unsafe {
+            let points = std::slice::from_raw_parts_mut((&raw mut rect).cast::<POINT>(), 2);
+            MapWindowPoints(Some(window.0), None, points);
+        }
+        Marked {
+            window: window.0.0 as isize,
+            rect: from_rect(rect),
+        }
+    }));
     WINDOWS.set(windows);
 }
 
@@ -620,7 +643,7 @@ fn find_marked(main: Hwnd, marked: &mut Vec<Marked>) {
 fn publish(main: Hwnd, area: i64, mut raised: Raised, covered: bool) -> (Cover, i64, i64) {
     let _pass = Scope(Some(UPDATES.with_borrow_mut(Updates::pass)));
     let before = ticks();
-    let outcome = match (raised.0, COVER.get()) {
+    let outcome = match (raised.0, MAIN.get().and_then(|main| main.cover)) {
         (Some(_), _) => Cover::Early,
         (None, _) if !covered => Cover::Single,
         (None, Some(cover)) => {
@@ -667,15 +690,21 @@ fn raise_cover(main: Hwnd, cover: Hwnd, area: i64) -> Cover {
         GetClientRect(main.0, &mut client).is_ok() && ClientToScreen(main.0, &mut origin).as_bool()
     };
     let (width, height) = (client.right, client.bottom);
-    // After a resize, the part of the surface that the window gained holds
-    // nothing yet, and a copy would show it so.
-    let resized = COVERED_SIZE.replace((width, height)) != (width, height);
+    let Some(mut measured) = MAIN.get() else {
+        return Cover::ShowFailed;
+    };
+    let covered_size = measured.covered_size.replace((width, height));
+    MAIN.set(Some(measured));
     let small = area * 4 < i64::from(width) * i64::from(height);
     if !placed {
         return Cover::ShowFailed;
     }
-    if resized {
-        return Cover::Resized;
+    // After a resize, the part of the surface that the window gained holds
+    // nothing yet, and a copy would show it so.
+    match covered_size {
+        None => return Cover::First,
+        Some(size) if size != (width, height) => return Cover::Resized,
+        Some(_) => {}
     }
     if small || width <= 0 || height <= 0 {
         return Cover::Small;

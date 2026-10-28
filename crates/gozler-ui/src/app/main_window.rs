@@ -73,7 +73,7 @@ use crate::core::search_list::Deselect;
 use crate::core::selection::{DRAG_LIMIT, RowSelection, SELECTION_LIMIT, Selection, wide_path};
 use crate::core::settings::{Choices, Mode, SettingsPage, SettingsValues};
 use crate::core::shortcuts::{CommandShortcuts, ShowShortcut};
-use crate::core::text::{LanguageChoice, Numbers, Strings, without_access_key};
+use crate::core::text::{LanguageChoice, Numbers, Strings, Text, without_access_key};
 use crate::core::work::{Id, Retirement, Waiting};
 use crate::win::clipboard;
 use crate::win::controls::{
@@ -1466,10 +1466,10 @@ impl MainWindow {
         let panel_widths = match &layout.body {
             Body::Commander { panels, .. } => std::array::from_fn(|index| {
                 let list = controls.panels.sides[index].list;
-                let old_width = list.hwnd().screen_rect().width;
+                let width = panels[index].list.width;
                 (
-                    list.fill_width() + panels[index].list.width - old_width,
-                    panels[index].list.width < old_width,
+                    list.fill_width_at(width),
+                    width < list.hwnd().screen_rect().width,
                 )
             }),
             Body::Search(_) => [(Px(0), false); 2],
@@ -2357,13 +2357,11 @@ impl MainWindow {
         let mode = self.model.borrow().mode();
         match mode {
             Mode::Search => {
-                let list = self.controls().search.list;
-                list.redraw_rows(list.visible_rows());
+                self.controls().search.list.redraw_visible();
             }
             Mode::Commander => {
                 for side in Side::BOTH {
-                    let list = self.panel(side).list;
-                    list.redraw_rows(list.visible_rows());
+                    self.panel(side).list.redraw_visible();
                 }
             }
         }
@@ -4034,7 +4032,7 @@ impl MainWindow {
             Deselect::All => control.deselect_all(),
             Deselect::Taken => self.request_taken_deselection(list),
         }
-        control.redraw_rows(control.visible_rows());
+        control.redraw_visible();
     }
 
     /// Asks where to export the shown search, and starts the export (DESIGN.md:
@@ -4122,7 +4120,7 @@ impl MainWindow {
             let width = self.controls().search.fill_width();
             let widths = (self.controls().search.column_sizing.borrow_mut())
                 .window_shown(width, || self.controls().search.column_fits(self));
-            self.controls().search.set_column_widths(widths);
+            (self.controls().search.list).set_column_widths(widths.into_iter().enumerate());
         }
         if self.tray.unshown.replace(false) {
             let placement = self.model.borrow().placement();
@@ -4295,6 +4293,7 @@ impl MainWindow {
             Timer::Searching(list) => self.name_search(hwnd, list),
             Timer::Selection(list) => self.fetch_selection(hwnd, list),
             Timer::PanelSettle(side) => self.controls().panels.on_panel_settled(self, hwnd, side),
+            Timer::PanelReading(side) => self.controls().panels.on_panel_reading(self, hwnd, side),
             Timer::PanelAgain(side) => {
                 hwnd.kill_timer(timer.id());
                 self.controls().panels.ask_panel_sizes(self, side);
@@ -4339,6 +4338,43 @@ impl MainWindow {
             created.metrics.get().dpi,
         ))
     }
+}
+
+/// A column whose fit [`measure_fits`] measures: its header, and its cells
+/// in [`ListView::fit_rows`], each a text and the parts of it that show in
+/// the bold font, which are Search's matches.
+struct MeasuredColumn {
+    column: Column,
+    /// The list's first column, whose cells start past the row's icon.
+    first: bool,
+    header: Text,
+    cells: Vec<(String, Vec<Range<usize>>)>,
+}
+
+/// The fits of `columns` (DESIGN.md: Results list); the first column's
+/// cells start `label` after its left edge.
+fn measure_fits(window: &MainWindow, columns: Vec<MeasuredColumn>, label: Px) -> Vec<ColumnFit> {
+    let created = window.created();
+    let dpi = created.metrics.get().dpi;
+    let fonts = created.fonts.borrow();
+    let plain = TextMeter::new(&fonts.ui);
+    let bold = TextMeter::new(&fonts.bold);
+    (columns.into_iter())
+        .map(|measured| {
+            let texts = (measured.cells.iter())
+                .filter(|(text, _)| !text.is_empty())
+                .map(|(text, parts)| matched_width(&plain, &bold, text, parts));
+            let label = if measured.first { label } else { Px(0) };
+            ColumnFit::of(
+                measured.column,
+                plain.plain_width(measured.header.compact()),
+                texts,
+                label,
+                measured.first,
+                dpi,
+            )
+        })
+        .collect()
 }
 
 /// The width of `text` with its parts `bold` in the bold font, as

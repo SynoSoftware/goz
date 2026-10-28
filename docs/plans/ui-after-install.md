@@ -153,9 +153,9 @@ owner has run it, and file an issue for each item that fails.
 
 ## DPI and contrast
 
-Recorded-frame painting acceptance is tracked separately in
-[Native window painting](window-painting.md). Closing the architecture
-implementation did not mark these visual or environment checks passed.
+"Painting" in [the design](../DESIGN.md) says how the window paints.
+Closing the architecture implementation did not mark these visual or
+environment checks passed.
 
 - In the normal light/system theme, resize both modes, drag the splitter and
   open the shared transfer pane: controls leave no cleared or half-drawn areas.

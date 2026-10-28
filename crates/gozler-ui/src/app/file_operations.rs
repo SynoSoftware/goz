@@ -1144,19 +1144,7 @@ impl Pane {
             Px(layout.report.width.0 * 60 / 100),
             Px(layout.report.width.0 * 40 / 100) - px(20, hwnd),
         ];
-        if widths
-            .iter()
-            .enumerate()
-            .any(|(i, &width)| c.report.column_width(i) != width)
-        {
-            c.report.hwnd().draw_once_after(|| {
-                for (i, &width) in widths.iter().enumerate() {
-                    if c.report.column_width(i) != width {
-                        c.report.set_column_width(i, width);
-                    }
-                }
-            });
-        }
+        c.report.set_column_widths(widths.into_iter().enumerate());
         drop(view);
         if old_layout.list != layout.list {
             self.show_tiles(false, true);

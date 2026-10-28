@@ -298,19 +298,12 @@ impl SettingsBridge {
                 let width = window.controls().search.fill_width();
                 let widths = (window.controls().search.column_sizing.borrow_mut())
                     .window_shown(width, || window.controls().search.column_fits(window));
-                window
-                    .controls()
-                    .search
-                    .list
-                    .hwnd()
-                    .draw_once_after(|| window.controls().search.set_column_widths(widths));
+                (window.controls().search.list).set_column_widths(widths.into_iter().enumerate());
             }
             window.controls().panels.fill_panel_columns(window);
-            let list = window.controls().search.list;
-            list.redraw_rows(list.visible_rows());
+            window.controls().search.list.redraw_visible();
             for side in Side::BOTH {
-                let list = window.panel(side).list;
-                list.redraw_rows(list.visible_rows());
+                window.panel(side).list.redraw_visible();
             }
         }
         window.save_settings(true);

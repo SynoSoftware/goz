@@ -4,6 +4,7 @@
 //! purposes and answers each [`Fetch`] with a [`Fetched`].
 
 use super::panel::Side;
+use super::selection::row_count;
 use super::work::Interest;
 use gozler_client::NotRunning;
 use gozler_core::include::IndexSettings;
@@ -342,8 +343,8 @@ impl SelectionRows {
         cached: Vec<Range<u64>>,
         made: Option<ResultSnapshotId>,
     ) -> Self {
-        let selected: u64 = positions.iter().map(|range| range.end - range.start).sum();
-        let cache_size: u64 = cached.iter().map(|range| range.end - range.start).sum();
+        let selected = row_count(positions);
+        let cache_size = row_count(&cached);
         let mut files = Vec::with_capacity(usize::try_from(selected).unwrap_or(0));
         let mut cache = Vec::with_capacity(usize::try_from(cache_size).unwrap_or(0));
         for (position, row) in rows {

@@ -53,7 +53,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
     SW_SHOWNORMAL, SWP_HIDEWINDOW, SWP_NOACTIVATE, SWP_NOCOPYBITS, SWP_NOMOVE, SWP_NOREDRAW,
     SWP_NOSIZE, SWP_NOZORDER, SWP_SHOWWINDOW, SendMessageW, SetForegroundWindow, SetWindowPos,
     SetWindowTextW, ShowWindow, UIS_CLEAR, UISF_HIDEFOCUS, WINDOW_EX_STYLE, WINDOW_STYLE,
-    WINDOWPLACEMENT, WM_CHANGEUISTATE, WM_SETREDRAW, WPF_RESTORETOMAXIMIZED, WS_VISIBLE,
+    WINDOWPLACEMENT, WM_CHANGEUISTATE, WPF_RESTORETOMAXIMIZED, WS_VISIBLE,
 };
 use windows::core::HSTRING;
 
@@ -306,19 +306,16 @@ impl Hwnd {
             change();
             return;
         }
+        present::with_drawing_off(self, change);
         // SAFETY: plain values.
-        unsafe { SendMessageW(self.0, WM_SETREDRAW, Some(WPARAM(0)), None) };
-        change();
-        // SAFETY: plain values.
-        unsafe {
-            SendMessageW(self.0, WM_SETREDRAW, Some(WPARAM(1)), None);
-            let _ = RedrawWindow(
+        let _ = unsafe {
+            RedrawWindow(
                 Some(self.0),
                 None,
                 None,
                 RDW_FRAME | RDW_INVALIDATE | RDW_ALLCHILDREN | flags,
-            );
-        }
+            )
+        };
     }
 
     /// Gives the window the keyboard focus. The control that loses it and

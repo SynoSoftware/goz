@@ -3576,11 +3576,13 @@ pub(crate) mod tests {
             "the panel's list still shows the row blank"
         );
         let ask = (model.panels_mut().leave_search(Side::Left)).expect("the panel searches");
-        let opened = ReadEvent::Opened {
+        let listed = ReadEvent::Listed {
             generation: ask.generation,
             folder: ask.path,
+            entries: Vec::new(),
+            focus: None,
         };
-        model.panels_mut().accept_read(Side::Left, opened, None);
+        model.panels_mut().accept_read(Side::Left, listed, None);
         assert!(!model.keeps(id));
     }
 

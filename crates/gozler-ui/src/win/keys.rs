@@ -1,36 +1,13 @@
-//! The virtual-key code of each [`Key`], one table for the accelerators,
+//! The virtual-key code of each [`Key`], one match for the accelerators,
 //! the keys the window reads, the hotkey controls and the shortcut to show
 //! Gozler.
 
 use crate::core::commands::Key;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    VIRTUAL_KEY, VK_ADD, VK_BACK, VK_DELETE, VK_DOWN, VK_END, VK_ESCAPE, VK_F1, VK_F24, VK_HOME,
-    VK_INSERT, VK_LEFT, VK_NEXT, VK_OEM_COMMA, VK_OEM_PERIOD, VK_PRIOR, VK_RETURN, VK_RIGHT,
-    VK_SPACE, VK_SUBTRACT, VK_TAB, VK_UP,
+    VK_ADD, VK_BACK, VK_DELETE, VK_DOWN, VK_END, VK_ESCAPE, VK_F1, VK_F24, VK_HOME, VK_INSERT,
+    VK_LEFT, VK_NEXT, VK_OEM_COMMA, VK_OEM_PERIOD, VK_PRIOR, VK_RETURN, VK_RIGHT, VK_SPACE,
+    VK_SUBTRACT, VK_TAB, VK_UP,
 };
-
-/// The keys without a number, with their codes.
-const NAMED: [(Key, VIRTUAL_KEY); 19] = [
-    (Key::Enter, VK_RETURN),
-    (Key::Escape, VK_ESCAPE),
-    (Key::Tab, VK_TAB),
-    (Key::Space, VK_SPACE),
-    (Key::Backspace, VK_BACK),
-    (Key::Delete, VK_DELETE),
-    (Key::Insert, VK_INSERT),
-    (Key::Home, VK_HOME),
-    (Key::End, VK_END),
-    (Key::PageUp, VK_PRIOR),
-    (Key::PageDown, VK_NEXT),
-    (Key::Left, VK_LEFT),
-    (Key::Up, VK_UP),
-    (Key::Right, VK_RIGHT),
-    (Key::Down, VK_DOWN),
-    (Key::Comma, VK_OEM_COMMA),
-    (Key::Period, VK_OEM_PERIOD),
-    (Key::NumPlus, VK_ADD),
-    (Key::NumMinus, VK_SUBTRACT),
-];
 
 pub(crate) fn virtual_key(key: Key) -> u16 {
     match key {
@@ -38,10 +15,25 @@ pub(crate) fn virtual_key(key: Key) -> u16 {
         // code.
         Key::Letter(c) | Key::Digit(c) => u16::from(c),
         Key::Function(n) => VK_F1.0 + u16::from(n) - 1,
-        named => NAMED
-            .iter()
-            .find_map(|(k, vk)| (*k == named).then_some(vk.0))
-            .expect("NAMED holds every key without a number"),
+        Key::Enter => VK_RETURN.0,
+        Key::Escape => VK_ESCAPE.0,
+        Key::Tab => VK_TAB.0,
+        Key::Space => VK_SPACE.0,
+        Key::Backspace => VK_BACK.0,
+        Key::Delete => VK_DELETE.0,
+        Key::Insert => VK_INSERT.0,
+        Key::Home => VK_HOME.0,
+        Key::End => VK_END.0,
+        Key::PageUp => VK_PRIOR.0,
+        Key::PageDown => VK_NEXT.0,
+        Key::Left => VK_LEFT.0,
+        Key::Up => VK_UP.0,
+        Key::Right => VK_RIGHT.0,
+        Key::Down => VK_DOWN.0,
+        Key::Comma => VK_OEM_COMMA.0,
+        Key::Period => VK_OEM_PERIOD.0,
+        Key::NumPlus => VK_ADD.0,
+        Key::NumMinus => VK_SUBTRACT.0,
     }
 }
 
@@ -53,7 +45,7 @@ pub(crate) fn key_of(code: u16) -> Option<Key> {
         code if (VK_F1.0..=VK_F24.0).contains(&code) => {
             Some(Key::Function((code - VK_F1.0 + 1) as u8))
         }
-        code => NAMED.iter().find(|(_, vk)| vk.0 == code).map(|(k, _)| *k),
+        code => Key::NAMED.into_iter().find(|key| virtual_key(*key) == code),
     }
 }
 

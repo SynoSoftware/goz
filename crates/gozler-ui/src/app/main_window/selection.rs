@@ -5,7 +5,9 @@ use super::*;
 use crate::core::commands::SelectKey;
 use crate::core::panel::{Place, QuickAction};
 use crate::core::selection::changes::{Changes, Write};
-use crate::core::selection::{CaptureKey, Capturing, Movement, RowsChange, moved, passed};
+use crate::core::selection::{
+    CaptureKey, Capturing, Movement, RowsChange, moved, passed, push_rows, row_count,
+};
 use crate::core::work::INLINE_ITEMS;
 use std::collections::LinkedList;
 
@@ -106,12 +108,8 @@ impl NativeRead {
                 Vec::with_capacity(INLINE_ITEMS),
             ));
         }
-        match self.current.last_mut() {
-            Some(last) if last.end == row => last.end = row + 1,
-            _ => {
-                self.current.push(row..row + 1);
-                self.items += 1;
-            }
+        if push_rows(&mut self.current, row..row + 1) {
+            self.items += 1;
         }
         self.after = Some(row);
         self.read += 1;
@@ -799,12 +797,7 @@ impl MainWindow {
                     model.panels().selected_count(side),
                 )
             }
-            List::Search => (
-                self.list_control(list).count(),
-                (place.selected.iter())
-                    .map(|rows| rows.end - rows.start)
-                    .sum(),
-            ),
+            List::Search => (self.list_control(list).count(), row_count(&place.selected)),
         };
         let mut retired = Retirement::default();
         {
@@ -956,7 +949,7 @@ impl MainWindow {
             self.set_selection_enabled(list, true);
         }
         self.retire_selection(update);
-        control.redraw_rows(control.visible_rows());
+        control.redraw_visible();
         if let List::Panel(side) = list {
             self.controls().panels.show_panel(self, side);
         }

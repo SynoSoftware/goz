@@ -571,8 +571,8 @@ pub(crate) enum Key {
 }
 
 impl Key {
-    /// Every key without a number, for reading a key's name back.
-    const NAMED: [Key; 19] = [
+    /// Every key without a number, for reading a key's name or code back.
+    pub(crate) const NAMED: [Key; 19] = [
         Key::Enter,
         Key::Escape,
         Key::Tab,
@@ -809,6 +809,19 @@ pub(crate) enum KeyAction {
     Select(SelectKey),
 }
 
+impl KeyAction {
+    /// The command whose menu item shows this key. `Esc` in a panel's
+    /// list clears the selection when no quick search or search panel
+    /// takes it first.
+    fn command(self) -> Option<CommandId> {
+        match self {
+            KeyAction::Run(command) => Some(command),
+            KeyAction::Panel(PanelKey::Escape) => Some(CommandId::ClearSelection),
+            _ => None,
+        }
+    }
+}
+
 /// What a cursor key or a selection key does in a list, as in Total
 /// Commander.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -877,7 +890,15 @@ pub(crate) fn control_key(focus: Focus, key: Keystroke) -> Option<KeyAction> {
             },
         });
     }
-    let table: &[(Keystroke, KeyAction)] = match focus {
+    focus_keys(focus)
+        .find(|(stroke, _)| *stroke == key)
+        .map(|(_, action)| *action)
+}
+
+/// The keys the window takes while `focus` has the focus, besides Tab, in
+/// the order [`control_key`] reads them.
+fn focus_keys(focus: Focus) -> impl Iterator<Item = &'static (Keystroke, KeyAction)> {
+    let table: &'static [(Keystroke, KeyAction)] = match focus {
         Focus::SearchBox { .. } => {
             const {
                 &[
@@ -971,15 +992,11 @@ pub(crate) fn control_key(focus: Focus, key: Keystroke) -> Option<KeyAction> {
         }
         Focus::Value { .. } | Focus::Other => &[],
     };
-    let select = match focus {
+    let select: &'static [(Keystroke, KeyAction)] = match focus {
         Focus::List | Focus::Panel => SELECT_KEYS,
         _ => &[],
     };
-    table
-        .iter()
-        .chain(select)
-        .find(|(stroke, _)| *stroke == key)
-        .map(|(_, action)| *action)
+    table.iter().chain(select)
 }
 
 /// The keys of a panel's list besides [`SELECT_KEYS`].
@@ -1294,9 +1311,8 @@ impl MenuItem {
 
     /// The shortcut the menu shows after the label: the first key that
     /// runs it while `mode` shows, from the table its accelerators come
-    /// from. In Commander mode, Clear selection shows `Esc`, the key of a
-    /// panel's list, because the menus there teach the keys
-    /// (DESIGN.md: Menus in Commander mode).
+    /// from, or else from the keys of the mode's list, because the menus
+    /// teach the keys (DESIGN.md: Menus in Commander mode).
     pub(crate) fn shortcut(self, shortcuts: &CommandShortcuts, mode: Mode) -> Option<Keystroke> {
         let MenuItem::Run(command) = self else {
             return None;
@@ -1306,14 +1322,13 @@ impl MenuItem {
             .find(|(_, item)| *item == self)
             .map(|(key, _)| key)
             .or_else(|| {
-                let key = match (command, mode) {
-                    (CommandId::ClearSelection, Mode::Commander) => Key::Escape,
-                    (CommandId::ClearSelection, Mode::Search) => Key::NumMinus,
-                    (CommandId::SelectFiles, Mode::Commander) => Key::NumPlus,
-                    (CommandId::UnselectFiles, Mode::Commander) => Key::NumMinus,
-                    _ => return None,
+                let list = match mode {
+                    Mode::Search => Focus::List,
+                    Mode::Commander => Focus::Panel,
                 };
-                Some(Keystroke::plain(key))
+                focus_keys(list)
+                    .find(|(_, action)| action.command() == Some(command))
+                    .map(|(key, _)| *key)
             })
     }
 

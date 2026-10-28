@@ -109,7 +109,7 @@ impl StatusBar {
             return;
         }
         let text = wide(text);
-        crate::win::present::mark_rect_after(self.0, Some(self.native_part_rect(part)), || {
+        self.mark_part_after(part, || {
             // SAFETY: `text` is NUL-terminated and outlives the call, which
             // copies it.
             unsafe { send_pointer(self.0, SB_SETTEXTW, part | style, text.as_ptr()) }
@@ -139,10 +139,14 @@ impl StatusBar {
         // it alive; one that it shows already is not set again, because each
         // setting draws the part again.
         if send(self.0, SB_GETICON, part, 0) != icon.0 as isize {
-            crate::win::present::mark_rect_after(self.0, Some(self.native_part_rect(part)), || {
-                send(self.0, SB_SETICON, part, icon.0 as isize)
-            });
+            self.mark_part_after(part, || send(self.0, SB_SETICON, part, icon.0 as isize));
         }
+    }
+
+    /// Runs `change`, which changes `part` alone, marking only that part
+    /// ([`crate::win::present::mark_rect_after`]).
+    fn mark_part_after<T>(self, part: usize, change: impl FnOnce() -> T) -> T {
+        crate::win::present::mark_rect_after(self.0, Some(self.native_part_rect(part)), change)
     }
 
     /// The width of a part that shows `text` whole, after `glyph`'s icon

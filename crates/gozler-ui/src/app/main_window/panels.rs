@@ -5,7 +5,7 @@
 //! The selection).
 
 use super::super::dialogs::{NewFolder, SelectFiles, TransferMode, TransferStart};
-use super::{MainWindow, Selected, Timer};
+use super::{MainWindow, MeasuredColumn, Selected, Timer, measure_fits};
 use crate::core::captions::{self, PanelCaptions};
 use crate::core::commands::{self, CommandId, Mark, MenuItem, MenuNode, PanelAction, PanelKey};
 use crate::core::fetch::{List, Purpose};
@@ -17,8 +17,8 @@ use crate::core::model::{Accepted, Areas, Effect, TakenShown};
 use crate::core::open::{Entries, EntryAction};
 use crate::core::panel::{
     self, Entered, FolderChange, LookIn, PanelColumn, PanelFollow, PanelUpdate,
-    Panels as PanelState, Place, QuickAction, ReadAsk, ReadChange, ReadEvent, ReadFailure, Row,
-    Side, TakenRows, UpdatedKind, View,
+    Panels as PanelState, Place, QuickAction, ReadAccepted, ReadAsk, ReadChange, ReadEvent,
+    ReadFailure, Row, Side, TakenRows, UpdatedKind, View,
 };
 use crate::core::selection::SELECTION_LIMIT;
 use crate::core::settings::Mode;
@@ -26,7 +26,7 @@ use crate::core::work::Waiting;
 use crate::win::controls::{Button, DropDownList, Edit, Label, ListColumn, ListView};
 use crate::win::dialog::DialogEnd;
 use crate::win::folder::{self, PanelEvent, Removal};
-use crate::win::gdi::{StaticColors, TextMeter};
+use crate::win::gdi::StaticColors;
 use crate::win::notify::{CustomDraw, DispInfo, DrawAnswer, DrawStage, ListNotify};
 use crate::win::{self, Hwnd, shell};
 use gozler_core::types::{SortDir, SortKey, SortSpec};
@@ -43,6 +43,12 @@ const FOLDER_COLUMN: usize = 2;
 /// A panel asks gozlerd for its folder sizes and reads its free space this
 /// long after the last change in its folder (DESIGN.md: Folder sizes).
 const SETTLE_MS: u32 = 500;
+
+/// A panel that goes to a folder keeps showing the folder it leaves until
+/// the new listing replaces it in one update, so the list never shows empty
+/// in between; a listing that takes longer than this shows the new folder
+/// reading (DESIGN.md: A panel).
+const READING_MS: u32 = 250;
 
 /// gozlerd applies a change from the volume's journal after the disk has
 /// it, so a panel asks for its sizes once more this long after an
@@ -771,21 +777,20 @@ impl Panels {
     /// vertical scroll bar brings no horizontal one.
     fn fill_panel_at(&self, window: &MainWindow, side: Side, available: Px) {
         let widths = column_sizing::fill_widths(&self.panel_fits(window, side), available);
-        self.set_panel_widths(side, widths.into_iter().enumerate().collect());
+        self.panel(side)
+            .list
+            .set_column_widths(widths.into_iter().enumerate());
     }
 
     /// The fits of `side`'s columns: each fits its header and its cells in
     /// [`ListView::fit_rows`], within the limits of Search's column of the
     /// same kind, as Search's columns do.
     fn panel_fits(&self, window: &MainWindow, side: Side) -> Vec<ColumnFit> {
-        let created = window.created();
-        let dpi = created.metrics.get().dpi;
         let c = self.panel(side);
-        let list = c.list;
-        let (rows, label) = list.fit_rows();
+        let (rows, label) = c.list.fit_rows();
         // The model is borrowed while the texts are formatted, and the
         // measuring follows.
-        let (headers, cells) = {
+        let measured = {
             let model = window.model.borrow();
             let numbers = window.numbers.borrow();
             let dates = window.dates.borrow();
@@ -793,40 +798,24 @@ impl Panels {
             let sizes = model.choices().size_format;
             let panels = model.panels();
             let panel = panels.panel(side);
-            let cells: Vec<Vec<String>> = (c.columns().iter())
-                .map(|&column| {
-                    (rows.clone())
+            (c.columns().iter().enumerate())
+                .map(|(index, &column)| MeasuredColumn {
+                    column: column.search_column(),
+                    first: index == 0,
+                    header: captions::panel_header(strings, column),
+                    cells: (rows.clone())
                         .filter_map(|index| shown_or_taken(panels, side, index))
                         .map(|row| {
-                            captions::panel_cell(
+                            let cell = captions::panel_cell(
                                 strings, &*numbers, sizes, &dates, panel, row, column,
-                            )
-                            .full
+                            );
+                            (cell.full, Vec::new())
                         })
-                        .collect()
+                        .collect(),
                 })
-                .collect();
-            (captions::panel_headers(strings, c.columns()), cells)
+                .collect::<Vec<_>>()
         };
-        let fonts = created.fonts.borrow();
-        let plain = TextMeter::new(&fonts.ui);
-        (c.columns().iter().zip(headers).zip(cells).enumerate())
-            .map(|(index, ((column, header), cells))| {
-                let first = index == 0;
-                let label = if first { label } else { Px(0) };
-                let texts = (cells.iter())
-                    .filter(|text| !text.is_empty())
-                    .map(|text| plain.width(text));
-                ColumnFit::of(
-                    column.search_column(),
-                    plain.plain_width(header.compact()),
-                    texts,
-                    label,
-                    first,
-                    dpi,
-                )
-            })
-            .collect()
+        measure_fits(window, measured, label)
     }
 
     /// Gives Name the room the other columns leave in `side`'s list,
@@ -852,22 +841,7 @@ impl Panels {
             }
             None => vec![(0, room)],
         };
-        self.set_panel_widths(side, widths);
-    }
-
-    /// Gives `side`'s columns `widths`, as column index and width. The list
-    /// draws once, and only when a width changes, because each width it
-    /// takes draws every row it shows.
-    fn set_panel_widths(&self, side: Side, mut widths: Vec<(usize, Px)>) {
-        let list = self.panel(side).list;
-        widths.retain(|(index, width)| list.column_width(*index) != *width);
-        if !widths.is_empty() {
-            list.draw_once_after(|| {
-                for (index, width) in widths {
-                    list.set_column_width(index, width);
-                }
-            });
-        }
+        c.list.set_column_widths(widths);
     }
 
     /// Starts reading both panels' folders, or a search panel's search,
@@ -1196,6 +1170,28 @@ impl Panels {
                 .borrow_mut()
                 .panels_mut()
                 .accept_read(side, event, shown.focused);
+        self.show_read(window, hwnd, side, shown, accepted);
+    }
+
+    /// `READING_MS` after the folder of `side`'s Go opened: the folder shows
+    /// reading, unless its listing came first.
+    pub(super) fn on_panel_reading(&self, window: &MainWindow, hwnd: Hwnd, side: Side) {
+        hwnd.kill_timer(Timer::PanelReading(side).id());
+        let shown = self.place(window, side);
+        let accepted = window.model.borrow_mut().panels_mut().show_reading(side);
+        self.show_read(window, hwnd, side, shown, accepted);
+    }
+
+    /// Shows what a reading of `side` changed in the panel, which showed
+    /// `shown` before.
+    fn show_read(
+        &self,
+        window: &MainWindow,
+        hwnd: Hwnd,
+        side: Side,
+        shown: Place,
+        accepted: ReadAccepted,
+    ) {
         if accepted.search_ended {
             self.left_search(window, hwnd, side);
         }
@@ -1206,6 +1202,10 @@ impl Panels {
                 return;
             }
             ReadChange::Stale => return,
+            ReadChange::Opened => {
+                hwnd.set_timer(Timer::PanelReading(side).id(), READING_MS);
+                return;
+            }
             ReadChange::Cleared => {
                 window.cancel_request(Purpose::FolderSizes(side));
                 self.show_place(
