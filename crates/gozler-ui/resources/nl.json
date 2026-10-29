@@ -22,6 +22,7 @@
     "turkish": "&Turks"
   },
   "command": {
+    "search": "&Zoeken",
     "synchronize": "Mappen s&ynchroniseren…",
     "open": "&Openen",
     "open_file_location": "Bestands&locatie openen",
@@ -560,6 +561,7 @@
     "context_menu": "Snelmenu",
     "notification_area": "Systeemvak",
     "refused_control": "Het zoekvak of de resultatenlijst gebruikt deze toets.",
+    "refused_mode": "{0} is gereserveerd voor {1}.",
     "refused_typing": "Deze toets typt of opent menu's. Gebruik Ctrl of een functietoets, zoals Ctrl+K of F3.",
     "refused_taken": "{0} is de sneltoets voor {1}. Verwijder deze daar eerst.",
     "unsupported": "Deze toets kan geen sneltoets zijn. Gebruik een letter, cijfer of functietoets.",

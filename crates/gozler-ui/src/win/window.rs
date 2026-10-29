@@ -45,12 +45,13 @@ use windows::Win32::UI::WindowsAndMessaging::{
     TranslateMessage, UnhookWindowsHookEx, WA_INACTIVE, WH_MSGFILTER, WINDOWPLACEMENT,
     WINDOWPLACEMENT_FLAGS, WM_ACTIVATE, WM_CAPTURECHANGED, WM_CHAR, WM_CLOSE, WM_COMMAND,
     WM_CONTEXTMENU, WM_COPYDATA, WM_CREATE, WM_CTLCOLOREDIT, WM_CTLCOLORSTATIC, WM_DESTROY,
-    WM_DEVICECHANGE, WM_DPICHANGED, WM_ENDSESSION, WM_ENTERSIZEMOVE, WM_EXITSIZEMOVE,
-    WM_GETMINMAXINFO, WM_HOTKEY, WM_INITMENUPOPUP, WM_KEYDOWN, WM_LBUTTONDOWN, WM_LBUTTONUP,
-    WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NCCREATE, WM_NCDESTROY, WM_NOTIFY, WM_QUIT, WM_SETCURSOR,
-    WM_SETTINGCHANGE, WM_SIZE, WM_SYSCHAR, WM_SYSCOLORCHANGE, WM_SYSCOMMAND, WM_SYSKEYDOWN,
-    WM_TIMER, WM_VSCROLL, WM_WINDOWPOSCHANGED, WNDCLASSEXW, WPF_RESTORETOMAXIMIZED, WS_CHILD,
-    WS_CLIPCHILDREN, WS_CLIPSIBLINGS, WS_EX_CONTROLPARENT, WS_EX_LEFT, WS_OVERLAPPEDWINDOW,
+    WM_DEVICECHANGE, WM_DPICHANGED, WM_ENDSESSION, WM_ENTERSIZEMOVE, WM_EXITMENULOOP,
+    WM_EXITSIZEMOVE, WM_GETMINMAXINFO, WM_HOTKEY, WM_INITMENUPOPUP, WM_KEYDOWN, WM_KEYUP,
+    WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NCCREATE, WM_NCDESTROY,
+    WM_NOTIFY, WM_QUIT, WM_SETCURSOR, WM_SETTINGCHANGE, WM_SIZE, WM_SYSCHAR, WM_SYSCOLORCHANGE,
+    WM_SYSCOMMAND, WM_SYSKEYDOWN, WM_SYSKEYUP, WM_TIMER, WM_VSCROLL, WM_WINDOWPOSCHANGED,
+    WNDCLASSEXW, WPF_RESTORETOMAXIMIZED, WS_CHILD, WS_CLIPCHILDREN, WS_CLIPSIBLINGS,
+    WS_EX_CONTROLPARENT, WS_EX_LEFT, WS_OVERLAPPEDWINDOW,
 };
 use windows::core::{HSTRING, PCWSTR};
 
@@ -64,6 +65,7 @@ pub(crate) enum Message<'a> {
         from_another_program: bool,
     },
     Deactivate,
+    ModifiersChanged,
     Size,
     /// The window moved, was resized, or was shown or hidden, by any means:
     /// a drag, maximize, restore, a snap, `Win+Arrow`, or a move to a
@@ -469,6 +471,8 @@ const FOCUS_MOVED: u32 = super::wake::WAKE + 3;
 /// ([`Message::Char`]).
 const CHAR: u32 = super::wake::WAKE + 7;
 
+const MODIFIERS_CHANGED: u32 = super::wake::WAKE + 8;
+
 thread_local! {
 
     /// The windows that [`own_keys`] names.
@@ -618,6 +622,15 @@ fn run_messages(
                     DispatchMessageW(&msg);
                 }
                 continue;
+            }
+            if matches!(
+                msg.message,
+                WM_KEYDOWN | WM_KEYUP | WM_SYSKEYDOWN | WM_SYSKEYUP
+            ) && [VK_MENU, VK_CONTROL, VK_SHIFT]
+                .iter()
+                .any(|key| msg.wParam.0 == usize::from(key.0))
+            {
+                SendMessageW(main.0, MODIFIERS_CHANGED, None, None);
             }
             // Bit 30 of a key down's flags: the key was down before.
             if matches!(msg.message, WM_KEYDOWN | WM_SYSKEYDOWN)
@@ -978,6 +991,7 @@ unsafe fn decode<'a>(msg: u32, wparam: WPARAM, lparam: LPARAM) -> Message<'a> {
         WM_TIMER => Message::Timer(wparam.0),
         super::wake::WAKE => Message::Wake,
         DEFERRED => Message::Deferred,
+        MODIFIERS_CHANGED | WM_EXITMENULOOP => Message::ModifiersChanged,
         WM_CONTEXTMENU => Message::ContextMenu {
             from: Hwnd(HWND(wparam.0 as *mut _)),
             // -1, -1 is the keyboard's; the coordinates are signed words.
@@ -1171,6 +1185,10 @@ pub(crate) fn shift_presses() -> u32 {
 /// Whether Shift was down when the message being handled was read.
 pub(crate) fn shift_held() -> bool {
     held(VK_SHIFT)
+}
+
+pub(crate) fn only_alt_held() -> bool {
+    held(VK_MENU) && !held(VK_CONTROL) && !held(VK_SHIFT)
 }
 
 /// Whether `key` was down when the message being handled was read.

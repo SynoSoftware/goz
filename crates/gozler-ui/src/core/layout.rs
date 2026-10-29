@@ -473,6 +473,7 @@ impl CaptionWidths {
             key_bar: captions
                 .key_bar
                 .iter()
+                .flatten()
                 .map(|(key, word, _)| measure(&format!("{key} {word}")))
                 .max()
                 .unwrap_or_default(),

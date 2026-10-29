@@ -99,8 +99,9 @@ pub(crate) struct WindowCaptions {
     /// [`LookIn::ALL`]'s order.
     pub(crate) look_in_label: String,
     pub(crate) look_in: Vec<String>,
-    /// The key bar's buttons: each key, its word and its tooltip.
-    pub(crate) key_bar: [(String, String, Option<String>); 6],
+    /// The key bar's buttons without Alt and with Alt held: each key, its
+    /// word and its tooltip.
+    pub(crate) key_bar: [[(String, String, Option<String>); 6]; 2],
     pub(crate) retry: String,
     /// The widest free space a status line shows, which the layout sizes
     /// the status line's right end for.
@@ -852,7 +853,7 @@ impl WindowCaptions {
             look_in: LookIn::ALL
                 .map(|look_in| look_in_item(strings, look_in))
                 .to_vec(),
-            key_bar: key_bar(strings),
+            key_bar: [key_bar(strings, false), key_bar(strings, true)],
             retry: strings.text("panel.retry").to_owned(),
             free_widest: (2..=5)
                 .flat_map(|unit| {

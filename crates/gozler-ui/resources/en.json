@@ -22,6 +22,7 @@
     "turkish": "&Turkish"
   },
   "command": {
+    "search": "&Search",
     "synchronize": "S&ynchronize folders…",
     "open": "&Open",
     "open_file_location": "Open file &location",
@@ -560,6 +561,7 @@
     "context_menu": "Context menu",
     "notification_area": "Notification area",
     "refused_control": "The search box or the results list uses this key.",
+    "refused_mode": "{0} is reserved for {1}.",
     "refused_typing": "This key types or opens menus. Use Ctrl or a function key, such as Ctrl+K or F3.",
     "refused_taken": "{0} is the shortcut for {1}. Remove it there first.",
     "unsupported": "This key can't be a shortcut. Use a letter, a digit or a function key.",

@@ -718,12 +718,12 @@ job's progress and Cancel controls. The tooltip retains all drive details.
 | C30 | Cut | the list is focused, and as C27 | the files, on the clipboard to be moved (see "Copy"); `Ctrl+X` in the list runs it |
 | C31 | Paste | the list is focused, the window owns the file operations, the clipboard holds files, and exactly one folder row is selected and read | the clipboard's files, moved into the folder when they were cut and copied when they were copied (see "Copy"); `Ctrl+V` in the list runs it |
 | C32 | File operations | the window owns the file operations | opens the shared File transfers pane |
-| C33 | Commander | always, checked while Commander mode shows | switches between Search and Commander mode (see "Commander mode") |
+| C33 | Commander | always | shows Commander mode (see "Commander mode") |
 | C37 | Clear selection | rows are selected | the list's selection; in Search's list `Num -` runs it, and `Num +` then selects the same rows again while nothing else has changed the selection, so a key pressed by mistake costs nothing |
 | C38 | View | exactly 1 row selected and read, and it is a file | the file, in a Viewer (see "The Viewer"); `F3` runs it, as in a panel |
 | C34 | Synchronize folders… | the window owns the file operations | compares explicit source and destination folders, then offers Synchronize; no default shortcut |
 
-Copy to folder…, Move to folder… and Commander have no default shortcut, because File Explorer has none for the first two and `F5` is Refresh in Search. `Delete`, `Shift+Delete`, `Ctrl+X` and `Ctrl+V` are keys of the list, not accelerators (window rule 8), so in the search box they keep deleting, cutting and pasting text. `Esc` never stops a file operation, because one stray key would leave a copy half done; File > Cancel and the status bar's Cancel do. Select all reaches rows the person never saw, up to 100,000 (`S4`), so the Delete question gives the count.
+Copy to folder… and Move to folder… have no default shortcut in Search, because File Explorer has none and `F5` is Refresh in Search. `Delete`, `Shift+Delete`, `Ctrl+X` and `Ctrl+V` are keys of the list, not accelerators (window rule 8), so in the search box they keep deleting, cutting and pasting text. `Esc` never stops a file operation, because one stray key would leave a copy half done; File > Cancel and the status bar's Cancel do. Select all reaches rows the person never saw, up to 100,000 (`S4`), so the Delete question gives the count.
 
 Open, Open file location and Explore stop at 15 entries, because File Explorer asks before it opens more than 15 items, and the window would rather not open many windows by accident. An empty open command does what File Explorer does (see "The Context menu page").
 
@@ -733,7 +733,7 @@ Groups are separated by a separator, in this order:
 
 - **File:** Open, Open file location, Show in Commander, View, Properties | Copy to folder…, Move to folder…, Delete | Synchronize folders… | Export results…, Cancel | Settings… | Exit
 - **Edit:** Cut, Copy, Paste, Copy path, Copy name, Copy folder | Select all, Clear selection | Find. Cut, Copy and Paste are in File Explorer's order.
-- **View:** Commander | Filters, Inspector, Columns | Sort by | Refresh | File operations
+- **View:** Commander (`Alt+F12`) | Filters, Inspector, Columns | Sort by | Refresh | File operations
 - **Help:** Search syntax | About Gozler
 - **Language,** aligned right on the menu bar (`MFT_RIGHTJUSTIFY`): Windows default | each shipped language by its own name
 - **The context menu on a row:** Open, Open file location, Explore | Cut, Copy, Paste, Copy path, Copy name, Copy folder, Copy to folder…, Move to folder…, Delete | Search in this folder | Properties. Paste shows only on a folder row, which it pastes into. Each item is shown, shown only with Shift down, or hidden as Settings > Context menu says (see "The Context menu page"). Gozler builds this menu itself and never asks Windows for the shell's context menu (`IContextMenu`), because that loads every installed shell extension, other programs' code, which can take seconds and crash the window.
@@ -987,7 +987,8 @@ The page has two parts: the separate shortcuts that show Search and Commander fr
 - **The line under the boxes** shows the Windows key warning, which a person must see before they apply, and is empty otherwise. Keys that the other box holds move to the box being edited, because one shortcut cannot show both modes, and a balloon on the other box says where they went, as Total Commander's key editor clears the command that had the key. It keeps a fixed two lines, so the Commands section never moves while the person types, as Windows' guidelines ask of a stable layout; each catalogue's longest warning fits them.
 - **The command list** shows every command that is one item of the menu bar or the context menu, as its menu and its name, such as "Edit > Find", with its shortcuts. A submenu of choices, such as Columns, Sort by or Language, the match controls and Clear filters take no command shortcut. The first rows are "Notification area > Show Search" and "Notification area > Show Commander", each with its registered shortcut, so the list shows what works in the system: it changes when Apply registers the box's shortcut, and it is empty while Windows refuses the saved one or another Gozler window holds it. The two boxes above set those shortcuts, so Add…, Edit… and Remove are disabled on those rows. "Containing" keeps the commands whose name or shortcut contains the text, so `ctrl+e` finds the command that has it. Add… and Edit… open a small dialog, titled "Add shortcut" or "Edit shortcut", with one hotkey control labelled with the command, such as "Shortcut for Edit > Find:", and a command can have several shortcuts, as Find has `Ctrl+F` and `Ctrl+E`.
 - **A command shortcut needs `Ctrl`, `Alt` or a function key.** `Alt` with a letter or a digit is refused, because those keys open the menus and reach the window's controls ("Words"), and a key with neither `Ctrl` nor `Alt` is refused unless it is a function key, because the search box needs it for typing. A shortcut that another command has moves to the command being edited, and a balloon on its shortcut list names the command it came from, so two commands never share one and the person never has to remove it there first. Keys that belong to a control keep their meaning and are refused: `Tab`, `Enter`, `Esc`, `Shift+F10`, `Alt+F4`, `Ctrl+V`, `Ctrl+X`, `Ctrl+Z`, and `Ctrl` with an arrow, `Home`, `End`, `Page Up`, `Page Down`, `Backspace` or `Delete`.
-- **Commander mode keeps some keys** (see "Keys"): `F3` to `F9`, `Alt+F1`, `Alt+F2`, `Alt+F7`, `Ctrl+F`, `Ctrl+L` and `Ctrl+R`, and `Alt` with a letter, a digit, a comma or a period. Its accelerator table leaves out a person's shortcut on one of these keys, so such a shortcut works in Search only. The shortcut dialog says so in a balloon when the person picks one of these keys, and OK still accepts it; the page shows no standing note, because the limit matters only to a person who picks such a key.
+- **The mode keys are fixed:** `Alt+F7` selects Search and `Alt+F12` selects Commander. The shortcut dialog refuses these keys and names their mode. Saved command bindings on these keys are removed when loaded; the other bindings remain.
+- **Commander mode keeps some keys** (see "Keys"): `F3` to `F9`, `Alt+F1`, `Alt+F2`, `Alt+Left`, `Ctrl+F`, `Ctrl+L` and `Ctrl+R`, and `Alt` with a letter, a digit, a comma or a period. Its accelerator table leaves out a person's shortcut on one of these keys, so such a shortcut works in Search only. The shortcut dialog says so in a balloon when the person picks one of these keys, and OK still accepts it; the page shows no standing note, because the limit matters only to a person who picks such a key.
 - **The menus show the person's shortcuts,** so what a menu says is always what the key does. Reset gives every command its default keys again.
 
 ### The File operations page
@@ -1149,7 +1150,7 @@ Commander mode is the window's second mode: a file manager that works like Norto
   | `F6` | move to the other panel, or rename |
   | `F7` | new folder |
   | `F8` | delete |
-  | `Alt+F7` | show Search, the window's search with gozlerd; `Ctrl+F` searches in the panel |
+  | `Alt+F7`, `Alt+Left` | show Search, the window's search with gozlerd; `Ctrl+F` searches in the panel |
   | `Alt`+a letter | quick search: go to the first name that starts with the letters |
   | `Alt+F1`, `Alt+F2` | change the left or the right panel's drive or folder |
 
@@ -1170,7 +1171,7 @@ Commander mode is the window's second mode: a file manager that works like Norto
 | Under the panels | the key bar |
 | Bottom edge | the status bar |
 
-- **Commander mode and Search share one window.** View > Commander switches between them, and the window opens in the mode it closed in. When Search shows again, its list scrolls its focused row, or else its first selected row, into view. Each panel takes half the window, with no splitter between them. The filter pane and the inspector belong to Search, and Commander mode does not show them.
+- **Commander mode and Search share one window.** View > Search and View > Commander choose the mode, and the window opens in the mode it closed in. Choosing the active mode keeps it active. When Search shows again, its list scrolls its focused row, or else its first selected row, into view. Each panel takes half the window, with no splitter between them. The filter pane and the inspector belong to Search, and Commander mode does not show them.
 - **Switching modes keeps each mode's state:** the search text, its results and the panels' folders. While Search shows, the panels stop watching their folders and ask gozlerd nothing, and they read their folders again when Commander mode shows, because a watched folder on a USB drive blocks its removal and nobody sees the changes.
 - **The title is "Gozler",** because a title that names one panel's folder would be wrong for the other.
 - **Show Commander** (the tray or its shortcut from any program) explicitly selects Commander mode and focuses the active panel's list. Show Search and a second start explicitly select Search (see "Window lifetime").
@@ -1343,6 +1344,7 @@ A folder's size is the size of everything below it, as gozlerd keeps it (see "Si
 A row of push buttons under the panels: `F3 View`, `F4 Edit`, `F5 Copy`, `F6 Move`, `F7 New folder`, `F8 Delete`.
 
 - **Each caption has the key and the word,** as Total Commander's bar does, because the bar is there to teach the keys. The word follows the owner ruling on button captions (`AGENTS.md`). Windows draws the buttons, in every theme and in high contrast.
+- **Holding Alt shows the Alt keys:** `Alt+F7 Search` returns to Search and selects its search text. Buttons with no Alt command are blank and disabled. Releasing Alt or leaving the window restores the plain function keys. The layout measures both sets of captions, so holding Alt does not resize the window.
 - **The buttons share the window's width equally.**
 - **Each button shows its command's icon** before its caption while Show icons is on, the same icon as that command has in the menus (see "Look"): View, Edit, Copy to folder, Move to folder, New folder and Delete. The caption still starts with its key. The icon and its gap widen each button, so the key bar's minimum width counts them while icons show.
 - **A click runs the command** on the active panel. The buttons take no focus, so the focus stays in the panel, and `Tab` does not reach them, because `Tab` switches panels.
@@ -1372,7 +1374,7 @@ Commander mode has no clipboard commands. `Ctrl+C`, `Ctrl+X` and `Ctrl+V` in the
 
 ### Keys
 
-**Keys belong to a mode.** `F5` is Refresh in Search and Copy to folder… in Commander mode. Each mode has its own accelerator table, built when the mode shows. A key has one of three owners:
+**Keys belong to a mode.** `F5` is Refresh in Search and Copy to folder… in Commander mode. Each mode has its own accelerator table, built when the mode shows. Both include the fixed mode keys: `Alt+F7` selects Search and `Alt+F12` selects Commander. Selecting the current mode does nothing, preserving its query, rows, selection and focus. The other keys have one of three owners:
 
 - **Commander mode's fixed keys** are accelerators of Commander mode. They work wherever the focus is in Commander mode, the path box included, as Norton Commander's function keys do. They are fixed because they are the keys people choose Norton Commander for.
 - **Keys of the focused control** (window rule 8) act only in that control. A panel's list takes the keys marked "list" below; the path box takes `Enter`, `Esc` and `Tab`; a panel's search box takes `Down`, `Enter`, `Esc` and `Tab`. The path box and the search box keep every other key for their text.
@@ -1388,8 +1390,10 @@ Commander mode has no clipboard commands. `Ctrl+C`, `Ctrl+X` and `Ctrl+V` in the
 | `F8` | Delete | fixed | — |
 | `F9`, `F10` | open the menu bar | fixed; `F10` is Windows' own | `F10` opens the menu bar |
 | `Alt+F1`, `Alt+F2` | the left or the right drive menu | fixed | — |
-| `Alt+F7` | show Search, with its search box focused and its text selected, as Total Commander's `Alt+F7` opens its search | fixed | Find |
-| `Ctrl+F` | Find | fixed | `Ctrl+F`, `Ctrl+E` and `Alt+F7` are Find |
+| `Alt+F7` | show Search, with its search box focused and its text selected, as Total Commander's `Alt+F7` opens its search | fixed | no action |
+| `Alt+F12` | no action | fixed | show Commander, with the active panel focused |
+| `Alt+Left` | return to Search, as `Alt+F7` does; Search keeps its query, results and selection | fixed | no action |
+| `Ctrl+F` | Find | fixed | `Ctrl+F` and `Ctrl+E` are Find |
 | `Ctrl+R` | Refresh | fixed | — |
 | `Ctrl+L` | focus the path box | fixed | — |
 | `Delete`, `Shift+Delete` | Delete | list | the same, a key of the list |
@@ -1402,7 +1406,7 @@ Commander mode has no clipboard commands. `Ctrl+C`, `Ctrl+X` and `Ctrl+V` in the
 | a character, `Alt`+a character | quick search | list | — |
 | `Tab` | the other panel's list | list, path box and search box | the next control |
 
-View > Commander has no default shortcut, as Copy to folder… has none; the person can give it one.
+The View menu shows only the other mode: Commander (`Alt+F12`) in Search, and Search (`Alt+F7`) in Commander mode. These are ordinary commands with their Windows icons, without check marks or radio dots. The shortcuts work in both modes.
 
 ### Copy and Move
 
@@ -1454,7 +1458,7 @@ The menus follow Search's (see "Menus"): File acts on the selected entries and t
 
 - **File:** Open, View, Edit, Properties | Copy to folder…, Move to folder…, New folder…, Delete | Synchronize folders… | Cancel | Settings… | Exit. Edit is disabled, as in the key bar. Cancel stops the job that the status bar shows, as its Cancel does.
 - **Edit:** Select all, Select files…, Unselect files…, Clear selection | Find
-- **View:** Commander | Sort by ▸ | Refresh | File operations
+- **View:** Search (`Alt+F7`) | Sort by ▸ | Refresh | File operations. Search's View menu instead offers Commander (`Alt+F12`).
 - **Help** and **Language** as in Search.
 - **The context menu on a row:** Open, View | Copy to folder…, Move to folder…, Delete | Properties. The context menu on the empty area of a list: New folder… | Refresh.
 

@@ -135,6 +135,7 @@ pub(crate) enum Glyph {
     SpeedHigh,
     /// Two arrows in a circle: the File operations page's ring copy group.
     Sync,
+    TwoPage,
     /// An arrow turning back: Reset and Reset all.
     Undo,
     /// A film camera: the Videos kind.
@@ -146,7 +147,7 @@ pub(crate) enum Glyph {
 }
 
 impl Glyph {
-    pub(crate) const ALL: [Glyph; 62] = [
+    pub(crate) const ALL: [Glyph; 63] = [
         Glyph::Accept,
         Glyph::Add,
         Glyph::BackToWindow,
@@ -205,6 +206,7 @@ impl Glyph {
         Glyph::Settings,
         Glyph::SpeedHigh,
         Glyph::Sync,
+        Glyph::TwoPage,
         Glyph::Undo,
         Glyph::Video,
         Glyph::View,
@@ -222,6 +224,7 @@ impl Glyph {
             Glyph::ChromeMaximize => '\u{E922}',
             Glyph::ChromeRestore => '\u{E923}',
             Glyph::Switch => '\u{E8AB}',
+            Glyph::TwoPage => '\u{E89A}',
             Glyph::CheckList => '\u{E9D5}',
             Glyph::ChevronDown => '\u{E70D}',
             Glyph::ChevronUp => '\u{E70E}',

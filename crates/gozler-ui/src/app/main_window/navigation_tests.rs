@@ -82,6 +82,7 @@ fn show_in_commander_gives_the_destination_panel_keyboard_focus() {
     });
     window.apply(hwnd, accepted);
     let search = window.controls().search.row.input.hwnd();
+    search.set_text("navigation-focus-fixture");
     search.focus();
     assert_eq!(Hwnd::focused(), Some(search));
     hwnd.set_timer(0x7fff, 10);
@@ -111,5 +112,24 @@ fn show_in_commander_gives_the_destination_panel_keyboard_focus() {
     until(&|| list.focused() == Some(0));
     win::window::post_key(list.hwnd(), VK_DOWN);
     until(&|| list.focused() == Some(1));
+    window.run(hwnd, MenuItem::Mode(Mode::Search));
+    assert_eq!(window.model.borrow().mode(), Mode::Search);
+    assert_eq!(Hwnd::focused(), Some(search));
+    window.controls().search.list.hwnd().focus();
+    window.run(hwnd, MenuItem::Mode(Mode::Search));
+    assert_eq!(window.model.borrow().mode(), Mode::Search);
+    assert_eq!(Hwnd::focused(), Some(window.controls().search.list.hwnd()));
+    assert_eq!(
+        window.controls().search.row.input.text(),
+        "navigation-focus-fixture"
+    );
+    assert_eq!(window.controls().search.list.focused(), Some(0));
+    window.run(hwnd, MenuItem::Mode(Mode::Commander));
+    let path = window.panel(side).path.hwnd();
+    path.focus();
+    window.run(hwnd, MenuItem::Mode(Mode::Commander));
+    assert_eq!(window.model.borrow().mode(), Mode::Commander);
+    assert_eq!(Hwnd::focused(), Some(path));
+    assert_eq!(list.focused(), Some(1));
     hwnd.kill_timer(0x7fff);
 }

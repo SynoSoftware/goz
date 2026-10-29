@@ -4,7 +4,9 @@
 //! saved in `ui.json` by the names of [`Keystroke::name`], which are the same in
 //! every language.
 
-use super::commands::{CommandId, Entry, Key, Keystroke, MenuItem, menu_bar, row_menu};
+use super::commands::{
+    CommandId, Entry, Key, Keystroke, MenuItem, menu_bar, mode_for_key, row_menu,
+};
 use super::settings::Mode;
 use super::text::{Strings, without_access_key};
 use serde::de::Error as _;
@@ -21,10 +23,13 @@ pub(crate) fn listed_commands() -> Vec<(CommandId, &'static str)> {
     let mut listed: Vec<(CommandId, &'static str)> = Vec::new();
     for menu in Mode::ALL.into_iter().flat_map(menu_bar) {
         for entry in menu.groups.iter().flatten() {
-            if let Entry::Item(MenuItem::Run(command)) = entry
-                && !listed.iter().any(|(c, _)| c == command)
-            {
-                listed.push((*command, menu.label));
+            let command = match entry {
+                Entry::Item(MenuItem::Run(command)) => *command,
+                Entry::Item(MenuItem::Mode(Mode::Commander)) => CommandId::Commander,
+                _ => continue,
+            };
+            if !listed.iter().any(|(c, _)| *c == command) {
+                listed.push((command, menu.label));
             }
         }
     }
@@ -109,6 +114,7 @@ pub(crate) fn command_rows(
 /// Why a command cannot have a shortcut (DESIGN.md: The Keyboard page).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Refusal {
+    Mode(Mode),
     /// The key belongs to the search box or the list, such as `Ctrl+V`.
     Control,
     /// The key types a character or opens a menu, such as `K` or `Alt+F`.
@@ -120,6 +126,13 @@ impl Refusal {
     pub(crate) fn message(self, strings: &Strings, keystroke: Keystroke) -> String {
         let key = keystroke.text(strings);
         match self {
+            Refusal::Mode(mode) => strings.format(
+                "settings_keyboard.refused_mode",
+                &[
+                    &key,
+                    &without_access_key(&MenuItem::Mode(mode).label(strings)),
+                ],
+            ),
             Refusal::Control => strings.format("settings_keyboard.refused_control", &[&key]),
             Refusal::Typing => strings.format("settings_keyboard.refused_typing", &[&key]),
         }
@@ -193,6 +206,9 @@ impl CommandShortcuts {
     /// Whether a command may have `keystroke`. A key that another command
     /// has is allowed, because [`CommandShortcuts::add`] moves it.
     pub(crate) fn check(keystroke: Keystroke) -> Result<(), Refusal> {
+        if let Some(mode) = mode_for_key(keystroke) {
+            return Err(Refusal::Mode(mode));
+        }
         if belongs_to_a_control(keystroke) {
             return Err(Refusal::Control);
         }
@@ -282,11 +298,13 @@ impl<'de> Deserialize<'de> for CommandShortcuts {
             if !listed.iter().any(|(c, _)| *c == command) {
                 return Err(D::Error::custom("a command that takes no shortcut"));
             }
-            let keys = keys
+            let mut keys = keys
                 .iter()
                 .map(|key| Keystroke::from_name(key))
                 .collect::<Option<Vec<_>>>()
                 .ok_or_else(|| D::Error::custom("a shortcut without a name"))?;
+            // Saved command bindings predate the fixed mode keys.
+            keys.retain(|key| mode_for_key(*key).is_none());
             table.set(command, keys);
         }
         // Checked once every command has its keys, because a key that moved
@@ -468,9 +486,11 @@ mod tests {
             .expect("Ctrl+K is free");
         assert_eq!(
             table.of(CommandId::Find),
-            [key("Ctrl+F"), key("Ctrl+E"), key("Alt+F7"), key("Ctrl+K")]
+            [key("Ctrl+F"), key("Ctrl+E"), key("Ctrl+K")]
         );
         for (name, refusal) in [
+            ("Alt+F7", Refusal::Mode(Mode::Search)),
+            ("Alt+F12", Refusal::Mode(Mode::Commander)),
             ("Alt+F", Refusal::Typing),
             ("K", Refusal::Typing),
             ("Ctrl+V", Refusal::Control),
@@ -499,6 +519,16 @@ mod tests {
         // Reset is the empty table, which saves nothing.
         table.remove(CommandId::Find, key("Ctrl+K"));
         assert_eq!(table, CommandShortcuts::default());
+    }
+
+    #[test]
+    fn saved_mode_keys_do_not_discard_other_command_shortcuts() {
+        let table: CommandShortcuts = serde_json::from_str(
+            r#"{"find":["Ctrl+F","Alt+F7","Ctrl+K"],"commander":["Alt+F12","Ctrl+J"]}"#,
+        )
+        .expect("fixed mode keys are removed from saved command bindings");
+        assert_eq!(table.of(CommandId::Find), [key("Ctrl+F"), key("Ctrl+K")]);
+        assert_eq!(table.of(CommandId::Commander), [key("Ctrl+J")]);
     }
 
     /// Without the Windows key a shortcut would take its key from every

@@ -1,5 +1,6 @@
 use super::search::query_error;
 use super::{failure_text, joined, size_with_unknown, too_many};
+use crate::core::commands::{self, Key, Keystroke};
 use crate::core::dates::Dates;
 use crate::core::model::{Column, Model};
 use crate::core::panel::{
@@ -274,7 +275,23 @@ pub(crate) fn panel_header(strings: &Strings, column: PanelColumn) -> text::Text
 
 /// The key bar's buttons: each key and its word, and the tooltip where the
 /// word alone cannot say what it does (DESIGN.md: The key bar).
-pub(crate) fn key_bar(strings: &Strings) -> [(String, String, Option<String>); 6] {
+pub(crate) fn key_bar(strings: &Strings, alt: bool) -> [(String, String, Option<String>); 6] {
+    if alt {
+        return std::array::from_fn(|index| {
+            if let Some(item) = commands::key_bar_item(index, true) {
+                (
+                    Keystroke::alt(Key::Function(
+                        u8::try_from(index + 3).expect("the key bar has six buttons"),
+                    ))
+                    .text(strings),
+                    text::without_access_key(&item.label(strings)),
+                    None,
+                )
+            } else {
+                (String::new(), String::new(), None)
+            }
+        });
+    }
     let tip = |key: &str| Some(strings.text(key).to_owned());
     let word = |key: &str| strings.text(key).to_owned();
     [

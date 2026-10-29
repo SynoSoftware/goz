@@ -196,15 +196,12 @@ impl CommandId {
                     searched,
                     None,
                 ),
-                // `Alt+F7` reaches Find in Search only; Commander mode keeps it
-                // to show Search (`PanelAction::SearchBox`).
                 C::Find => (
                     "command.find",
                     const {
                         &[
                             Keystroke::ctrl(Key::Letter(b'F')),
                             Keystroke::ctrl(Key::Letter(b'E')),
-                            Keystroke::alt(Key::Function(7)),
                         ]
                     },
                     always,
@@ -235,12 +232,7 @@ impl CommandId {
                 C::Cut => ("command.cut", &[], cut, None),
                 C::Paste => ("command.paste", &[], paste, None),
                 C::FileOperations => ("command.file_operations", &[], operations_available, None),
-                C::Commander => (
-                    "command.commander",
-                    &[],
-                    always,
-                    Some(|s| s.model.mode() == Mode::Commander),
-                ),
+                C::Commander => ("command.commander", &[], always, None),
                 // `Num +` and `Num -` in a panel's list (control_key).
                 C::SelectFiles => ("command.select_files", &[], lists_folder, None),
                 C::UnselectFiles => ("command.unselect_files", &[], lists_folder, None),
@@ -1078,27 +1070,43 @@ pub(crate) enum PanelAction {
     Drives(Side),
     /// `F9`: the menu bar, because `Alt` with a letter is quick search.
     MenuBar,
-    /// `Alt+F7`, Total Commander's search key: Search shows, with its
-    /// search box focused and its text selected.
-    SearchBox,
 }
 
 impl PanelAction {
-    const ALL: [PanelAction; 5] = [
+    const ALL: [PanelAction; 4] = [
         PanelAction::PathBox,
         PanelAction::Drives(Side::Left),
         PanelAction::Drives(Side::Right),
         PanelAction::MenuBar,
-        PanelAction::SearchBox,
     ];
+}
+
+const MODE_KEYS: &[(Keystroke, MenuItem)] = &[
+    (
+        Keystroke::alt(Key::Function(7)),
+        MenuItem::Mode(Mode::Search),
+    ),
+    (
+        Keystroke::alt(Key::Function(12)),
+        MenuItem::Mode(Mode::Commander),
+    ),
+];
+
+pub(crate) fn mode_for_key(key: Keystroke) -> Option<Mode> {
+    MODE_KEYS.iter().find_map(|(stroke, item)| match item {
+        MenuItem::Mode(mode) if *stroke == key => Some(*mode),
+        _ => None,
+    })
 }
 
 /// Commander mode's fixed keys, which win over the person's shortcuts on the
 /// same keys.
 const COMMANDER_KEYS: &[(Keystroke, MenuItem)] = &[
+    // With two modes, Back returns to Search. If a navigator is added,
+    // Alt+Left must follow its navigation history instead.
     (
-        Keystroke::alt(Key::Function(7)),
-        MenuItem::Panel(PanelAction::SearchBox),
+        Keystroke::alt(Key::Left),
+        MenuItem::Run(CommandId::ShowSearch),
     ),
     (
         Keystroke::ctrl(Key::Letter(b'F')),
@@ -1151,15 +1159,18 @@ const COMMANDER_KEYS: &[(Keystroke, MenuItem)] = &[
 ];
 
 /// The command of the key bar's button at `index` from the left, the one
-/// its key runs: `F3` View first (DESIGN.md: The key bar).
-pub(crate) fn key_bar_command(index: usize) -> CommandId {
-    let key = u8::try_from(index).map(|index| Keystroke::plain(Key::Function(3 + index)));
-    (COMMANDER_KEYS.iter())
-        .find_map(|(stroke, item)| match item {
-            MenuItem::Run(command) if Ok(*stroke) == key => Some(*command),
-            _ => None,
-        })
-        .expect("F3 to F8 run the key bar's commands")
+/// its key runs: `F3` View first, or no command for an unassigned Alt key
+/// (DESIGN.md: The key bar).
+pub(crate) fn key_bar_item(index: usize, alt: bool) -> Option<MenuItem> {
+    let key = Keystroke {
+        alt,
+        ..Keystroke::plain(Key::Function(3 + u8::try_from(index).ok()?))
+    };
+    MODE_KEYS
+        .iter()
+        .chain(COMMANDER_KEYS)
+        .find(|(stroke, _)| *stroke == key)
+        .map(|(_, item)| *item)
 }
 
 /// Whether Commander mode keeps `keystroke` from the person's shortcuts: its
@@ -1179,6 +1190,7 @@ pub(crate) fn kept_by_commander(keystroke: Keystroke) -> bool {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum MenuItem {
     Run(CommandId),
+    Mode(Mode),
     Column(Column),
     /// Fits the column, of the header's menu (DESIGN.md: Results list).
     FitColumn(Column),
@@ -1267,6 +1279,7 @@ impl MenuItem {
                 0x600 + index(Column::ALL.iter().position(|c| *c == column))
             }
             MenuItem::FitColumns => 0x700,
+            MenuItem::Mode(mode) => 0x900 + index(Mode::ALL.iter().position(|m| *m == mode)),
             MenuItem::Panel(action) => {
                 0x800 + index(PanelAction::ALL.iter().position(|a| *a == action))
             }
@@ -1286,6 +1299,7 @@ impl MenuItem {
             0x600 => Column::ALL.get(n).copied().map(MenuItem::FitColumn),
             0x700 if n == 0 => Some(MenuItem::FitColumns),
             0x800 => PanelAction::ALL.get(n).copied().map(MenuItem::Panel),
+            0x900 => Mode::ALL.get(n).copied().map(MenuItem::Mode),
             _ => None,
         }
     }
@@ -1294,6 +1308,8 @@ impl MenuItem {
     pub(crate) fn label(self, strings: &Strings) -> String {
         let key = match self {
             MenuItem::Run(command) => command.row().label,
+            MenuItem::Mode(Mode::Search) => "command.search",
+            MenuItem::Mode(Mode::Commander) => "command.commander",
             MenuItem::Column(column) => column.row().menu_label,
             MenuItem::SortKey(key) => sort_key_label(key),
             MenuItem::SortDirection(dir) => sort_direction_label(dir),
@@ -1313,14 +1329,14 @@ impl MenuItem {
     /// from, or else from the keys of the mode's list, because the menus
     /// teach the keys (DESIGN.md: Menus in Commander mode).
     pub(crate) fn shortcut(self, shortcuts: &CommandShortcuts, mode: Mode) -> Option<Keystroke> {
-        let MenuItem::Run(command) = self else {
-            return None;
-        };
         accelerators(shortcuts, mode)
             .into_iter()
             .find(|(_, item)| *item == self)
             .map(|(key, _)| key)
             .or_else(|| {
+                let MenuItem::Run(command) = self else {
+                    return None;
+                };
                 let list = match mode {
                     Mode::Search => Focus::List,
                     Mode::Commander => Focus::Panel,
@@ -1335,6 +1351,8 @@ impl MenuItem {
     fn command(self) -> CommandId {
         match self {
             MenuItem::Run(command) => command,
+            MenuItem::Mode(Mode::Search) => CommandId::ShowSearch,
+            MenuItem::Mode(Mode::Commander) => CommandId::Commander,
             MenuItem::Column(_) | MenuItem::FitColumn(_) | MenuItem::FitColumns => {
                 CommandId::Columns
             }
@@ -1348,6 +1366,7 @@ impl MenuItem {
     /// column in Commander mode.
     fn belongs_to(self, mode: Mode) -> bool {
         match self {
+            MenuItem::Mode(destination) => destination != mode,
             MenuItem::SortKey(SortKey::Path) => mode == Mode::Search,
             _ => self.command().belongs_to(mode),
         }
@@ -1365,6 +1384,8 @@ impl MenuItem {
     pub(crate) fn glyph(self) -> Option<Glyph> {
         match self {
             MenuItem::Run(command) => command.glyph(),
+            MenuItem::Mode(Mode::Search) => Some(Glyph::Search),
+            MenuItem::Mode(Mode::Commander) => Some(Glyph::TwoPage),
             MenuItem::Column(_)
             | MenuItem::FitColumn(_)
             | MenuItem::FitColumns
@@ -1382,7 +1403,10 @@ impl MenuItem {
                 None => Mark::None,
             },
             MenuItem::Column(_) => Mark::Check,
-            MenuItem::FitColumn(_) | MenuItem::FitColumns | MenuItem::Panel(_) => Mark::None,
+            MenuItem::Mode(_)
+            | MenuItem::FitColumn(_)
+            | MenuItem::FitColumns
+            | MenuItem::Panel(_) => Mark::None,
             MenuItem::SortKey(_) | MenuItem::SortDirection(_) | MenuItem::Language(_) => {
                 Mark::Radio
             }
@@ -1393,6 +1417,7 @@ impl MenuItem {
         let model = state.model;
         match self {
             MenuItem::Run(command) => command.row().checked.is_some_and(|checked| checked(state)),
+            MenuItem::Mode(_) => false,
             MenuItem::Column(column) => model.columns.contains(&column),
             MenuItem::FitColumn(_) | MenuItem::FitColumns | MenuItem::Panel(_) => false,
             MenuItem::SortKey(key) => model.shown_sort().key == key,
@@ -1520,7 +1545,10 @@ fn every_menu() -> Vec<Menu> {
         menu(
             "menu.view",
             vec![
-                run(&[C::Commander]),
+                Mode::ALL
+                    .into_iter()
+                    .map(|mode| Entry::Item(MenuItem::Mode(mode)))
+                    .collect(),
                 vec![
                     Entry::Item(MenuItem::Run(C::Filters)),
                     Entry::Item(MenuItem::Run(C::Inspector)),
@@ -1826,15 +1854,17 @@ pub(crate) fn items(menus: &[Menu]) -> Vec<MenuItem> {
         .collect()
 }
 
-/// The accelerator table of `mode`: in Commander mode its fixed keys first,
-/// then every command shortcut of `shortcuts` whose command belongs to
+/// The accelerator table of `mode`: the mode keys, Commander mode's fixed
+/// keys, then every command shortcut of `shortcuts` whose command belongs to
 /// `mode` and whose key the mode leaves free, with the item it runs.
 pub(crate) fn accelerators(shortcuts: &CommandShortcuts, mode: Mode) -> Vec<(Keystroke, MenuItem)> {
     let fixed = match mode {
         Mode::Search => &[],
         Mode::Commander => COMMANDER_KEYS,
     };
-    let free = |key: &Keystroke| mode == Mode::Search || !kept_by_commander(*key);
+    let free = |key: &Keystroke| {
+        mode_for_key(*key).is_none() && (mode == Mode::Search || !kept_by_commander(*key))
+    };
     let shortcuts = CommandId::ALL
         .iter()
         .filter(|c| c.belongs_to(mode))
@@ -1845,7 +1875,12 @@ pub(crate) fn accelerators(shortcuts: &CommandShortcuts, mode: Mode) -> Vec<(Key
                 .filter(|key| free(key))
                 .map(|s| (*s, MenuItem::Run(*c)))
         });
-    fixed.iter().copied().chain(shortcuts).collect()
+    MODE_KEYS
+        .iter()
+        .chain(fixed)
+        .copied()
+        .chain(shortcuts)
+        .collect()
 }
 
 #[cfg(test)]
@@ -1931,15 +1966,27 @@ mod tests {
                 Some(MenuItem::Run(CommandId::Settings))
             );
         }
-        // Find starts a search in a panel (DESIGN.md: Search in a panel),
-        // and Total Commander's `Alt+F7` shows Search, where it is Find.
         let find = Some(MenuItem::Run(CommandId::Find));
-        let alt_f7 = Keystroke::alt(Key::Function(7));
+        for mode in Mode::ALL {
+            for (key, destination) in [(7, Mode::Search), (12, Mode::Commander)] {
+                let key = Keystroke::alt(Key::Function(key));
+                let item = MenuItem::Mode(destination);
+                assert_eq!(takes(mode, key), Some(item));
+                assert_eq!(item.shortcut(&shortcuts, mode), Some(key));
+            }
+        }
+        let back = Keystroke::alt(Key::Left);
         assert_eq!(
-            takes(Mode::Commander, alt_f7),
-            Some(MenuItem::Panel(PanelAction::SearchBox))
+            takes(Mode::Commander, back),
+            Some(MenuItem::Run(CommandId::ShowSearch))
         );
-        assert_eq!(takes(Mode::Search, alt_f7), find);
+        assert_eq!(takes(Mode::Search, back), None);
+        assert_eq!(key_bar_item(4, true), Some(MenuItem::Mode(Mode::Search)));
+        assert_eq!(
+            key_bar_item(4, false),
+            Some(MenuItem::Run(CommandId::NewFolder))
+        );
+        assert_eq!(key_bar_item(0, true), None);
         let ctrl_f = Keystroke::ctrl(Key::Letter(b'F'));
         for mode in Mode::ALL {
             assert_eq!(takes(mode, ctrl_f), find);
@@ -1952,10 +1999,15 @@ mod tests {
         assert!(accelerators(&moved, Mode::Commander).contains(&fixed));
         let shown = |mode, command| items(&menu_bar(mode)).contains(&MenuItem::Run(command));
         assert!(shown(Mode::Search, CommandId::Refresh));
-        assert!(!shown(Mode::Commander, CommandId::Copy));
-        for command in [CommandId::Commander, CommandId::Find] {
-            assert!(shown(Mode::Search, command) && shown(Mode::Commander, command));
+        for mode in Mode::ALL {
+            for choice in Mode::ALL {
+                let item = MenuItem::Mode(choice);
+                assert_eq!(items(&menu_bar(mode)).contains(&item), mode != choice);
+                assert_eq!(item.mark(), Mark::None);
+            }
         }
+        assert!(!shown(Mode::Commander, CommandId::Copy));
+        assert!(shown(Mode::Search, CommandId::Find) && shown(Mode::Commander, CommandId::Find));
     }
 
     /// Tab in a panel's controls switches panels; otherwise Search's Tab

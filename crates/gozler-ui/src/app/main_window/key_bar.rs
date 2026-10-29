@@ -1,7 +1,8 @@
 use super::{
-    Button, ControlEvent, ControlId, Focus, Hwnd, MainWindow, MenuItem, State, Tooltip,
+    Button, ButtonIcon, ControlEvent, ControlId, Focus, Hwnd, MainWindow, State, Tooltip,
     WindowCaptions, commands,
 };
+use std::cell::Cell;
 
 /// The key bar's buttons, `F3` to `F8` (DESIGN.md: The key bar).
 pub(super) const KEY_BAR: [ControlId; 6] = [
@@ -20,6 +21,7 @@ pub(super) const KEY_TIPS: [usize; 2] = [1, 3];
 pub(super) struct KeyBar {
     pub(super) buttons: [Button; 6],
     pub(super) tips: Tooltip,
+    alt: Cell<bool>,
 }
 
 impl KeyBar {
@@ -29,17 +31,44 @@ impl KeyBar {
         Ok(Self {
             buttons: [a?, b?, c?, d?, e?, f?],
             tips: Tooltip::create_areas(parent, KEY_TIPS.len())?,
+            alt: Cell::new(false),
         })
     }
 
     pub(super) fn set_captions(&self, captions: &WindowCaptions) {
-        for (button, (key, word, _)) in self.buttons.iter().zip(&captions.key_bar) {
-            button.hwnd().set_text(&format!("{key} {word}"));
+        self.set_labels(&captions.key_bar[usize::from(self.alt.get())]);
+    }
+
+    fn set_labels(&self, captions: &[(String, String, Option<String>); 6]) {
+        for (button, (key, word, _)) in self.buttons.iter().zip(captions) {
+            button.hwnd().set_text(format!("{key} {word}").trim());
         }
         for (area, index) in KEY_TIPS.into_iter().enumerate() {
-            if let (_, _, Some(tip)) = &captions.key_bar[index] {
-                self.tips.set_area(area, tip);
-            }
+            self.tips
+                .set_area(area, captions[index].2.as_deref().unwrap_or(""));
+        }
+    }
+
+    pub(super) fn sync_alt(&self, window: &MainWindow) {
+        let alt = super::win::window::only_alt_held()
+            && window.model.borrow().mode() == super::Mode::Commander;
+        self.set_alt(window, alt);
+    }
+
+    pub(super) fn set_alt(&self, window: &MainWindow, alt: bool) {
+        if self.alt.replace(alt) == alt {
+            return;
+        }
+        let captions = crate::core::captions::key_bar(window.model.borrow().strings(), alt);
+        self.set_labels(&captions);
+        self.apply_glyphs();
+        self.update_key_bar(window);
+    }
+
+    pub(super) fn apply_glyphs(&self) {
+        for (index, button) in self.buttons.iter().enumerate() {
+            let glyph = commands::key_bar_item(index, self.alt.get()).and_then(|item| item.glyph());
+            button.set_icon(glyph.map(ButtonIcon::Glyph));
         }
     }
 
@@ -47,9 +76,12 @@ impl KeyBar {
         let Some(index) = self.buttons.iter().position(|button| button.clicked(event)) else {
             return false;
         };
+        let Some(item) = commands::key_bar_item(index, self.alt.get()) else {
+            return true;
+        };
         let active = window.model.borrow().panels().active();
         window.panel(active).list.hwnd().focus();
-        window.run(hwnd, MenuItem::Run(commands::key_bar_command(index)));
+        window.run(hwnd, item);
         true
     }
     /// Enables each key bar button as its command is, on the active panel's
@@ -64,7 +96,10 @@ impl KeyBar {
                 list: model.active_list(),
             };
             (0..KEY_BAR.len())
-                .map(|index| (commands::key_bar_command(index).row().enabled)(&state))
+                .map(|index| {
+                    commands::key_bar_item(index, self.alt.get())
+                        .is_some_and(|item| item.enabled(&state))
+                })
                 .collect()
         };
         for (button, enabled) in self.buttons.iter().zip(enabled) {

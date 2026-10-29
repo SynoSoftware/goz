@@ -242,7 +242,7 @@ It behaves as Everything does. The other mode is Commander mode.
 
 **Commander mode**:
 The mode of the window with two panels, the key bar and Norton Commander's
-keys, which View > Commander switches on and off. It behaves as Total
+keys. It behaves as Total
 Commander does. "Commander" alone names it in commands such as Show
 Commander and Show in Commander.
 _Avoid_: Two panels, SynapseCommander
@@ -285,8 +285,8 @@ One piece of status information, such as a transfer, an export or a memory
 figure, within a status slot.
 
 **Search panel**:
-A panel that shows the results of a search in place of a folder. `Alt+F7` or
-`Ctrl+F` turns the active panel into one, and `Esc` or `Backspace` shows its
+A panel that shows the results of a search in place of a folder. `Ctrl+F`
+turns the active panel into one, and `Esc` or `Backspace` shows its
 folder again.
 
 **Focused row**:

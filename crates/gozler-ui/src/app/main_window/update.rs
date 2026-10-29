@@ -370,6 +370,7 @@ impl MainWindow {
             Effect::Menu => self.replace_menu_bar(hwnd),
             Effect::Tray => self.tray.update_tray(self, hwnd),
             Effect::SwitchPanels => {
+                self.controls().key_bar.sync_alt(self);
                 let mode = self.model.borrow().mode();
                 let accepted = match mode {
                     Mode::Commander => self.controls().panels.start_panels(self, hwnd),

@@ -1747,12 +1747,6 @@ impl Panels {
             }
             PanelAction::Drives(side) => self.drive_menu(window, hwnd, side),
             PanelAction::MenuBar => win::window::open_menu_bar(hwnd),
-            // Find in Search focuses the search box with its text selected.
-            PanelAction::SearchBox => {
-                let shown = window.model.borrow_mut().show_mode(Mode::Search);
-                window.apply(hwnd, shown);
-                window.run(hwnd, MenuItem::Run(CommandId::Find));
-            }
         }
     }
 

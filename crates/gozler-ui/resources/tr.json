@@ -22,6 +22,7 @@
     "turkish": "&Türkçe"
   },
   "command": {
+    "search": "&Arama",
     "synchronize": "Klasörleri eşi&tle…",
     "open": "&Aç",
     "open_file_location": "Dosya konu&munu aç",
@@ -560,6 +561,7 @@
     "context_menu": "Bağlam menüsü",
     "notification_area": "Bildirim alanı",
     "refused_control": "Bu tuşu arama kutusu veya sonuç listesi kullanır.",
+    "refused_mode": "{0}, {1} için ayrılmıştır.",
     "refused_typing": "Bu tuş yazı yazar veya menü açar. Ctrl ya da Ctrl+K veya F3 gibi bir işlev tuşu kullanın.",
     "refused_taken": "{0}, {1} komutunun kısayolu. Önce oradan kaldırın.",
     "unsupported": "Bu tuş kısayol olamaz. Harf, rakam veya işlev tuşu kullanın.",

@@ -22,6 +22,7 @@
     "turkish": "&Turco"
   },
   "command": {
+    "search": "&Búsqueda",
     "synchronize": "Sincroni&zar carpetas…",
     "open": "&Abrir",
     "open_file_location": "Abrir &ubicación del archivo",
@@ -560,6 +561,7 @@
     "context_menu": "Menú contextual",
     "notification_area": "Área de notificación",
     "refused_control": "El cuadro de búsqueda o la lista de resultados usa esta tecla.",
+    "refused_mode": "{0} está reservado para {1}.",
     "refused_typing": "Esta tecla escribe o abre menús. Usa Ctrl o una tecla de función, como Ctrl+K o F3.",
     "refused_taken": "{0} es el método abreviado de {1}. Quítalo allí primero.",
     "unsupported": "Esta tecla no puede ser un método abreviado. Usa una letra, un dígito o una tecla de función.",

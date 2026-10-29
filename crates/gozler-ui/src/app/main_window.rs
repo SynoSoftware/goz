@@ -279,10 +279,7 @@ impl Controls {
         for (button, control) in inspector.text_buttons() {
             control.set_icon(button.command.glyph().map(ButtonIcon::Glyph));
         }
-        for (index, control) in self.key_bar.buttons.iter().enumerate() {
-            let command = commands::key_bar_command(index);
-            control.set_icon(command.glyph().map(ButtonIcon::Glyph));
-        }
+        self.key_bar.apply_glyphs();
         for (control, key) in [
             (self.filters.choose_folder, "filter.choose_folder"),
             (self.panels.sides[0].retry, "panel.retry"),
@@ -1704,6 +1701,9 @@ impl MainWindow {
         if !enabled {
             return;
         }
+        if item == MenuItem::Mode(mode) {
+            return;
+        }
         if mode == Mode::Commander {
             // Any key or command closes the box first, so F5 after a
             // quick search copies the focused row.
@@ -1715,6 +1715,7 @@ impl MainWindow {
         };
         let controls = self.controls();
         let accepted = match item {
+            MenuItem::Mode(mode) => return self.show_mode(hwnd, mode),
             MenuItem::Run(command) => match command {
                 CommandId::Exit => {
                     self.exit(hwnd);
@@ -1866,12 +1867,7 @@ impl MainWindow {
                 CommandId::Paste => return self.paste(),
                 CommandId::FileOperations => return self.show_operations(None),
                 CommandId::Commander => {
-                    let mut model = self.model.borrow_mut();
-                    let other = match model.mode() {
-                        Mode::Search => Mode::Commander,
-                        Mode::Commander => Mode::Search,
-                    };
-                    model.show_mode(other)
+                    return self.show_mode(hwnd, Mode::Commander);
                 }
                 CommandId::Columns | CommandId::Language | CommandId::Match | CommandId::SortBy => {
                     return;
@@ -4481,7 +4477,12 @@ impl WindowProc for MainWindow {
             // deactivation, so it gives it back to the control that had it.
             Message::Deactivate => {
                 self.focus_on_activate.set(Hwnd::focused());
+                self.controls().key_bar.set_alt(self, false);
                 None
+            }
+            Message::ModifiersChanged => {
+                self.controls().key_bar.sync_alt(self);
+                Some(LRESULT(0))
             }
             // "Select the search text when the window is activated" is about
             // switching from another program; closing one of Gozler's own
@@ -4489,6 +4490,7 @@ impl WindowProc for MainWindow {
             Message::Activate {
                 from_another_program,
             } => {
+                self.controls().key_bar.sync_alt(self);
                 let search = self.controls().search.row.input;
                 let saved = self.focus_on_activate.take();
                 let selects = {
