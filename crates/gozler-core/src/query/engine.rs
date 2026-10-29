@@ -822,6 +822,17 @@ impl Matcher {
         }
     }
 
+    fn last_component_literal(&self) -> Option<Vec<u8>> {
+        match self {
+            Matcher::Wildcard(wildcard) => wildcard.last_component_literal(0),
+            _ => self
+                .literal()?
+                .rsplit(|&b| b == b'\\')
+                .find(|part| !part.is_empty())
+                .map(<[u8]>::to_vec),
+        }
+    }
+
     /// The text of a matcher that compares a text, which
     /// [`super::through`] splits; `None` for a wildcard and a regular
     /// expression.
@@ -1531,6 +1542,31 @@ fn scan<'q, 'i>(
         scan.records.clear();
     }
 
+    if !query.match_case
+        && let Some((term, needle)) = query
+            .clauses
+            .iter()
+            .filter_map(|clause| {
+                let [term] = clause.terms.as_slice() else {
+                    return None;
+                };
+                let Check::Text(Target::Path, matcher) = &term.check else {
+                    return None;
+                };
+                (!term.negated)
+                    .then(|| matcher.last_component_literal())
+                    .flatten()
+                    .map(|needle| (term, needle))
+            })
+            .max_by_key(|(_, needle)| needle.len())
+        && memmem::find(&root, &needle).is_none()
+    {
+        if scan.visit_path_candidates(term, &needle, scope) {
+            return scan;
+        }
+        scan.records.clear();
+    }
+
     // Slow path: case-sensitive, or no name literal (only filters, path
     // terms or all-wildcard patterns). Iterate every live entry. The empty
     // search with no scope, as a full export runs, matches every entry, so
@@ -1735,6 +1771,63 @@ impl<'q, 'i> Scan<'q, 'i> {
                     if !index.is_synthetic(below) {
                         self.visit(below, scope);
                     }
+                }
+            }
+        }
+        true
+    }
+
+    fn visit_path_candidates(
+        &mut self,
+        term: &CompiledTerm,
+        needle: &[u8],
+        scope: Option<EntryIdx>,
+    ) -> bool {
+        let index = self.index;
+        let most = index.len() / COMPONENT_WALK_SHARE;
+        let mut roots = Vec::new();
+        for_each_name_containing(index, needle, |id| {
+            roots.extend(index.name_chain(id).filter(|&idx| !index.is_synthetic(idx)));
+            roots.len() <= most
+        });
+        if roots.len() > most {
+            return false;
+        }
+        if let (Some(through), Check::Text(_, matcher), Some(paths)) =
+            (&term.through, &term.check, &self.query_paths)
+        {
+            roots.extend(paths.targets().filter_map(|(folder, target)| {
+                through
+                    .needs_target(target, matcher, needle)
+                    .then_some(folder)
+            }));
+        }
+        // Nested name matches and link targets can reach the same entry.
+        // Deduplicate before evaluating it, and bound the speculative walk
+        // as the component walk does before falling back to the full scan.
+        let mut visited = FxHashSet::default();
+        let mut walked = 0;
+        for root in roots {
+            if visited.contains(&root) {
+                continue;
+            }
+            if root != index.root()
+                && self
+                    .query_paths
+                    .as_mut()
+                    .expect("a path candidate reads paths")
+                    .full_path_into(index, root, &mut self.path)
+                    .is_none()
+            {
+                continue;
+            }
+            for idx in std::iter::once(root).chain(index.subtree_entries(root)) {
+                walked += 1;
+                if walked > most {
+                    return false;
+                }
+                if visited.insert(idx) && !index.is_synthetic(idx) {
+                    self.visit(idx, scope);
                 }
             }
         }
@@ -2475,7 +2568,7 @@ mod tests {
     }
 
     /// A wildcard with a separator matches the whole full path, on every scan
-    /// path: the full scan, the folded-arena scan (a name term drives it), and
+    /// path: the path candidate walk, the folded-arena scan (a name term drives it), and
     /// the scoped subtree walk. The wildcard's literal `\docs\` is in no name,
     /// so feeding it to the arena prefilter would find nothing.
     #[test]
@@ -2487,7 +2580,7 @@ mod tests {
             r"C:\repo\docs\readme.md",
         ];
 
-        // Full scan: no name term, so every entry is tested.
+        // Path candidates: no name term drives the scan.
         assert_eq!(paths_under(&idx, r"C:\", r"*\docs\*.md", None), docs);
         // Folded-arena scan: `readme` drives it.
         assert_eq!(
@@ -2865,6 +2958,66 @@ mod tests {
             "the scope holds the junction"
         );
         assert!(found("notes", Some(r"C:\proj")).is_empty());
+    }
+
+    #[test]
+    fn path_candidates_preserve_matches_through_links_and_count_each_entry_once() {
+        let mut index = sample_index();
+        for n in 0..2048 {
+            index.insert_enum(&enum_rec(
+                frn(10_000 + n),
+                NTFS_ROOT_FRN,
+                &format!("unrelated_{n}"),
+                false,
+            ));
+        }
+        let links = Links::new(vec![
+            crate::links::FolderLink {
+                link: r"C:\proj\out".into(),
+                target: r"C:\docs\sub".into(),
+            },
+            crate::links::FolderLink {
+                link: r"C:\again\out".into(),
+                target: r"C:\docs\sub".into(),
+            },
+        ]);
+        for text in [
+            r"proj\out\rep",
+            r"proj\out\",
+            r"*\out\*.pdf",
+            r"C:\proj\out\Report.PDF",
+            r"C:\proj\out\*.pdf",
+            r"docs\sub\rep",
+            r"*\docs\*.pdf",
+            r"C:\*\sub\*",
+            r"docs\sub\rep|proj\out\rep",
+            r"proj\out\rep !missing",
+        ] {
+            let parsed = parse_query_with(
+                text,
+                ParseOptions {
+                    match_path: true,
+                    ..ParseOptions::default()
+                },
+            )
+            .unwrap();
+            let query = CompiledQuery::with_links(&parsed, &links, None).unwrap();
+            let seen = SeenBy::Everything;
+            let actual = scan(&index, r"C:\", &query, None, &seen);
+            let mut full = Scan::new(&index, r"C:\", &query, &seen);
+            for entry in index
+                .live_entries()
+                .filter(|&entry| !index.is_synthetic(entry))
+            {
+                full.visit(entry, None);
+            }
+            let sorted = |scan: Scan<'_, '_>| {
+                let mut entries: Vec<_> = scan.records.iter().map(|record| record.idx()).collect();
+                entries.sort_unstable();
+                entries
+            };
+            assert_eq!(sorted(actual), sorted(full), "{text}");
+        }
     }
 
     /// The evaluator reads what the parser writes for `!` and `|`: a clause

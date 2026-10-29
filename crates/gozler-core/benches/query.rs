@@ -283,6 +283,66 @@ fn bench_query(c: &mut Criterion<measure::Measure>) {
     broad.finish();
 }
 
+fn bench_linked_release(c: &mut Criterion<measure::Measure>) {
+    let (mut index, _) = build_index();
+    for (id, parent, name, folder) in [
+        (3_000_000, NTFS_ROOT_FRN, "artifacts", true),
+        (3_000_001, frn(3_000_000), "TinyTorrent2", true),
+        (3_000_002, frn(3_000_001), "release", true),
+    ] {
+        index.insert_enum(&enum_rec(frn(id), parent, name, folder));
+    }
+    for n in 0..17 {
+        index.insert_enum(&enum_rec(
+            frn(3_000_003 + n),
+            frn(3_000_002),
+            &format!("TinyTorrent-{n}.exe"),
+            false,
+        ));
+    }
+    index.rank_names();
+    let links = vec![FolderLink {
+        link: r"C:\SynoSoftware\TinyTorrent2\artifacts".into(),
+        target: r"V:\artifacts\TinyTorrent2".into(),
+    }];
+    let options = ParseOptions {
+        match_path: true,
+        ..ParseOptions::default()
+    };
+    let mut group = c.benchmark_group("linked_release_2M");
+    group.sample_size(20);
+    for (name, text) in [
+        ("relative", r"artifacts\release\"),
+        (
+            "absolute",
+            r"C:\SynoSoftware\TinyTorrent2\artifacts\release\",
+        ),
+        (
+            "wildcard",
+            r"C:\SynoSoftware\TinyTorrent2\artifacts\release\*.exe",
+        ),
+    ] {
+        let parsed = parse_query_with(text, options).unwrap();
+        group.bench_function(name, |b| {
+            b.iter(|| {
+                let table = Links::new(links.clone());
+                let query = CompiledQuery::with_links(&parsed, &table, None).unwrap();
+                let answer = run_query(
+                    black_box(&index),
+                    r"V:\",
+                    &query,
+                    None,
+                    SortSpec::default(),
+                    Some(100),
+                );
+                assert_eq!(answer.total, 17);
+                black_box(answer.total)
+            })
+        });
+    }
+    group.finish();
+}
+
 /// Reads every row of `query` over `idx` as `viewer` sees it.
 fn search_rows(idx: &VolumeIndex, query: &CompiledQuery, viewer: Viewer<'_>) -> u64 {
     let volume = BenchVolume {
@@ -452,6 +512,6 @@ fn bench_folder_sizes(c: &mut Criterion<measure::Measure>) {
 criterion_group! {
     name = benches;
     config = measure::criterion();
-    targets = bench_query, bench_folder_sizes, bench_sort_change
+    targets = bench_query, bench_linked_release, bench_folder_sizes, bench_sort_change
 }
 criterion_main!(benches);

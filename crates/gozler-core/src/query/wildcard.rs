@@ -166,6 +166,24 @@ impl Wildcard {
         (!best.is_empty()).then_some(best)
     }
 
+    pub(super) fn last_component_literal(&self, at: usize) -> Option<Vec<u8>> {
+        let mut last = Vec::new();
+        let mut run = Vec::new();
+        for token in &self.tokens[at..] {
+            match token {
+                GlobTok::Lit(cp) if *cp != u32::from(b'\\') => {
+                    crate::wtf8::encode_code_point(*cp, &mut run);
+                }
+                _ if !run.is_empty() => last = std::mem::take(&mut run),
+                _ => {}
+            }
+        }
+        if !run.is_empty() {
+            last = run;
+        }
+        (!last.is_empty()).then_some(last)
+    }
+
     /// What this pattern needs of a full path when one name of the path
     /// decides it: a `*`, then characters without a `\`, `*` or `?`, and
     /// perhaps a last `*`. `None` for every other pattern, because its `?`

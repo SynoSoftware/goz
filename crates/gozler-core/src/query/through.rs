@@ -166,6 +166,26 @@ pub(super) struct Through {
 }
 
 impl Through {
+    /// A reaching path has consumed some of the candidate literal, so a
+    /// match below this target need not contain it in a real name.
+    pub(super) fn needs_target(&self, target: usize, matcher: &Matcher, literal: &[u8]) -> bool {
+        self.states[target].iter().any(|state| match state {
+            State::Matched => true,
+            State::Position { at, .. } => match matcher {
+                Matcher::Wildcard(wildcard) => {
+                    wildcard.last_component_literal(*at).as_deref() != Some(literal)
+                }
+                _ => memchr::memmem::find(
+                    &matcher
+                        .literal()
+                        .expect("a link matcher is literal or wildcard")[*at..],
+                    literal,
+                )
+                .is_none(),
+            },
+        })
+    }
+
     pub(super) fn passes(
         &self,
         target: usize,

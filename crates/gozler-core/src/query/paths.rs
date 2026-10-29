@@ -130,6 +130,12 @@ impl DirPaths {
         }
     }
 
+    pub(crate) fn targets(&self) -> impl Iterator<Item = (EntryIdx, usize)> + '_ {
+        self.targets
+            .iter()
+            .map(|(&folder, &number)| (folder, number))
+    }
+
     /// Writes the full path of entry `idx` into `out` (cleared first).
     /// Returns `None`, leaving `out` empty, when the entry has no path.
     pub(crate) fn full_path_into(
