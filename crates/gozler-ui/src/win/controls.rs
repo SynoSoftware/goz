@@ -624,10 +624,13 @@ impl Button {
         if shown.himl == list.himl && shown.margin == list.margin && shown.uAlign == list.uAlign {
             return;
         }
-        // SAFETY: `list` outlives the call; the button keeps the image list
-        // without owning it, and `win::gdi` keeps it alive. A null list
-        // removes the image.
-        unsafe { send_pointer(self.0, BCM_SETIMAGELIST, 0, &raw const list) };
+        // The button does not repaint for a new image list.
+        super::present::mark_after(self.0, || {
+            // SAFETY: `list` outlives the call; the button keeps the image
+            // list without owning it, and `win::gdi` keeps it alive. A null
+            // list removes the image.
+            unsafe { send_pointer(self.0, BCM_SETIMAGELIST, 0, &raw const list) };
+        });
     }
 
     pub(crate) fn create(parent: Hwnd, id: u16) -> windows::core::Result<Button> {
@@ -881,8 +884,11 @@ impl IconList {
         let images = glyph_list(glyphs, side, system_color(COLOR_WINDOWTEXT))
             .filter(|_| icons_shown())
             .unwrap_or_default();
-        // The list shares the image list, which `glyph_list` keeps alive.
-        send(self.0, LVM_SETIMAGELIST, LVSIL_SMALL as usize, images.0);
+        // The list shares the image list, which `glyph_list` keeps alive. The
+        // list does not repaint its items for a new image list.
+        super::present::mark_after(self.0, || {
+            send(self.0, LVM_SETIMAGELIST, LVSIL_SMALL as usize, images.0)
+        });
     }
 
     /// Gives the list `items`, each a text and the index of its icon among

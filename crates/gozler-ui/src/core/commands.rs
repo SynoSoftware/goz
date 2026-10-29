@@ -257,13 +257,12 @@ impl CommandId {
                     },
                     None,
                 ),
+                // Commander mode keeps `F3` for View when the person's
+                // shortcut moves elsewhere (COMMANDER_KEYS).
                 C::View => (
                     "command.view",
-                    &[],
-                    |s| {
-                        let panels = s.model.panels();
-                        matches!(s.list, List::Panel(side) if panels.focused(side).is_some_and(|entry| !entry.is_folder))
-                    },
+                    const { &[Keystroke::plain(Key::Function(3))] },
+                    |s| s.model.file_to_view(s.list).is_some(),
                     None,
                 ),
                 C::Edit => ("command.edit", &[], never, None),
@@ -356,10 +355,10 @@ impl CommandId {
             | C::Find
             | C::SortBy
             | C::Cancel => true,
-            C::Open | C::Properties | C::CopyToFolder | C::MoveToFolder | C::Delete => true,
-            C::SelectFiles | C::UnselectFiles | C::View | C::Edit | C::NewFolder => {
-                mode == Mode::Commander
+            C::Open | C::View | C::Properties | C::CopyToFolder | C::MoveToFolder | C::Delete => {
+                true
             }
+            C::SelectFiles | C::UnselectFiles | C::Edit | C::NewFolder => mode == Mode::Commander,
             C::OpenFileLocation
             | C::ShowInCommander
             | C::Explore

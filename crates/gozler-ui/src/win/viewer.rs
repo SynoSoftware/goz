@@ -10,11 +10,13 @@ use crate::core::viewer_window::ScrollBar;
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::{
     BeginPaint, COLOR_HIGHLIGHT, COLOR_HIGHLIGHTTEXT, COLOR_WINDOW, COLOR_WINDOWTEXT, ETO_CLIPPED,
-    ETO_OPAQUE, EndPaint, ExtTextOutW, FillRect, GetSysColorBrush, HBRUSH, HGDIOBJ, PAINTSTRUCT,
-    SelectObject, SetBkColor, SetTextColor,
+    ETO_OPAQUE, EndPaint, ExtTextOutW, FillRect, GetSysColorBrush, HBRUSH, HDC, HGDIOBJ,
+    PAINTSTRUCT, SelectObject, SetBkColor, SetTextColor,
 };
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
-use windows::Win32::UI::Controls::SetScrollInfo;
+use windows::Win32::UI::Controls::{
+    BPBF_COMPATIBLEBITMAP, BeginBufferedPaint, BufferedPaintInit, EndBufferedPaint, SetScrollInfo,
+};
 use windows::Win32::UI::HiDpi::GetSystemMetricsForDpi;
 use windows::Win32::UI::Input::KeyboardAndMouse::SetFocus;
 use windows::Win32::UI::WindowsAndMessaging::{
@@ -36,6 +38,14 @@ pub(crate) const AREA_PAINT: u32 = super::wake::WAKE + 9;
 
 /// The private message with which the area tells its Viewer of a click.
 pub(crate) const AREA_CLICKED: u32 = super::wake::WAKE + 10;
+
+/// Starts buffered painting on the window's thread, which [`paint_area`]
+/// uses; it ends with the process, as COM does. When it fails, the area
+/// draws without the buffer.
+pub(crate) fn initialize_buffered_paint() {
+    // SAFETY: called once, on the window's thread.
+    let _ = unsafe { BufferedPaintInit() };
+}
 
 /// Registers the area's window class; once, before the first Viewer opens.
 pub(crate) fn register_area() -> windows::core::Result<()> {
@@ -148,10 +158,23 @@ pub(crate) fn paint_area(area: Hwnd, text: &AreaText) {
     let height = text.line_height.0;
     let mut paint = PAINTSTRUCT::default();
     // SAFETY: BeginPaint and EndPaint pair on the same window and
-    // structure, and the font is selected back out before EndPaint; each
+    // structure, and so do BeginBufferedPaint and EndBufferedPaint inside
+    // them; the font is selected back out before the buffer ends; each
     // string outlives its call, and system brushes are never freed.
     unsafe {
-        let dc = BeginPaint(area.0, &mut paint);
+        let screen = BeginPaint(area.0, &mut paint);
+        // The rows draw into a buffer that is copied to the screen in one
+        // step, so a scroll never shows them change one by one; without
+        // the buffer, they draw on the screen.
+        let mut buffered = HDC::default();
+        let buffer = BeginBufferedPaint(
+            screen,
+            &raw const paint.rcPaint,
+            BPBF_COMPATIBLEBITMAP,
+            None,
+            &raw mut buffered,
+        );
+        let dc = if buffer == 0 { screen } else { buffered };
         let previous = SelectObject(dc, HGDIOBJ(text.font.handle().0));
         let window = GetSysColorBrush(COLOR_WINDOW);
         SetBkColor(dc, system_color(COLOR_WINDOW));
@@ -231,6 +254,9 @@ pub(crate) fn paint_area(area: Hwnd, text: &AreaText) {
         }
         fill(top, size.height.0);
         SelectObject(dc, previous);
+        if buffer != 0 {
+            let _ = EndBufferedPaint(buffer, true);
+        }
         let _ = EndPaint(area.0, &paint);
     }
 }
@@ -255,8 +281,11 @@ pub(crate) fn set_area_scroll(area: Hwnd, bar: ScrollBar) {
         nPos: bar.position,
         nTrackPos: 0,
     };
-    // SAFETY: `info` is complete and outlives the call.
-    unsafe { SetScrollInfo(area.0, SB_VERT, &info, true) };
+    let set = || {
+        // SAFETY: `info` is complete and outlives the call.
+        unsafe { SetScrollInfo(area.0, SB_VERT, &info, true) };
+    };
+    super::present::mark_after(area, set);
 }
 
 /// What the reading thread found.

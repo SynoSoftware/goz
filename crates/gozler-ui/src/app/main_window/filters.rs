@@ -1,9 +1,9 @@
 use super::{
     AttributeChoice, Button, Cell, CheckBox, CommandId, ControlEvent, ControlId, CustomDate,
-    CustomSize, DEFERRED, DateModified, DialogEnd, DialogId, DropDownList, FilterCaptions,
-    FilterLayout, Filters, Glyph, Hwnd, IconList, InfoTip, Kind, LRESULT, Label, Layout,
-    ListClosing, MainWindow, MenuItem, Numbers, Px, RangeItem, Rect, ScrollRequest, SizeFilter,
-    Tool, Toolbar, captions, clear_glyph, date_items, size_items, win,
+    CustomSize, DateModified, DialogEnd, DialogId, DropDownList, FilterCaptions, FilterLayout,
+    Filters, Glyph, Hwnd, IconList, InfoTip, Kind, LRESULT, Label, Layout, ListClosing, MainWindow,
+    MenuItem, Numbers, Px, RangeItem, Rect, ScrollRequest, SizeFilter, Tool, Toolbar, captions,
+    clear_glyph, date_items, size_items, win,
 };
 
 /// The filter pane's header, its window and its controls, in Tab order, and
@@ -489,7 +489,7 @@ impl FilterPane {
                 if matches!(closing, RangeList::Closing(each, ListClosing::Chosen) if each == range)
                 {
                     self.range_list.set(RangeList::Closed(range));
-                    hwnd.post(DEFERRED);
+                    hwnd.post_deferred();
                 }
             }
         } else if let Some(index) = pane

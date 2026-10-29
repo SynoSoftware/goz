@@ -360,7 +360,7 @@ impl MainWindow {
                 .capture
                 .accept(answer);
             self.retire_native_selection(list);
-            hwnd.post(DEFERRED);
+            hwnd.post_deferred();
         }
     }
 
@@ -760,7 +760,7 @@ impl MainWindow {
                 }
             }
             if complete {
-                hwnd.post(DEFERRED);
+                hwnd.post_deferred();
             } else {
                 self.schedule_native_selection(hwnd);
             }

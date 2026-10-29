@@ -2192,7 +2192,6 @@ impl<'a> SettingsDialog<'a> {
             }
             self.show_button_glyphs(dialog);
             self.refresh_index(dialog);
-            dialog.draw_once_after(|| {});
         }
         self.show_preview();
         self.update_apply(dialog);

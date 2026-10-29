@@ -32,7 +32,7 @@ use crate::win::viewer::{
     register_area, set_area_scroll,
 };
 use crate::win::wake::OpenWaker;
-use crate::win::window::{self, DEFERRED, Message, WindowProc};
+use crate::win::window::{self, Message, WindowProc};
 use crate::win::{self, Hwnd};
 use std::cell::{Cell, OnceCell, RefCell};
 use std::rc::{Rc, Weak};
@@ -750,7 +750,7 @@ impl Viewer {
                 ..shared.state.get()
             });
             shared.changed.set(true);
-            self.main.post(DEFERRED);
+            self.main.post_deferred();
         }
     }
 
@@ -834,7 +834,7 @@ impl Viewer {
                 ..shared.state.get()
             });
             shared.changed.set(true);
-            self.main.post(DEFERRED);
+            self.main.post_deferred();
         }
     }
 }

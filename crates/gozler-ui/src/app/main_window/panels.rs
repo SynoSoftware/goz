@@ -686,30 +686,25 @@ impl Panels {
             return;
         }
         if shown.is_none() != wanted.is_none() {
-            // The header would paint the column at the width it is inserted
-            // with, before the fill gives it its own. The fill stays last,
-            // because its own `draw_once_after` turns drawing on again.
-            c.list.draw_once_after(|| {
-                match wanted {
-                    Some(_) => {
-                        let header = {
-                            let model = window.model.borrow();
-                            captions::panel_headers(model.strings(), &[PanelColumn::Folder])
-                        };
-                        c.list.insert_column(
-                            FOLDER_COLUMN,
-                            &ListColumn {
-                                header: &header[0].full,
-                                width: Px(0),
-                                right_aligned: false,
-                            },
-                        );
-                    }
-                    None => c.list.delete_column(FOLDER_COLUMN),
+            match wanted {
+                Some(_) => {
+                    let header = {
+                        let model = window.model.borrow();
+                        captions::panel_headers(model.strings(), &[PanelColumn::Folder])
+                    };
+                    c.list.insert_column(
+                        FOLDER_COLUMN,
+                        &ListColumn {
+                            header: &header[0].full,
+                            width: Px(0),
+                            right_aligned: false,
+                        },
+                    );
                 }
-                self.show_panel_sort(window, side);
-                self.fill_panel_columns(window);
-            });
+                None => c.list.delete_column(FOLDER_COLUMN),
+            }
+            self.show_panel_sort(window, side);
+            self.fill_panel_columns(window);
         }
     }
 
@@ -1944,12 +1939,12 @@ impl Panels {
     }
 
     /// Notes that `side`'s list changed `change`, which the panel reads on
-    /// the next [`super::DEFERRED`]. The update goes on until then, so the
-    /// status line and the key bar change with the rows.
+    /// the next `DEFERRED` ([`Hwnd::post_deferred`]), so the status line and
+    /// the key bar change with the rows.
     pub(super) fn list_changed(&self, hwnd: Hwnd, side: Side, change: ListChanged) {
         let changed = &self.panel(side).changed;
-        if changed.get() == ListChanged::Nothing && hwnd.post(super::DEFERRED) {
-            crate::win::present::extend_to_deferred();
+        if changed.get() == ListChanged::Nothing {
+            hwnd.post_deferred();
         }
         changed.set(changed.get().max(change));
     }

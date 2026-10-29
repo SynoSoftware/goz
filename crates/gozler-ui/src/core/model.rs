@@ -27,7 +27,7 @@ use super::search_list::Deselect;
 use super::search_list::{Ended, Keep, Kept, SearchList, SelectedSize};
 use super::selection::{
     Filter, Filtered, FolderContents, RowSelection, SELECTION_LIMIT, Selection, SelectionSource,
-    Sums,
+    Sums, wide_path,
 };
 use super::settings::{
     Changes, Choices, Mode, Placement, SavedColumn, Settings, SettingsPage, ViewerState,
@@ -974,6 +974,21 @@ impl Model {
         match list {
             List::Search => (self.search.list.selection().files()).map_or(0, <[_]>::len),
             List::Panel(side) => self.panels.chosen_count(side),
+        }
+    }
+
+    /// The file that View shows from `list`: Search's one selected file,
+    /// once the selection is read, or a panel's focused file
+    /// (DESIGN.md: The Viewer).
+    pub(crate) fn file_to_view(&self, list: List) -> Option<Vec<u16>> {
+        match list {
+            List::Search => match self.search.list.selection().files() {
+                Some([file]) if !file.is_dir => Some(wide_path(file)),
+                _ => None,
+            },
+            List::Panel(side) => (self.panels.focused(side))
+                .filter(|entry| !entry.is_folder)
+                .map(|entry| entry.path),
         }
     }
 

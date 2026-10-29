@@ -190,7 +190,8 @@ pub(crate) enum Cover {
     First,
     /// The pass paints too little to need it.
     Small,
-    /// The pass paints one window, which paints in one step without it.
+    /// The pass paints at most one of the main window's windows, which paints
+    /// in one step without it.
     Single,
     /// The copy of the client failed.
     CopyFailed,

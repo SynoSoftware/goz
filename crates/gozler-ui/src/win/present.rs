@@ -1,14 +1,14 @@
-//! The presenter, the one owner of when the main window's pixels appear.
-//! Each control paints into the window's surface on its own, and the screen
-//! shows that surface at every frame, so controls that paint one by one
-//! show the window in pieces. So a change only marks the windows it
-//! changes: the setters through [`mark_after`], and placements through
+//! The presenter, the one owner of when the pixels of the thread's windows
+//! appear: the main window, the Viewers and the dialogs. Each control
+//! paints into its window's surface on its own, and the screen shows that
+//! surface at every frame, so controls that paint one by one show the
+//! window in pieces. So a change only marks the windows it changes: the
+//! setters through [`mark_after`], and placements through
 //! [`super::place_children`]. When the outermost update ends, the presenter
-//! paints what was marked: two or more windows at once, in one pass, and a
-//! single window at its next `WM_PAINT`, which paints it in one step.
-//! A pass of several controls takes longer than a frame, so the cover, a
-//! copy of the old picture in a window of its own, hides the pass until
-//! the window's surface is finished. `core::present` decides where an
+//! paints what was marked in one pass. A pass of several of the main
+//! window's controls takes longer than a frame, so the cover, a copy of the
+//! old picture in a window of its own, hides the pass until the main
+//! window's surface is finished. `core::present` decides where an
 //! update starts and ends; [`enter`] runs it for each message of the window
 //! procedures of this thread.
 //!
@@ -31,25 +31,27 @@ use windows::Win32::Graphics::Gdi::{
     BI_RGB, BITMAPINFO, BITMAPINFOHEADER, BitBlt, ClientToScreen, CombineRgn, CreateCompatibleDC,
     CreateDIBSection, CreateRectRgn, CreateRoundRectRgn, DIB_RGB_COLORS, DeleteDC, DeleteObject,
     GdiFlush, GetDC, GetUpdateRect, GetUpdateRgn, HBITMAP, HGDIOBJ, MapWindowPoints,
-    RDW_ALLCHILDREN, RDW_ERASE, RDW_FRAME, RDW_INVALIDATE, RDW_UPDATENOW, RGN_DIFF, RedrawWindow,
-    ReleaseDC, SRCCOPY, SelectObject, SetWindowRgn, UpdateWindow,
+    RDW_ALLCHILDREN, RDW_ERASE, RDW_FRAME, RDW_INVALIDATE, RDW_UPDATENOW, REDRAW_WINDOW_FLAGS,
+    RGN_DIFF, RedrawWindow, ReleaseDC, SRCCOPY, SelectObject, SetWindowRgn, UpdateWindow,
 };
 use windows::Win32::System::Performance::{QueryPerformanceCounter, QueryPerformanceFrequency};
+use windows::Win32::System::Threading::GetCurrentThreadId;
 use windows::Win32::UI::Controls::{
     CDDS_PREPAINT, LVN_GETDISPINFOW, LVN_GETEMPTYMARKUP, LVN_ODCACHEHINT, LVN_ODFINDITEMW,
     NM_CUSTOMDRAW, NMCUSTOMDRAW, NMHDR, STATE_SYSTEM_INVISIBLE,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, GA_ROOT, GW_HWNDPREV, GetAncestor, GetClientRect, GetQueueStatus,
-    GetScrollBarInfo, GetWindow, GetWindowRect, HWND_NOTOPMOST, HWND_TOPMOST, IMAGE_BITMAP,
-    OBJID_HSCROLL, OBJID_VSCROLL, QS_INPUT, QS_PAINT, QS_POSTMESSAGE, QUEUE_STATUS_FLAGS,
-    SCROLLBARINFO, SET_WINDOW_POS_FLAGS, STM_SETIMAGE, SWP_HIDEWINDOW, SWP_NOACTIVATE, SWP_NOMOVE,
-    SWP_NOREDRAW, SWP_NOSIZE, SWP_NOZORDER, SWP_SHOWWINDOW, SendMessageW, SetWindowPos,
-    WINDOW_STYLE, WM_CTLCOLORMSGBOX, WM_CTLCOLORSTATIC, WM_DESTROY, WM_ENTERMENULOOP,
-    WM_ENTERSIZEMOVE, WM_ERASEBKGND, WM_EXITMENULOOP, WM_EXITSIZEMOVE, WM_GETMINMAXINFO,
-    WM_NCACTIVATE, WM_NCCALCSIZE, WM_NCHITTEST, WM_NCPAINT, WM_NOTIFY, WM_PRINTCLIENT,
-    WM_SETCURSOR, WM_SETREDRAW, WM_SYNCPAINT, WM_WINDOWPOSCHANGING, WS_CHILD, WS_EX_NOACTIVATE,
-    WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_HSCROLL, WS_POPUP, WS_VISIBLE, WS_VSCROLL,
+    CreateWindowExW, EnumThreadWindows, GA_ROOT, GW_HWNDPREV, GetAncestor, GetClientRect,
+    GetQueueStatus, GetScrollBarInfo, GetWindow, GetWindowRect, HWND_NOTOPMOST, HWND_TOPMOST,
+    IMAGE_BITMAP, OBJID_HSCROLL, OBJID_VSCROLL, QS_INPUT, QS_PAINT, QS_POSTMESSAGE,
+    QUEUE_STATUS_FLAGS, SCROLLBARINFO, SET_WINDOW_POS_FLAGS, STM_SETIMAGE, SWP_HIDEWINDOW,
+    SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOREDRAW, SWP_NOSIZE, SWP_NOZORDER, SWP_SHOWWINDOW,
+    SendMessageW, SetWindowPos, WINDOW_STYLE, WM_CTLCOLORMSGBOX, WM_CTLCOLORSTATIC, WM_DESTROY,
+    WM_ENTERMENULOOP, WM_ENTERSIZEMOVE, WM_ERASEBKGND, WM_EXITMENULOOP, WM_EXITSIZEMOVE,
+    WM_GETMINMAXINFO, WM_NCACTIVATE, WM_NCCALCSIZE, WM_NCHITTEST, WM_NCPAINT, WM_NOTIFY,
+    WM_PRINTCLIENT, WM_SETCURSOR, WM_SETREDRAW, WM_SYNCPAINT, WM_WINDOWPOSCHANGING, WS_CHILD,
+    WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_HSCROLL, WS_POPUP, WS_VISIBLE,
+    WS_VSCROLL,
 };
 use windows::core::{BOOL, PCWSTR, w};
 
@@ -65,7 +67,7 @@ thread_local! {
     /// nothing for it.
     static WINDOWS: RefCell<Vec<Hwnd>> = const { RefCell::new(Vec::new()) };
     static OPEN: RefCell<OpenUpdate> = const {
-        RefCell::new(OpenUpdate { early: Vec::new(), raised: None })
+        RefCell::new(OpenUpdate { early: Vec::new(), raised: None, held: Vec::new() })
     };
 }
 
@@ -91,6 +93,24 @@ struct OpenUpdate {
     early: Vec<Marked>,
     /// The cover, when [`cover_now`] showed it.
     raised: Option<Hwnd>,
+    /// The controls whose drawing [`hold_after`] turned off.
+    held: Vec<Held>,
+}
+
+#[derive(Clone, Copy)]
+struct Held {
+    control: Hwnd,
+    repaint: Repaint,
+}
+
+/// How a held control repaints when its hold ends.
+#[derive(Clone, Copy)]
+pub(crate) enum Repaint {
+    /// Over its own buffer, as a list view with `LVS_EX_DOUBLEBUFFER`
+    /// does, so erasing first would flicker.
+    Buffered,
+    /// After its background is erased.
+    Erased,
 }
 
 /// The message the presenter posts to the main window when an update
@@ -345,11 +365,11 @@ impl Drop for ModalLoop {
     }
 }
 
-/// The current message posted `DEFERRED` to finish an update that a newer
-/// one interrupted, so the open update goes on until that message ends.
+/// The current message posted `DEFERRED` ([`super::Hwnd::post_deferred`]),
+/// so the open update goes on until that message ends.
 /// Windows delivers a posted message before input and `WM_PAINT`, and the
 /// messages posted before it arrive first and join the update too.
-pub(crate) fn extend_to_deferred() {
+pub(super) fn extend_to_deferred() {
     UPDATES.with_borrow_mut(Updates::extend_to_deferred);
 }
 
@@ -359,10 +379,9 @@ pub(crate) fn extend_to_deferred() {
 /// off drops the marks the control's children already had, such as the
 /// filter pane's controls that the pane's placement marked, so those are
 /// marked again; the others stay unmarked, so a status text does not
-/// repaint the controls inside the status bar. Any window outside the
-/// main window runs `change` as it is, because dialogs and the Viewer keep
-/// their own painting and a top-level window's title is drawn by DWM, and
-/// so does a hidden control, because `WM_SETREDRAW` TRUE would show it.
+/// repaint the controls inside the status bar. A top-level window runs
+/// `change` as it is, because DWM draws its title, and so does a hidden
+/// control, because `WM_SETREDRAW` TRUE would show it.
 pub(crate) fn mark_after<T>(control: Hwnd, change: impl FnOnce() -> T) -> T {
     mark_rect_after(control, None, change)
 }
@@ -376,7 +395,8 @@ pub(crate) fn mark_rect_after<T>(
     rect: Option<RECT>,
     change: impl FnOnce() -> T,
 ) -> T {
-    if !control.styles().0.contains(WS_CHILD) || !is_shown_in_main(control) {
+    // The hold's release repaints the control whole.
+    if is_held(control) || !control.styles().0.contains(WS_CHILD | WS_VISIBLE) {
         return change();
     }
     let mut children = Vec::new();
@@ -429,15 +449,78 @@ pub(crate) fn mark_rect_after<T>(
     result
 }
 
-/// Runs `change` with `window`'s drawing off (`WM_SETREDRAW`), so nothing
-/// it changes paints until the caller invalidates what should.
-pub(super) fn with_drawing_off<T>(window: Hwnd, change: impl FnOnce() -> T) -> T {
-    // SAFETY: plain values.
-    unsafe { SendMessageW(window.0, WM_SETREDRAW, Some(WPARAM(0)), None) };
+/// Runs `change` with `window`'s drawing off, so nothing it changes paints
+/// until the caller invalidates what should.
+fn with_drawing_off<T>(window: Hwnd, change: impl FnOnce() -> T) -> T {
+    set_drawing(window, false);
     let result = change();
-    // SAFETY: plain values.
-    unsafe { SendMessageW(window.0, WM_SETREDRAW, Some(WPARAM(1)), None) };
+    set_drawing(window, true);
     result
+}
+
+/// Turns `window`'s drawing off or on (`WM_SETREDRAW`). Off clears its
+/// `WS_VISIBLE`, and on sets it again.
+fn set_drawing(window: Hwnd, on: bool) {
+    // SAFETY: plain values.
+    unsafe { SendMessageW(window.0, WM_SETREDRAW, Some(WPARAM(usize::from(on))), None) };
+}
+
+/// Runs `change`, a native change after which `control`, a list or a tree,
+/// draws itself at once, such as a column's width or a tree's item, with
+/// the control's drawing off until the open update ends. Several such
+/// changes in one update then draw the control once, when [`finish`]
+/// releases it, or earlier when a placement or a scroll needs its drawing
+/// on ([`release`]). Outside an update no `finish` would release the hold, and
+/// a hidden control would show at `WM_SETREDRAW` TRUE, so both run `change`
+/// as [`mark_after`] does.
+pub(crate) fn hold_after<T>(control: Hwnd, repaint: Repaint, change: impl FnOnce() -> T) -> T {
+    if is_held(control) {
+        return change();
+    }
+    if !UPDATES.with_borrow(Updates::is_open) || !control.styles().0.contains(WS_CHILD | WS_VISIBLE)
+    {
+        return mark_after(control, change);
+    }
+    set_drawing(control, false);
+    OPEN.with_borrow_mut(|open| open.held.push(Held { control, repaint }));
+    change()
+}
+
+/// Whether [`hold_after`] has `window`'s drawing off.
+pub(super) fn is_held(window: Hwnd) -> bool {
+    OPEN.with_borrow(|open| open.held.iter().any(|held| held.control == window))
+}
+
+/// Ends the hold of `control`, if it has one, before code that needs its
+/// drawing on, such as a placement or a scroll.
+pub(super) fn release(control: Hwnd) {
+    let held = OPEN.with_borrow_mut(|open| {
+        let index = open.held.iter().position(|held| held.control == control)?;
+        Some(open.held.swap_remove(index))
+    });
+    if let Some(held) = held {
+        repaint(held);
+    }
+}
+
+/// Turns the held control's drawing on and marks it whole, with its frame
+/// and its children, whose marks the hold dropped. A column or a tree
+/// change repaints every row anyway.
+fn repaint(held: Held) {
+    set_drawing(held.control, true);
+    let erase = match held.repaint {
+        Repaint::Buffered => REDRAW_WINDOW_FLAGS(0),
+        Repaint::Erased => RDW_ERASE,
+    };
+    // SAFETY: plain values.
+    let _ = unsafe {
+        RedrawWindow(
+            Some(held.control.0),
+            None,
+            None,
+            RDW_INVALIDATE | RDW_FRAME | RDW_ALLCHILDREN | erase,
+        )
+    };
 }
 
 /// The windows among `windows` with a part waiting to paint, each with the
@@ -487,6 +570,7 @@ fn is_shown_in_main(window: Hwnd) -> bool {
 /// even while its drawing is off, so the rows it uncovers paint now too,
 /// instead of a frame or two later, when the update ends.
 pub(crate) fn scroll_now<T>(list: Hwnd, scroll: impl FnOnce() -> T) -> T {
+    release(list);
     let result = scroll();
     // SAFETY: plain values.
     let _ = unsafe { UpdateWindow(list.0) };
@@ -521,7 +605,7 @@ fn queue_holds(flags: QUEUE_STATUS_FLAGS) -> bool {
 }
 
 /// Ends the update `ended`, if one ended: publishes what it marked in the
-/// main window and logs it.
+/// thread's windows on screen, and logs it.
 fn finish(ended: Option<Start>) {
     let Some(start) = ended else {
         return;
@@ -532,23 +616,46 @@ fn finish(ended: Option<Start>) {
         deferred.present = Present::Idle;
         DEFERRED_PAINT.set(deferred);
     }
-    let OpenUpdate { early, raised } = OPEN.take();
+    let OpenUpdate {
+        early,
+        raised,
+        held,
+    } = OPEN.take();
     let raised = Raised(raised);
-    let Some(Main { window: main, .. }) = MAIN.get() else {
-        return;
-    };
-    let changed = ticks();
-    if !main.is_on_screen() {
-        return;
+    if !held.is_empty() {
+        // A message that a control sends while its drawing comes on cannot
+        // end an update, as in the paint pass.
+        let _pass = Scope(Some(UPDATES.with_borrow_mut(Updates::pass)));
+        held.into_iter().for_each(repaint);
     }
+    let changed = ticks();
     // A window that needs painting is a waiting WM_PAINT.
     if !queue_holds(QS_PAINT) {
         deferred.since = None;
         DEFERRED_PAINT.set(deferred);
         return;
     }
+    let windows = shown_windows();
+    if windows.is_empty() {
+        return;
+    }
+    let main = MAIN
+        .get()
+        .map(|main| main.window)
+        .filter(|main| windows.contains(main));
     let mut marked = Vec::new();
-    find_marked(main, &mut marked);
+    let mut in_main = 0..0;
+    let mut painted = Vec::new();
+    for window in windows {
+        let first = marked.len();
+        find_marked(window, &mut marked);
+        if Some(window) == main {
+            in_main = first..marked.len();
+        }
+        if marked.len() > first || (Some(window) == main && raised.0.is_some()) {
+            painted.push(window);
+        }
+    }
     // The marks paint when nothing else waits, or once the oldest is a
     // frame old. Input and posted messages go before WM_PAINT, so marks
     // left to it waited for seconds behind a stream of search results;
@@ -562,21 +669,26 @@ fn finish(ended: Option<Start>) {
         || presented
         || !queue_holds(QUEUE_STATUS_FLAGS(QS_INPUT.0 | QS_POSTMESSAGE.0))
         || changed - since >= ticks_per_second() / 60;
-    if !due && deferred.present == Present::Idle && main.post(PRESENT) {
+    if !due
+        && deferred.present == Present::Idle
+        && MAIN.get().is_some_and(|main| main.window.post(PRESENT))
+    {
         deferred.present = Present::Posted;
     }
     deferred.since = (!due).then_some(since);
     DEFERRED_PAINT.set(deferred);
-    let area = marked
+    let area = marked[in_main.clone()]
         .iter()
         .map(|marked| i64::from(marked.rect.width.0) * i64::from(marked.rect.height.0))
         .sum();
     // One window paints in one step: a list is double-buffered, and the
-    // other controls paint in well under a frame.
-    let covered = marked.len() >= 2 || raised.0.is_some();
+    // other controls paint in well under a frame. The other windows, such
+    // as the Viewer and the dialogs, have few controls each, and paint
+    // without the cover.
+    let covered = in_main.len() >= 2 || raised.0.is_some();
     let (paint, raise, redraw, published) = if due {
         let before = ticks();
-        let (cover, raise, redraw) = publish(main, area, raised, covered);
+        let (cover, raise, redraw) = publish(main, &painted, area, raised, covered);
         (ticks() - before, raise, redraw, Some(cover))
     } else {
         (0, 0, 0, None)
@@ -610,15 +722,38 @@ fn finish(ended: Option<Start>) {
     });
 }
 
-/// Fills `marked` with the main window's client and its descendants that
-/// are shown and need painting, each with the rectangle to paint, in screen
+/// The top-level windows of this thread that are on screen, other than the
+/// cover: the main window, the Viewers and the dialogs, and the windows
+/// that Windows shows for the thread, such as a message box or a tooltip.
+fn shown_windows() -> Vec<Hwnd> {
+    unsafe extern "system" fn add(window: HWND, found: LPARAM) -> BOOL {
+        // SAFETY: `found` is the vector that `shown_windows` passed, alive
+        // while EnumThreadWindows runs.
+        unsafe { (*(found.0 as *mut Vec<Hwnd>)).push(Hwnd(window)) };
+        BOOL(1)
+    }
+    let mut windows = Vec::new();
+    // SAFETY: the callback writes only to `windows`, which outlives the call.
+    let _ = unsafe {
+        EnumThreadWindows(
+            GetCurrentThreadId(),
+            Some(add),
+            LPARAM(std::ptr::from_mut(&mut windows) as isize),
+        )
+    };
+    let cover = MAIN.get().and_then(|main| main.cover);
+    windows.retain(|&window| Some(window) != cover && window.is_on_screen());
+    windows
+}
+
+/// Adds to `marked` `window`'s client and its descendants that are shown
+/// and need painting, each with the rectangle to paint, in screen
 /// coordinates.
-fn find_marked(main: Hwnd, marked: &mut Vec<Marked>) {
+fn find_marked(window: Hwnd, marked: &mut Vec<Marked>) {
     let mut windows = WINDOWS.take();
     windows.clear();
-    windows.push(main);
-    super::dialog::add_descendants(main, &mut windows);
-    marked.clear();
+    windows.push(window);
+    super::dialog::add_descendants(window, &mut windows);
     let visible = windows.iter().copied().filter(|window| window.is_visible());
     marked.extend(update_rects(visible).map(|(window, mut rect)| {
         // SAFETY: `rect` is a local that holds the two points
@@ -635,18 +770,25 @@ fn find_marked(main: Hwnd, marked: &mut Vec<Marked>) {
     WINDOWS.set(windows);
 }
 
-/// Paints the marked windows of `main`, `area` pixels in all, now, in one
-/// pass, under the cover when `covered`. It invalidates nothing, so a
-/// window that did not change does not paint, and neither do the frame and
-/// the menu bar. Gives what the cover did, and the ticks that raising it and
-/// the windows' paint took.
-fn publish(main: Hwnd, area: i64, mut raised: Raised, covered: bool) -> (Cover, i64, i64) {
+/// Paints the marked windows inside each of `windows` now, in one pass, the
+/// main window's, `area` pixels in all, under the cover when `covered`. It
+/// invalidates nothing, so a window that did not change does not paint, and
+/// neither do the frame and the menu bar. Gives what the cover did, and the
+/// ticks that raising it and the windows' paint took.
+fn publish(
+    main: Option<Hwnd>,
+    windows: &[Hwnd],
+    area: i64,
+    mut raised: Raised,
+    covered: bool,
+) -> (Cover, i64, i64) {
     let _pass = Scope(Some(UPDATES.with_borrow_mut(Updates::pass)));
     let before = ticks();
-    let outcome = match (raised.0, MAIN.get().and_then(|main| main.cover)) {
+    let cover = MAIN.get().and_then(|main| main.cover);
+    let outcome = match (raised.0, main.zip(cover)) {
         (Some(_), _) => Cover::Early,
         (None, _) if !covered => Cover::Single,
-        (None, Some(cover)) => {
+        (None, Some((main, cover))) => {
             let outcome = raise_cover(main, cover, area);
             if outcome == Cover::Shown {
                 raised.0 = Some(cover);
@@ -657,8 +799,11 @@ fn publish(main: Hwnd, area: i64, mut raised: Raised, covered: bool) -> (Cover, 
     };
     let raise = ticks() - before;
     let before = ticks();
-    // SAFETY: plain values.
-    let _ = unsafe { RedrawWindow(Some(main.0), None, None, RDW_UPDATENOW | RDW_ALLCHILDREN) };
+    for window in windows {
+        // SAFETY: plain values.
+        let _ =
+            unsafe { RedrawWindow(Some(window.0), None, None, RDW_UPDATENOW | RDW_ALLCHILDREN) };
+    }
     (outcome, raise, ticks() - before)
 }
 

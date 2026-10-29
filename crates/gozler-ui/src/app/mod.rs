@@ -134,6 +134,7 @@ pub(crate) fn run() {
     win::shell::initialize_com();
     win::shell::initialize_ole();
     win::controls::initialize();
+    win::viewer::initialize_buffered_paint();
 
     let language = settings
         .choices

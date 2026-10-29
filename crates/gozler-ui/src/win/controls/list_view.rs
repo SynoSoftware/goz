@@ -2,6 +2,7 @@ use super::{child, scroll_bar_width, send, send_pointer};
 use crate::core::layout::{Px, column_sizing::cell_width};
 use crate::core::text::Text;
 use crate::win::gdi::ImageList;
+use crate::win::present::{self, Repaint};
 use crate::win::{Hwnd, wide};
 use std::ops::Range;
 use windows::Win32::Foundation::{HWND, POINT, RECT};
@@ -95,11 +96,6 @@ impl ListView {
         self.0
     }
 
-    /// Batches column changes without erasing the list's native buffer.
-    pub(crate) fn draw_once_after(self, change: impl FnOnce()) {
-        self.0.redraw_after(change, Default::default());
-    }
-
     pub(crate) fn insert_column(self, index: usize, column: &ListColumn) {
         self.column_message(LVM_INSERTCOLUMNW, index, column.header, Some(column));
     }
@@ -138,9 +134,18 @@ impl ListView {
                 LVCFMT_LEFT
             };
         }
-        // SAFETY: `item` and the header text it points to outlive the call,
-        // which copies them.
-        unsafe { send_pointer(self.0, message, index, &raw const item) };
+        self.hold_after(|| {
+            // SAFETY: `item` and the header text it points to outlive the
+            // call, which copies them.
+            unsafe { send_pointer(self.0, message, index, &raw const item) };
+        });
+    }
+
+    /// Runs `change`, a column change, after which the list draws its
+    /// header and every row it shows at once, so that several column
+    /// changes in one update draw the list once ([`present::hold_after`]).
+    fn hold_after(self, change: impl FnOnce()) {
+        present::hold_after(self.0, Repaint::Buffered, change);
     }
 
     pub(crate) fn column_width(self, index: usize) -> Px {
@@ -159,28 +164,26 @@ impl ListView {
     }
 
     pub(crate) fn set_column_width(self, index: usize, width: Px) {
-        send(self.0, LVM_SETCOLUMNWIDTH, index, width.0 as isize);
+        self.hold_after(|| {
+            send(self.0, LVM_SETCOLUMNWIDTH, index, width.0 as isize);
+        });
     }
 
-    /// Gives each column at an index of `widths` its width, and draws the
-    /// list once when any width changes. A list paints every row it shows
-    /// for each width it takes, so a width the column has already is not
-    /// set again.
+    /// Gives each column at an index of `widths` its width. A list paints
+    /// every row it shows for each width it takes, so a width the column
+    /// has already is not set again.
     pub(crate) fn set_column_widths(self, widths: impl IntoIterator<Item = (usize, Px)>) {
-        let changed: Vec<_> = (widths.into_iter())
-            .filter(|&(index, width)| self.column_width(index) != width)
-            .collect();
-        if !changed.is_empty() {
-            self.draw_once_after(|| {
-                for (index, width) in changed {
-                    self.set_column_width(index, width);
-                }
-            });
+        for (index, width) in widths {
+            if self.column_width(index) != width {
+                self.set_column_width(index, width);
+            }
         }
     }
 
     pub(crate) fn delete_column(self, index: usize) {
-        send(self.0, LVM_DELETECOLUMN, index, 0);
+        self.hold_after(|| {
+            send(self.0, LVM_DELETECOLUMN, index, 0);
+        });
     }
 
     /// The column indexes in the order the header shows them, of `count`

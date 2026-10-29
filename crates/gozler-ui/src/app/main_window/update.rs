@@ -82,8 +82,8 @@ impl MainWindow {
             self.pending_refresh.get() == Areas::NONE && self.pending_effects.borrow().is_empty();
         self.pending_refresh
             .set(self.pending_refresh.get() | touched);
-        if post && hwnd.post(DEFERRED) {
-            win::present::extend_to_deferred();
+        if post {
+            hwnd.post_deferred();
         }
     }
 

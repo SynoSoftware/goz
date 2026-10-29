@@ -3,8 +3,8 @@
 //! is ready. Their saved destinations travel with them through commit.
 
 use super::{
-    Choices, CommandId, DEFERRED, Hwnd, Instance, MainWindow, Mode, RefCell, RegisterError,
-    Registration, ShowShortcut, Strings, shortcut,
+    Choices, CommandId, Hwnd, Instance, MainWindow, Mode, RefCell, RegisterError, Registration,
+    ShowShortcut, Strings, shortcut,
 };
 use crate::core::shortcuts::command_place;
 
@@ -150,7 +150,7 @@ impl Shortcuts {
                         shortcut: registration.shortcut(),
                         error,
                     });
-                    hwnd.post(DEFERRED);
+                    hwnd.post_deferred();
                 }
             }
         }

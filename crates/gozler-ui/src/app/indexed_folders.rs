@@ -267,11 +267,8 @@ impl<'a> IndexedFolders<'a> {
         self.main.indexed().retire(retired);
         if !self.jobs.borrow().is_empty() {
             let end = Instant::now() + SLICE;
-            // A tree that draws itself updates its scroll bar for each item.
-            tree.hwnd().draw_once_after(|| {
-                self.recheck_visible(tree);
-                self.work_until(tree, end);
-            });
+            self.recheck_visible(tree);
+            self.work_until(tree, end);
         }
         self.reveal_more(dialog, tree);
         let pending = self.main.indexed().pending(session);

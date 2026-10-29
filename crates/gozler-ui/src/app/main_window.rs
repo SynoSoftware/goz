@@ -94,7 +94,7 @@ use crate::win::shortcut::{self, RegisterError, Registration};
 use crate::win::toolbar::{Tool, Toolbar};
 use crate::win::tray::TrayEvent;
 use crate::win::wake::OpenWaker;
-use crate::win::window::{DEFERRED, Message, WindowProc};
+use crate::win::window::{Message, WindowProc};
 use crate::win::{self, Hwnd};
 use gozler_core::include::IndexSettings;
 use gozler_core::proto::ResultItem;
@@ -1858,7 +1858,7 @@ impl MainWindow {
                 CommandId::NewFolder => {
                     return self.controls().panels.new_folder(self, hwnd, active);
                 }
-                CommandId::View => return self.view_focused(hwnd, active),
+                CommandId::View => return self.view(hwnd, list),
                 // Not available in this version (DESIGN.md: Commands in Two
                 // panels).
                 CommandId::Edit => return,
@@ -2115,7 +2115,7 @@ impl MainWindow {
     /// event of this wake has applied (DESIGN.md: window rule 13).
     fn defer(&self, hwnd: Hwnd, step: ModalStep) {
         self.modal_steps.borrow_mut().push_back(step);
-        hwnd.post(DEFERRED);
+        hwnd.post_deferred();
     }
 
     /// Runs the deferred modal steps one at a time. A step's own loop
@@ -2403,7 +2403,7 @@ impl MainWindow {
             self.modal_steps
                 .borrow_mut()
                 .push_front(ModalStep::PreparedFailure(report));
-            hwnd.post(DEFERRED);
+            hwnd.post_deferred();
         }
         let followed = self.created().work.borrow_mut().operations.take_followed();
         if let Some(answer) = followed {
@@ -3164,16 +3164,15 @@ impl MainWindow {
         self.created().work.borrow_mut().clipboard.cancel();
     }
 
-    /// `F3`: opens a Viewer of the active panel's focused file
-    /// (DESIGN.md: The Viewer).
-    fn view_focused(&self, hwnd: Hwnd, side: Side) {
+    /// `F3`: opens a Viewer of Search's one selected file, or of a panel's
+    /// focused file (DESIGN.md: The Viewer).
+    fn view(&self, hwnd: Hwnd, list: List) {
         let (path, strings) = {
             let model = self.model.borrow();
-            let panels = model.panels();
-            let Some(entry) = panels.focused(side).filter(|entry| !entry.is_folder) else {
+            let Some(path) = model.file_to_view(list) else {
                 return;
             };
-            (entry.path, model.strings().clone())
+            (path, model.strings().clone())
         };
         if let Err(error) = self.viewers.open(path, strings, hwnd) {
             self.log_error(format!("The Viewer did not open: {error}"));
@@ -3396,7 +3395,7 @@ impl MainWindow {
             retired.push(delivery, crate::core::work::INLINE_ITEMS + 1);
             self.created().work.borrow_mut().retire(retired);
             self.start_list_passes();
-            hwnd.post(DEFERRED);
+            hwnd.post_deferred();
         }
         if finished || self.operation_delivery.borrow().is_some() {
             self.schedule_operations(hwnd);
@@ -4495,7 +4494,7 @@ impl WindowProc for MainWindow {
                         .focus();
                 }
                 if self.shortcuts.has_failures() {
-                    hwnd.post(DEFERRED);
+                    hwnd.post_deferred();
                 }
                 Some(LRESULT(0))
             }

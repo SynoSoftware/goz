@@ -40,7 +40,7 @@ use crate::core::settings::Placement;
 use windows::Win32::Foundation::{HWND, LPARAM, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::{
     InvalidateRect, MapWindowPoints, RDW_ALLCHILDREN, RDW_ERASE, RDW_FRAME, RDW_INVALIDATE,
-    REDRAW_WINDOW_FLAGS, RedrawWindow,
+    RedrawWindow,
 };
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     GetActiveWindow, GetFocus, IsWindowEnabled, SetFocus,
@@ -218,8 +218,10 @@ impl Hwnd {
     }
 
     pub(crate) fn is_visible(self) -> bool {
+        // Drawing off clears `WS_VISIBLE`, so a control that the presenter
+        // holds would read as hidden.
         // SAFETY: plain values.
-        unsafe { IsWindowVisible(self.0) }.as_bool()
+        present::is_held(self) || unsafe { IsWindowVisible(self.0) }.as_bool()
     }
 
     /// Whether the window is on screen: visible and not minimized.
@@ -292,32 +294,6 @@ impl Hwnd {
         let _ = unsafe { InvalidateRect(Some(self.0), None, true) };
     }
 
-    /// Runs `change` with redraw disabled on this window, then invalidates
-    /// its client, frame and descendants for native repainting. Descendants
-    /// paint independently. A hidden window only runs `change`, because
-    /// `DefWindowProc` answers `WM_SETREDRAW` TRUE by making the window
-    /// visible.
-    pub(crate) fn draw_once_after(self, change: impl FnOnce()) {
-        self.redraw_after(change, RDW_ERASE);
-    }
-
-    fn redraw_after(self, change: impl FnOnce(), flags: REDRAW_WINDOW_FLAGS) {
-        if !self.styles().0.contains(WS_VISIBLE) {
-            change();
-            return;
-        }
-        present::with_drawing_off(self, change);
-        // SAFETY: plain values.
-        let _ = unsafe {
-            RedrawWindow(
-                Some(self.0),
-                None,
-                None,
-                RDW_FRAME | RDW_INVALIDATE | RDW_ALLCHILDREN | flags,
-            )
-        };
-    }
-
     /// Gives the window the keyboard focus. The control that loses it and
     /// the one that gets it paint their focus cue inside the message, so
     /// both are marked instead; a list view marks only its focused and
@@ -381,6 +357,18 @@ impl Hwnd {
         unsafe { PostMessageW(Some(self.0), message, WPARAM(0), LPARAM(0)) }.is_ok()
     }
 
+    /// Posts [`window::DEFERRED`], to act once after the messages of the
+    /// current user action; whether Windows took it. The open update goes
+    /// on until it arrives, so what the deferred work changes paints with
+    /// the rest of the action.
+    pub(crate) fn post_deferred(self) -> bool {
+        let posted = self.post(window::DEFERRED);
+        if posted {
+            present::extend_to_deferred();
+        }
+        posted
+    }
+
     /// The restored rectangle and whether the window is or returns
     /// maximized, as `GetWindowPlacement` gives them.
     pub(crate) fn placement(self) -> Option<Placement> {
@@ -435,6 +423,12 @@ pub(crate) fn move_children(moves: &[(Hwnd, Rect)]) {
 /// that a child leaves, and they paint when the update ends
 /// ([`present`]). `SWP_NOREDRAW` leaves that marking to the caller.
 pub(crate) fn place_children(moves: &[(Hwnd, Rect)], shown: &[(Hwnd, bool)]) {
+    // A held control reads as hidden in its style, which decides below
+    // whether it shows or hides.
+    let placed = moves.iter().map(|&(child, _)| child);
+    placed
+        .chain(shown.iter().map(|&(child, _)| child))
+        .for_each(present::release);
     let visibility = |child: Hwnd, visible| {
         if child.styles().0.contains(WS_VISIBLE) == visible {
             SET_WINDOW_POS_FLAGS(0)

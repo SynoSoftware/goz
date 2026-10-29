@@ -1,9 +1,9 @@
 use super::{
     Button, ButtonIcon, Cell, Column, ColumnFit, ColumnSizing, CommandId, ControlId, CustomDraw,
-    DEFERRED, DispInfo, Dpi, DrawAnswer, DrawStage, DropDownList, Edit, Entries, Hwnd, LRESULT,
-    Label, Layout, List, ListButton, ListCaption, ListNotify, ListView, MainWindow, MatchMode,
-    Matching, MeasuredColumn, MenuItem, Px, Range, Rect, RefCell, SELECTION_LIMIT, Selected,
-    SortDir, Tool, Toolbar, Tooltip, captions, clear_glyph, layout, measure_fits, win,
+    DispInfo, Dpi, DrawAnswer, DrawStage, DropDownList, Edit, Entries, Hwnd, LRESULT, Label,
+    Layout, List, ListButton, ListCaption, ListNotify, ListView, MainWindow, MatchMode, Matching,
+    MeasuredColumn, MenuItem, Px, Range, Rect, RefCell, SELECTION_LIMIT, Selected, SortDir, Tool,
+    Toolbar, Tooltip, captions, clear_glyph, layout, measure_fits, win,
 };
 
 pub(super) struct Search {
@@ -397,7 +397,7 @@ impl Search {
                     return None;
                 }
                 if !self.selection_pending.replace(true) {
-                    hwnd.post(DEFERRED);
+                    hwnd.post_deferred();
                 }
                 None
             }
@@ -415,7 +415,7 @@ impl Search {
             }
             ListNotify::ColumnDragEnded => {
                 if !self.column_dragged.replace(true) {
-                    hwnd.post(DEFERRED);
+                    hwnd.post_deferred();
                 }
                 None
             }
@@ -440,7 +440,7 @@ impl Search {
                     && self.list.selected_count() == 0
                     && !self.selection_pending.replace(true)
                 {
-                    hwnd.post(DEFERRED);
+                    hwnd.post_deferred();
                 }
                 None
             }
@@ -609,7 +609,7 @@ impl Search {
             // text is selected once the click is handled.
             let select = window.model.borrow().choices().select_on_click;
             if select && win::window::left_button_down() && !self.select_on_click.replace(true) {
-                hwnd.post(DEFERRED);
+                hwnd.post_deferred();
             }
             return true;
         }

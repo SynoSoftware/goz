@@ -144,6 +144,7 @@ const PAINTING: &[&str] = &[
     "StretchBlt",
     "AlphaBlend",
     "PatBlt",
+    "BeginBufferedPaint",
     "DrawFocusRect",
     "DrawEdge",
     "DrawFrameControl",
@@ -239,9 +240,9 @@ fn presents(call: &str, file: &str, function: &str) -> bool {
             ("win/present.rs", "publish" | "raise_cover" | "scroll_now")
         ),
         // `mark_after` turns drawing off on one control around a setter,
-        // and dialogs and the lists' column widths batch their changes with
-        // `redraw_after`; both through `with_drawing_off`.
-        "WM_SETREDRAW" => matches!((file, function), ("win/present.rs", "with_drawing_off")),
+        // and `hold_after` on a list or a tree until the update ends; both
+        // through `set_drawing`.
+        "WM_SETREDRAW" => matches!((file, function), ("win/present.rs", "set_drawing")),
         // The window procedures that receive the message, which send nothing.
         "WM_VSCROLL"
             if matches!(
@@ -252,7 +253,8 @@ fn presents(call: &str, file: &str, function: &str) -> bool {
             true
         }
         // The `win` wrappers that run the setter inside `mark_after`, and the
-        // Viewer, which keeps its own painting.
+        // Viewer's area, which takes the focus on a click and draws no focus
+        // cue.
         _ => matches!(
             (file, function),
             ("win/mod.rs", "set_text" | "focus")

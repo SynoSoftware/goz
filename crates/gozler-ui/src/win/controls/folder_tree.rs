@@ -1,4 +1,5 @@
 use super::{send, send_pointer};
+use crate::win::present::{self, Repaint};
 use crate::win::{Hwnd, wide};
 use gozler_core::include::FolderCheck;
 use std::cell::{Cell, RefCell};
@@ -37,10 +38,6 @@ impl FolderTree {
     /// The tree view `id` of a dialog.
     pub(crate) fn of_dialog(dialog: Hwnd, id: u16) -> Option<FolderTree> {
         crate::win::dialog::item(dialog, id).map(FolderTree)
-    }
-
-    pub(crate) fn hwnd(self) -> Hwnd {
-        self.0
     }
 
     /// Gives the tree check boxes that can show [`FolderCheck::Partial`],
@@ -96,8 +93,11 @@ impl FolderTree {
                 },
             },
         };
-        // SAFETY: `insert` and its text outlive the call, which copies them.
-        let item = unsafe { send_pointer(self.0, TVM_INSERTITEMW, 0, &raw const insert) };
+        let item = self.hold_after(|| {
+            // SAFETY: `insert` and its text outlive the call, which copies
+            // them.
+            unsafe { send_pointer(self.0, TVM_INSERTITEMW, 0, &raw const insert) }
+        });
         (item != 0).then_some(TreeItem(HTREEITEM(item)))
     }
 
@@ -108,8 +108,10 @@ impl FolderTree {
             hItem: item.0,
             ..Default::default()
         };
-        // SAFETY: `change` outlives the call, which reads it.
-        unsafe { send_pointer(self.0, TVM_SETITEMW, 0, &raw const change) };
+        self.hold_after(|| {
+            // SAFETY: `change` outlives the call, which reads it.
+            unsafe { send_pointer(self.0, TVM_SETITEMW, 0, &raw const change) };
+        });
     }
 
     /// Shows `check` on `item`'s check box, unless it shows it already,
@@ -132,8 +134,10 @@ impl FolderTree {
             stateMask: TVIS_STATEIMAGEMASK,
             ..Default::default()
         };
-        // SAFETY: `change` outlives the call, which reads it.
-        unsafe { send_pointer(self.0, TVM_SETITEMW, 0, &raw const change) };
+        self.hold_after(|| {
+            // SAFETY: `change` outlives the call, which reads it.
+            unsafe { send_pointer(self.0, TVM_SETITEMW, 0, &raw const change) };
+        });
     }
 
     /// The number the item carries.
@@ -176,7 +180,14 @@ impl FolderTree {
     }
 
     pub(crate) fn expand(self, item: TreeItem) {
-        send(self.0, TVM_EXPAND, TVE_EXPAND.0 as usize, item.0.0);
+        self.hold_after(|| send(self.0, TVM_EXPAND, TVE_EXPAND.0 as usize, item.0.0));
+    }
+
+    /// Runs `change`, after which the tree draws itself and updates its
+    /// scroll bar at once, so that a slice of many items draws the tree
+    /// once ([`present::hold_after`]).
+    fn hold_after<T>(self, change: impl FnOnce() -> T) -> T {
+        present::hold_after(self.0, Repaint::Erased, change)
     }
 
     /// Selects `item` and scrolls it into view.
