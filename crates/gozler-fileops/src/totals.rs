@@ -68,7 +68,7 @@ mod gozlerd {
             }
             let cancel = CancelToken::from(Arc::clone(cancel));
             let mut client = Client::connect(PIPE_NAME, true, cancel).ok()?;
-            let status = client.status().ok()?;
+            let status = client.status(None).ok()?;
             (folders.iter())
                 .map(|folder| {
                     let request = SearchRequest {
@@ -200,6 +200,7 @@ mod tests {
             include,
             left_out: Vec::new(),
             caller_sees: CallerSees::EveryFile,
+            links: None,
         }
     }
 

@@ -112,7 +112,11 @@ pub(crate) enum Ask {
     /// them.
     FolderSize(Search),
     Export(ExportAsk),
-    Status,
+    /// The service's state, with the folder links when their
+    /// [`gozler_core::links::Links::fingerprint`] is not `links_held`.
+    Status {
+        links_held: u64,
+    },
     /// The rows of a search for a program, answered with
     /// [`Outcome::Rows`].
     Program(ChunkAsk),
@@ -258,7 +262,7 @@ impl Fetch {
             Ask::Selection(list, _) => Purpose::Selection(list),
             Ask::FolderSize(_) => Purpose::Selection(List::Search),
             Ask::Export(_) => Purpose::Export,
-            Ask::Status => Purpose::Status,
+            Ask::Status { .. } => Purpose::Status,
             Ask::Program(_) => Purpose::Program,
             Ask::CountIncluded(_) => Purpose::IncludeCount,
             Ask::SettingsSaved => Purpose::SettingsSaved,

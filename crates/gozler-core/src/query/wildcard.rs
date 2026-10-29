@@ -24,6 +24,14 @@ enum GlobTok {
 }
 
 impl Wildcard {
+    pub(super) fn has_separator(&self) -> bool {
+        self.tokens.contains(&GlobTok::Lit(u32::from(b'\\')))
+    }
+
+    pub(super) fn accepts_any_remainder(&self, at: usize) -> bool {
+        self.tokens[at..] == [GlobTok::AnyRun]
+    }
+
     /// Compiles a pattern whose bytes are already folded iff the query is
     /// case-insensitive.
     pub(crate) fn compile(pattern: &[u8]) -> Self {
@@ -48,9 +56,43 @@ impl Wildcard {
     /// NTFS names are <= 255 code points, so a name never spills the inline
     /// capacity; a full path can, and the spilled buffer is then reused.
     pub(crate) fn matches_into(&self, name: &[u8], buf: &mut CodePointBuf) -> bool {
+        self.matches_remainder(0, name, buf)
+    }
+
+    pub(super) fn matches_remainder(&self, at: usize, name: &[u8], buf: &mut CodePointBuf) -> bool {
         buf.clear();
         buf.extend(crate::wtf8::CodePoints::new(name));
-        glob_match(&self.tokens, buf.as_slice(), |_, _| {})
+        glob_match(&self.tokens[at..], buf.as_slice(), |_, _| {})
+    }
+
+    /// Every token position left after reading a path prefix; a star can
+    /// consume another code point or let the following token consume it.
+    pub(super) fn advance(&self, at: usize, text: &[u8]) -> Vec<usize> {
+        let close = |states: &mut Vec<usize>| {
+            let n = states.len();
+            for i in 0..n {
+                if self.tokens.get(states[i]) == Some(&GlobTok::AnyRun) {
+                    states.push(states[i] + 1);
+                }
+            }
+            states.sort_unstable();
+            states.dedup();
+        };
+        let mut states = vec![at];
+        close(&mut states);
+        for cp in crate::wtf8::CodePoints::new(text) {
+            states = states
+                .into_iter()
+                .filter_map(|at| match self.tokens.get(at) {
+                    Some(GlobTok::AnyRun) => Some(at),
+                    Some(GlobTok::AnyOne) => Some(at + 1),
+                    Some(GlobTok::Lit(wanted)) if *wanted == cp => Some(at + 1),
+                    _ => None,
+                })
+                .collect();
+            close(&mut states);
+        }
+        states
     }
 
     /// Appends to `parts` the byte ranges of `text` that the pattern's
@@ -62,10 +104,21 @@ impl Wildcard {
         buf: &mut CodePointBuf,
         parts: &mut Vec<std::ops::Range<usize>>,
     ) {
+        self.remainder_parts(0, text, buf, parts);
+    }
+
+    pub(super) fn remainder_parts(
+        &self,
+        at: usize,
+        text: &[u8],
+        buf: &mut CodePointBuf,
+        parts: &mut Vec<std::ops::Range<usize>>,
+    ) {
+        let tokens = &self.tokens[at..];
         buf.clear();
         buf.extend(crate::wtf8::CodePoints::new(text));
-        let mut matched_at = vec![0; self.tokens.len()];
-        if !glob_match(&self.tokens, buf.as_slice(), |token, at| {
+        let mut matched_at = vec![0; tokens.len()];
+        if !glob_match(tokens, buf.as_slice(), |token, at| {
             matched_at[token] = at;
         }) {
             return;
@@ -82,7 +135,7 @@ impl Wildcard {
             };
         }
         offsets.push(offset);
-        for (token, &at) in self.tokens.iter().zip(&matched_at) {
+        for (token, &at) in tokens.iter().zip(&matched_at) {
             if let GlobTok::Lit(_) = token {
                 parts.push(offsets[at]..offsets[at + 1]);
             }

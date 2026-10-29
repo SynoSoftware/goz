@@ -135,6 +135,7 @@ pub(crate) enum Effect {
     NoteSavedState,
     SaveSoon,
     ListPasses,
+    MarkMatches(List),
 }
 
 impl Effect {

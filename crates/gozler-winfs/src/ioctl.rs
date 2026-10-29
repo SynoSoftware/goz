@@ -49,6 +49,12 @@ pub(crate) const FSCTL_QUERY_FILE_LAYOUT: u32 = ctl_code(
     METHOD_NEITHER,
     FILE_ANY_ACCESS,
 );
+pub(crate) const FSCTL_GET_REPARSE_POINT: u32 = ctl_code(
+    FILE_DEVICE_FILE_SYSTEM,
+    42,
+    METHOD_BUFFERED,
+    FILE_ANY_ACCESS,
+);
 
 // --- ioctl structs -------------------------------------------------------
 //
@@ -220,6 +226,26 @@ pub(crate) fn ioctl_in<In>(handle: HANDLE, control_code: u32, input: &In) -> Res
     }
 }
 
+/// No input, a raw byte output buffer (e.g. `FSCTL_GET_REPARSE_POINT`).
+pub(crate) fn ioctl_out_bytes(
+    handle: HANDLE,
+    control_code: u32,
+    out: &mut [u8],
+) -> Result<u32, u32> {
+    // SAFETY: `out` is a live writable slice of `out.len()` bytes; there is
+    // no input; `handle` is caller-owned.
+    unsafe {
+        device_io_control(
+            handle,
+            control_code,
+            ptr::null(),
+            0,
+            out.as_mut_ptr().cast::<c_void>(),
+            out.len() as u32,
+        )
+    }
+}
+
 /// No input, a typed output struct (e.g. `FSCTL_QUERY_USN_JOURNAL`).
 pub(crate) fn ioctl_out<Out>(handle: HANDLE, control_code: u32, out: &mut Out) -> Result<u32, u32> {
     // SAFETY: `out` points to a live `Out` of size_of::<Out>() bytes; there is
@@ -249,5 +275,6 @@ mod tests {
         assert_eq!(FSCTL_READ_USN_JOURNAL, 0x0009_00BB);
         assert_eq!(FSCTL_READ_FILE_USN_DATA, 0x0009_00EB);
         assert_eq!(FSCTL_QUERY_FILE_LAYOUT, 0x0009_0277);
+        assert_eq!(FSCTL_GET_REPARSE_POINT, 0x0009_00A8);
     }
 }

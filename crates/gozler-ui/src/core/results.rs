@@ -9,15 +9,72 @@ use super::fetch::{
     CachedRows, Chunk, ChunkAsk, DaemonFailure, FromSnapshot, Generation, Local, LocalService,
     SelectionAsk,
 };
-use super::work::Retirement;
+use super::work::{INLINE_ITEMS, Retirement};
 use gozler_client::Repair;
+use gozler_core::links::Links;
 use gozler_core::proto::{ResultItem, ResultSnapshotId};
-use gozler_core::query::{MatchSums, MatchedParts, QueryError};
+use gozler_core::query::{MatchSums, MatchedParts, ParsedQuery, QueryError};
 use gozler_core::search::Search;
 use gozler_core::types::SortSpec;
 use std::ops::Range;
 use std::path::PathBuf;
 use std::sync::Arc;
+
+pub(crate) struct Mark {
+    search: Option<MarkSearch>,
+    folder: Option<String>,
+    links: Arc<Links>,
+}
+
+struct MarkSearch {
+    generation: Generation,
+    query: Option<ParsedQuery>,
+    scope: Option<String>,
+}
+
+pub(crate) struct Marked {
+    pub(crate) search: Option<MarkedSearch>,
+    pub(crate) links: u64,
+    pub(crate) folder: Option<(String, String)>,
+}
+
+pub(crate) struct MarkedSearch {
+    pub(crate) generation: Generation,
+    scope: Option<String>,
+    matched: Option<MatchedParts>,
+}
+
+impl Mark {
+    pub(crate) fn folder(links: Arc<Links>, folder: String) -> Self {
+        Self {
+            search: None,
+            folder: Some(folder),
+            links,
+        }
+    }
+
+    pub(crate) fn with_folder(mut self, folder: String) -> Self {
+        self.folder = Some(folder);
+        self
+    }
+
+    pub(crate) fn run(self) -> Marked {
+        Marked {
+            search: self.search.map(|search| MarkedSearch {
+                generation: search.generation,
+                scope: self.links.search_scope(search.scope.as_deref()),
+                matched: search
+                    .query
+                    .and_then(|query| MatchedParts::with_links(&query, &self.links).ok()),
+            }),
+            links: self.links.fingerprint(),
+            folder: self.folder.map(|folder| {
+                let real = self.links.real_path(&folder);
+                (folder, real)
+            }),
+        }
+    }
+}
 
 /// The rows of one request. Every request scans every match before it
 /// sorts, so a larger chunk costs the daemon little more and halves the
@@ -216,10 +273,10 @@ pub(crate) struct ShownRows {
     /// As the latest chunk says, with `total`.
     sums: Option<MatchSums>,
     chunks: Vec<CachedChunk>,
-    /// `None` until [`Results::mark_matches`], which only Search's list
-    /// asks for, and when the query's terms do not compile, which the
-    /// daemon refuses before any row is shown.
+    /// Only Search compiles bold ranges. `None` until its worker answers,
+    /// and when terms do not compile, which the daemon refuses before rows.
     matched: Option<MatchedParts>,
+    coverage_scope: Option<(u64, Option<String>)>,
     /// The order of use, for dropping the chunk used least recently.
     clock: u64,
     /// The result snapshot the rows are read from, once a request made it.
@@ -294,7 +351,16 @@ impl Results {
 
     pub(crate) fn items(&self) -> usize {
         match &self.shown {
-            Shown::Rows(rows) => rows.chunks.iter().map(|chunk| chunk.rows.len()).sum(),
+            Shown::Rows(rows) => rows
+                .chunks
+                .iter()
+                .map(|chunk| chunk.rows.len())
+                .sum::<usize>()
+                .saturating_add(if rows.matched.is_some() {
+                    INLINE_ITEMS + 1
+                } else {
+                    0
+                }),
             Shown::Nothing | Shown::Message(_) => 0,
         }
     }
@@ -626,12 +692,40 @@ impl Results {
         self.last_snapshot = None;
     }
 
-    /// Compiles the shown search's terms, so [`Results::matched_parts`]
-    /// finds the parts of a row's path they matched.
-    pub(crate) fn mark_matches(&mut self) {
+    pub(crate) fn mark(&self, links: Arc<Links>, bold: bool) -> Option<Mark> {
+        let Shown::Rows(shown) = &self.shown else {
+            return None;
+        };
+        Some(Mark {
+            search: Some(MarkSearch {
+                generation: shown.generation,
+                query: bold.then(|| shown.ask.search.query.clone()),
+                scope: shown.ask.search.scope.clone(),
+            }),
+            folder: None,
+            links,
+        })
+    }
+
+    pub(crate) fn accept_mark(&mut self, links: u64, answer: MarkedSearch) {
         if let Shown::Rows(shown) = &mut self.shown {
-            shown.matched = MatchedParts::new(&shown.ask.search.query).ok();
+            shown.coverage_scope = Some((links, answer.scope));
+            let previous = std::mem::replace(&mut shown.matched, answer.matched);
+            self.retired.push(previous, INLINE_ITEMS + 1);
         }
+    }
+
+    /// Until resolution finishes, covering every volume keeps an indexing
+    /// target visible to polling rather than claiming the answer complete.
+    pub(crate) fn coverage_scope(&self, links: u64) -> Option<&str> {
+        let Shown::Rows(shown) = &self.shown else {
+            return None;
+        };
+        shown
+            .coverage_scope
+            .as_ref()
+            .filter(|(held, _)| *held == links)
+            .and_then(|(_, scope)| scope.as_deref())
     }
 
     /// Accepts the rows of the request `generation` asked for. A chunk's
@@ -665,6 +759,7 @@ impl Results {
                     sums,
                     chunks: Vec::new(),
                     matched: None,
+                    coverage_scope: None,
                     clock: 0,
                     snapshot: chunk.made,
                 };

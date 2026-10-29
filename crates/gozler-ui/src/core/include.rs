@@ -233,6 +233,7 @@ mod tests {
             include: None,
             left_out: Vec::new(),
             caller_sees: CallerSees::EveryFile,
+            links: None,
         };
         assert!(summary_drives_changed(None, &before));
 

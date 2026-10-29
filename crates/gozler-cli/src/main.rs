@@ -103,6 +103,7 @@ mod win {
     use super::overview::{Index, Service, render};
     use gozler_client::{CancelToken, Client, ClientError, folder_is_missing};
     use gozler_core::escompat::{Answer, Count, EsPlan, ExitCode, ScopeFolder, build_search};
+    use gozler_core::links::Links;
     use gozler_core::output::{ResultWriter, write_status};
     use gozler_core::proto::{DaemonStatus, PIPE_NAME};
     use gozler_core::query::QueryStart;
@@ -137,7 +138,7 @@ mod win {
 
     /// The size of the index, with the total size of every file.
     fn index(connection: &mut Client) -> Result<Index, Failure> {
-        let status = connection.status()?;
+        let status = connection.status(None)?;
         let plan = EsPlan {
             count: Some(Count::TotalSize),
             ..EsPlan::default()
@@ -275,9 +276,16 @@ mod win {
         timeout: Duration,
     ) -> Result<(), Failure> {
         let deadline = Instant::now() + timeout;
+        let mut links = Links::default();
         loop {
-            let volumes = connection.status()?.volumes;
-            let complete = Coverage::of(&volumes, scope, false).incomplete().is_none();
+            let status = connection.status(scope.map(|_| links.fingerprint()))?;
+            if let Some(changed) = status.links {
+                links = changed;
+            }
+            let effective = links.search_scope(scope);
+            let complete = Coverage::of(&status.volumes, effective.as_deref(), false)
+                .incomplete()
+                .is_none();
             let left = deadline.saturating_duration_since(Instant::now());
             if complete || left.is_zero() {
                 return Ok(());
@@ -289,7 +297,7 @@ mod win {
     /// `--status`: prints the daemon's state, as JSON with `--json`, and exits
     /// 2 with a warning for each way a volume is not complete.
     fn status(connection: &mut Client, json: bool) -> Result<ExitCode, Failure> {
-        let status = connection.status()?;
+        let status = connection.status(None)?;
         let mut out = std::io::stdout().lock();
         let written = if json {
             let text = serde_json::to_string_pretty(&status)
@@ -365,6 +373,7 @@ mod win {
                     include: None,
                     left_out: Vec::new(),
                     caller_sees: CallerSees::EveryFile,
+                    links: None,
                 })
                 .len()
             };

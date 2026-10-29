@@ -221,7 +221,7 @@ fn run(
 ) -> Option<Outcome> {
     let result =
         Client::connect(PIPE_NAME, true, cancel.clone()).and_then(|mut client| match ask {
-            Ask::Status => client.status().map(|status| {
+            Ask::Status { links_held } => client.status(Some(links_held)).map(|status| {
                 // The hello names the service as `gozlerd <version>`.
                 let server = client.server();
                 let version = server.strip_prefix("gozlerd ").unwrap_or(server);

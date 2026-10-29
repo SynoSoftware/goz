@@ -21,11 +21,13 @@ use super::order::{
 use super::parse::{Kind, Malformed, ParsedQuery, QueryError, SizeRange, Test};
 use super::paths::{ComponentBits, DirPaths, FolderCopy, NameForm, ResultNames, root_name};
 use super::rows::VolumeRows;
+use super::through::{LinkPaths, Target as LinkTarget, Through};
 use super::wildcard::{CodePointBuf, OneName, Wildcard};
 use crate::attributes::PackedAttributes;
 use crate::fold::fold;
 use crate::index::store::NameId;
 use crate::index::{EntryView, SeenBy, VolumeIndex};
+use crate::links::Links;
 use crate::types::{EntryIdx, Frn, SortKey, SortSpec};
 use memchr::memmem;
 use regex::bytes::{Regex, RegexBuilder};
@@ -213,6 +215,10 @@ pub struct CompiledQuery {
     /// `\docs\`, which no name contains, and a regular expression is not a
     /// literal.
     prefilter: Option<Vec<u8>>,
+    /// The scope the query was compiled for ([`Self::with_links`]) and the
+    /// folder a search of it reads, or `None` to read every volume.
+    scope: Option<(String, Option<String>)>,
+    link_targets: Vec<LinkTarget>,
 }
 
 /// Terms of which at least one must pass.
@@ -223,6 +229,7 @@ struct CompiledClause {
 struct CompiledTerm {
     negated: bool,
     check: Check,
+    through: Option<Through>,
 }
 
 /// A [`Test`] with its text folded unless the query matches case, its
@@ -230,7 +237,7 @@ struct CompiledTerm {
 // A query holds a handful of checks, and each tests every candidate, so
 // boxing the large `Text` would buy no memory and cost a load per test.
 #[allow(clippy::large_enum_variant)]
-enum Check {
+pub(super) enum Check {
     Kind(Kind),
     /// The entry has every packed attribute, and is a folder when `folder`
     /// is set: the test of D, which the folder flag answers.
@@ -257,13 +264,13 @@ enum Check {
 /// The text a [`Check::Text`] reads, in the form the query compares: folded
 /// unless it matches case.
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum Target {
+pub(super) enum Target {
     Name,
     Path,
 }
 
 /// How a [`Check::Text`] compares its text.
-enum Matcher {
+pub(super) enum Matcher {
     Contains(memmem::Finder<'static>),
     WholeWord(memmem::Finder<'static>),
     WordStart(memmem::Finder<'static>),
@@ -319,6 +326,7 @@ impl CompiledQuery {
                         Ok(CompiledTerm {
                             negated: term.negated,
                             check: Check::new(&term.test, match_case)?,
+                            through: None,
                         })
                     })
                     .collect::<Result<_, QueryError>>()?;
@@ -403,7 +411,73 @@ impl CompiledQuery {
             components,
             component_literal,
             prefilter,
+            scope: None,
+            link_targets: Vec::new(),
         })
+    }
+
+    /// [`Self::new`] for a search below `scope` that goes through `links`,
+    /// as gozlerd runs one: the scope and each `parent:` folder are their
+    /// real folders, and literal and wildcard path tests with a separator
+    /// also test the paths that reach an entry through the links. A scope that
+    /// holds a link to a folder outside it becomes a path test of that kind,
+    /// and the search reads every volume.
+    pub fn with_links(
+        parsed: &ParsedQuery,
+        links: &Links,
+        scope: Option<&str>,
+    ) -> Result<Self, QueryError> {
+        let mut parsed = parsed.clone();
+        for term in parsed.clauses.iter_mut().flat_map(|c| &mut c.terms) {
+            if let Test::Parent(folder) = &mut term.test {
+                *folder = links.real_path(folder);
+            }
+        }
+        let mut query = Self::new(&parsed)?;
+        let reads = links.search_scope(scope);
+        if reads.is_none()
+            && let Some(scope) = scope
+        {
+            let real = links.real_path(scope);
+            let below = format!("{}\\", real.trim_end_matches('\\'));
+            // Internal scope enforcement does not use a user term's slot.
+            query.clauses.push(CompiledClause {
+                terms: vec![CompiledTerm {
+                    negated: false,
+                    check: Check::new(&Test::PathStart(below), query.match_case)?,
+                    through: None,
+                }],
+            });
+        }
+        query.scope = scope.map(|scope| (scope.to_owned(), reads));
+        if links.is_empty() || !query.clauses.iter().flat_map(|c| &c.terms)
+            .any(|term| matches!(&term.check, Check::Text(Target::Path, matcher) if matcher.reads_links())) {
+            return Ok(query);
+        }
+        let path_clauses = query.path_clauses;
+        let paths = LinkPaths::new(links, query.match_case);
+        for term in query.clauses[path_clauses..]
+            .iter_mut()
+            .flat_map(|c| &mut c.terms)
+        {
+            if let Check::Text(Target::Path, matcher) = &term.check
+                && matcher.reads_links()
+            {
+                term.through = Some(paths.compile(matcher));
+            }
+        }
+        query.link_targets = paths.targets;
+        Ok(query)
+    }
+
+    /// The folder a search below `scope` reads, or `None` for every volume:
+    /// for the scope the query was compiled for, the folder
+    /// [`Self::with_links`] chose, and any other scope as it is.
+    pub(super) fn search_scope(&self, scope: Option<&str>) -> Option<String> {
+        match (&self.scope, scope) {
+            (Some((compiled, reads)), Some(scope)) if compiled == scope => reads.clone(),
+            (_, scope) => scope.map(str::to_owned),
+        }
     }
 
     /// Whether the query matches case, which its scope folder follows too.
@@ -439,6 +513,7 @@ impl CompiledQuery {
                         CompiledTerm {
                             negated: false,
                             check: Check::Component(bit),
+                            ..
                         },
                     ] => matches!(&self.components[usize::from(*bit)],
                     Matcher::Start(start) if !root.starts_with(start)),
@@ -500,11 +575,25 @@ impl CompiledClause {
         (reads.max().unwrap_or(Reads::Entry), cost.unwrap_or(0))
     }
 
-    fn passes(&self, subject: &Subject, scratch: &mut Scratch) -> bool {
+    fn passes(
+        &self,
+        subject: &Subject,
+        target: Option<(usize, usize)>,
+        scratch: &mut Scratch,
+    ) -> bool {
         self.terms.iter().any(|term| {
-            term.check
-                .test(subject, scratch)
-                .is_some_and(|pass| pass != term.negated)
+            let real = term.check.test(subject, scratch);
+            let pass = match (&term.through, &term.check, target) {
+                (Some(through), Check::Text(_, matcher), Some((target, len))) => {
+                    let rest = &subject.path.expect("path clauses have a path")[len..];
+                    Some(
+                        real == Some(true)
+                            || through.passes(target, matcher, rest, &mut scratch.code_points),
+                    )
+                }
+                _ => real,
+            };
+            pass.is_some_and(|pass| pass != term.negated)
         })
     }
 }
@@ -537,7 +626,7 @@ struct Scratch {
 impl Check {
     /// Compiles `test`, its text folded unless `match_case`, or refuses a
     /// malformed or oversized regular expression.
-    fn new(test: &Test, match_case: bool) -> Result<Self, QueryError> {
+    pub(super) fn new(test: &Test, match_case: bool) -> Result<Self, QueryError> {
         let text = |s: &str| {
             if match_case {
                 s.as_bytes().to_vec()
@@ -684,7 +773,7 @@ fn holds_from(range: SizeRange, floor: u64) -> Option<bool> {
 }
 
 impl Matcher {
-    fn matches(&self, text: &[u8], code_points: &mut CodePointBuf) -> bool {
+    pub(super) fn matches(&self, text: &[u8], code_points: &mut CodePointBuf) -> bool {
         match self {
             Matcher::Contains(finder) => finder.find(text).is_some(),
             Matcher::WholeWord(finder) => contains_whole_word(finder, text),
@@ -719,12 +808,43 @@ impl Matcher {
     fn is_first_component_start(&self) -> bool {
         matches!(self, Matcher::Start(start) if !start.contains(&b'\\'))
     }
+
+    /// Whether this path test also reads the paths that reach an entry
+    /// through folder links: literal and wildcard terms with a separator.
+    /// A word names no folder to open, and through Windows'
+    /// compatibility junctions, such as `Local Settings`, a word that names
+    /// a link would find every entry below its target.
+    fn reads_links(&self) -> bool {
+        match self {
+            Matcher::Regex(_) => false,
+            Matcher::Wildcard(wildcard) => wildcard.has_separator(),
+            _ => self.literal().is_some_and(|text| text.contains(&b'\\')),
+        }
+    }
+
+    /// The text of a matcher that compares a text, which
+    /// [`super::through`] splits; `None` for a wildcard and a regular
+    /// expression.
+    pub(super) fn literal(&self) -> Option<&[u8]> {
+        match self {
+            Matcher::Contains(finder) | Matcher::WholeWord(finder) | Matcher::WordStart(finder) => {
+                Some(finder.needle())
+            }
+            Matcher::Start(start) => Some(start),
+            Matcher::Wildcard(_) | Matcher::Regex(_) => None,
+        }
+    }
     /// Appends to `parts` each part of `text` that this matcher matches, as
     /// a byte range, with the occurrence rules of [`Check::test`], so the
     /// part a window shows bold is always one that made the entry match.
     /// A wildcard gives the parts its literal characters matched, and a
     /// regular expression each of its matches.
-    fn parts(&self, text: &[u8], code_points: &mut CodePointBuf, parts: &mut Vec<Range<usize>>) {
+    pub(super) fn parts(
+        &self,
+        text: &[u8],
+        code_points: &mut CodePointBuf,
+        parts: &mut Vec<Range<usize>>,
+    ) {
         let found = |finder: &memmem::Finder, accept: fn(&Occurrence) -> bool| {
             let len = finder.needle().len();
             occurrences(finder, text)
@@ -764,7 +884,7 @@ fn contains_at_word_start(finder: &memmem::Finder, text: &[u8]) -> bool {
 
 /// Whether a code point is a letter or a digit; `None`, the edge of the
 /// text, is not.
-fn is_word(cp: Option<u32>) -> bool {
+pub(super) fn is_word(cp: Option<u32>) -> bool {
     cp.and_then(char::from_u32)
         .is_some_and(char::is_alphanumeric)
 }
@@ -787,6 +907,14 @@ impl Occurrence {
     }
 }
 
+/// The last code point of `bytes`; `None` when they are empty.
+fn last_code_point(bytes: &[u8]) -> Option<u32> {
+    // A code point is at most 4 bytes, and only its first is not 0b10xxxxxx.
+    let tail = &bytes[bytes.len().saturating_sub(4)..];
+    let lead = tail.iter().rposition(|b| b & 0xC0 != 0x80)?;
+    crate::wtf8::CodePoints::new(&tail[lead..]).next()
+}
+
 /// Each occurrence of the finder's needle in `text`, overlapping ones
 /// included.
 fn occurrences<'a>(
@@ -794,12 +922,6 @@ fn occurrences<'a>(
     text: &'a [u8],
 ) -> impl Iterator<Item = Occurrence> + 'a {
     use crate::wtf8::CodePoints;
-    // A code point is at most 4 bytes, and only its first is not 0b10xxxxxx.
-    let last = |bytes: &[u8]| {
-        let tail = &bytes[bytes.len().saturating_sub(4)..];
-        let lead = tail.iter().rposition(|b| b & 0xC0 != 0x80)?;
-        CodePoints::new(&tail[lead..]).next()
-    };
     let mut from = 0;
     std::iter::from_fn(move || {
         let start = from + finder.find(text.get(from..)?)?;
@@ -808,7 +930,7 @@ fn occurrences<'a>(
         from = start + 1;
         Some(Occurrence {
             start,
-            before: last(&text[..start]),
+            before: last_code_point(&text[..start]),
             after: CodePoints::new(&text[end..]).next(),
         })
     })
@@ -825,7 +947,8 @@ fn occurrences<'a>(
 /// part. Build it once per search: it compiles every term.
 pub struct MatchedParts {
     match_case: bool,
-    terms: Vec<(Target, Matcher)>,
+    terms: Vec<(Target, Matcher, Option<Through>)>,
+    link_targets: FxHashMap<Vec<u8>, usize>,
 }
 
 impl MatchedParts {
@@ -842,18 +965,51 @@ impl MatchedParts {
                 continue;
             }
             if let Check::Text(target, matcher) = Check::new(&term.test, query.match_case)? {
-                terms.push((target, matcher));
+                terms.push((target, matcher, None));
             }
         }
         Ok(Self {
             match_case: query.match_case,
             terms,
+            link_targets: FxHashMap::default(),
         })
+    }
+
+    /// [`Self::new`] for a search that went through `links`, as gozlerd
+    /// ran it ([`CompiledQuery::with_links`]): a path term also gives the
+    /// parts it matched through a link.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::new`].
+    pub fn with_links(query: &ParsedQuery, links: &Links) -> Result<Self, QueryError> {
+        let mut parts = Self::new(query)?;
+        if !links.is_empty()
+            && parts
+                .terms
+                .iter()
+                .any(|(target, matcher, _)| *target == Target::Path && matcher.reads_links())
+        {
+            let paths = LinkPaths::new(links, query.match_case);
+            for (target, matcher, through) in &mut parts.terms {
+                if *target == Target::Path && matcher.reads_links() {
+                    *through = Some(paths.compile(matcher));
+                }
+            }
+            parts.link_targets = paths
+                .targets
+                .iter()
+                .enumerate()
+                .map(|(number, target)| (fold(target.raw.as_bytes()), number))
+                .collect();
+        }
+        Ok(parts)
     }
 
     /// The byte ranges of `full_path` that the terms match, in order and
     /// without overlaps. A name term's parts lie in the name, after the last
-    /// `\`; a path term's anywhere in the full path.
+    /// `\`; a path term's anywhere in the full path, and through a link in
+    /// the part of the path below the link's target.
     pub fn ranges(&self, full_path: &str) -> Vec<Range<usize>> {
         let name_at = full_path.rfind('\\').map_or(0, |i| i + 1);
         let mut ranges = Vec::new();
@@ -863,19 +1019,43 @@ impl MatchedParts {
             (Target::Name, &full_path[name_at..], name_at),
             (Target::Path, full_path, 0),
         ] {
-            let matchers = self.terms.iter().filter(|(t, _)| *t == target);
+            let matchers = self.terms.iter().filter(|(t, _, _)| *t == target);
             if matchers.clone().next().is_none() {
                 continue;
             }
             let compared = Compared::new(raw, self.match_case);
             found.clear();
-            for (_, matcher) in matchers {
+            for (_, matcher, _) in matchers {
                 matcher.parts(&compared.text, &mut code_points, &mut found);
             }
             ranges.extend(found.iter().filter(|r| !r.is_empty()).map(|r| {
                 let r = compared.raw_range(r.clone());
                 r.start + offset..r.end + offset
             }));
+        }
+        if !self.link_targets.is_empty()
+            && let Some((number, at)) =
+                super::through::nearest(&self.link_targets, full_path.as_bytes(), true)
+        {
+            let rest = &full_path[at..];
+            let compared = Compared::new(rest, self.match_case);
+            for (_, matcher, through) in &self.terms {
+                let Some(through) = through else {
+                    continue;
+                };
+                found.clear();
+                through.parts(
+                    number,
+                    matcher,
+                    &compared.text,
+                    &mut code_points,
+                    &mut found,
+                );
+                ranges.extend(found.iter().filter(|r| !r.is_empty()).map(|r| {
+                    let raw = compared.raw_range(r.clone());
+                    raw.start + at..raw.end + at
+                }));
+            }
         }
         ranges.sort_by_key(|r| r.start);
         let mut merged: Vec<Range<usize>> = Vec::with_capacity(ranges.len());
@@ -1467,6 +1647,21 @@ impl<'q, 'i> Scan<'q, 'i> {
             NameForm::Folded
         };
         let mut scratch = Scratch::default();
+        let mut query_paths = (query.path_clauses < query.clauses.len())
+            .then(|| DirPaths::new(index, form, mount_prefix));
+        if let Some(paths) = &mut query_paths {
+            let root = mount_prefix.trim_end_matches('\\');
+            let targets = query
+                .link_targets
+                .iter()
+                .enumerate()
+                .filter_map(|(number, target)| {
+                    let below = crate::links::below(&target.raw, root)?;
+                    resolve_scope(index, below.as_bytes(), false).map(|folder| (folder, number))
+                })
+                .collect();
+            paths.set_targets(targets);
+        }
         Self {
             index,
             query,
@@ -1476,8 +1671,7 @@ impl<'q, 'i> Scan<'q, 'i> {
                     query.component_bits(text, first, &mut scratch.code_points)
                 })
             }),
-            query_paths: (query.path_clauses < query.clauses.len())
-                .then(|| DirPaths::new(index, form, mount_prefix)),
+            query_paths,
             path: Vec::new(),
             folders: FolderCopy::new(index, mount_prefix, &mut folder_names),
             folder_names,
@@ -1569,7 +1763,7 @@ impl<'q, 'i> Scan<'q, 'i> {
         };
         if !entry_clauses
             .iter()
-            .all(|clause| clause.passes(&subject, &mut self.scratch))
+            .all(|clause| clause.passes(&subject, None, &mut self.scratch))
         {
             return None;
         }
@@ -1621,20 +1815,18 @@ impl<'q, 'i> Scan<'q, 'i> {
             subject.components = Some(found);
             if !component_clauses
                 .iter()
-                .all(|clause| clause.passes(&subject, &mut self.scratch))
+                .all(|clause| clause.passes(&subject, None, &mut self.scratch))
             {
                 return None;
             }
         }
 
         if let Some(paths) = &mut self.query_paths {
-            if !paths.full_path_into(index, idx, &mut self.path) {
-                return None;
-            }
+            let path = paths.full_path_into(index, idx, &mut self.path)?;
             subject.path = Some(&self.path);
             if !path_clauses
                 .iter()
-                .all(|clause| clause.passes(&subject, &mut self.scratch))
+                .all(|clause| clause.passes(&subject, path.target, &mut self.scratch))
             {
                 return None;
             }
@@ -1833,11 +2025,7 @@ impl OrderFields for Ranked<'_> {
 /// walking components from the volume root: case-insensitively via the folded
 /// directory index, or case-sensitively against raw names when `match_case`. Returns `None`
 /// if any component is missing.
-pub(super) fn resolve_scope(
-    index: &VolumeIndex,
-    path: &[u8],
-    match_case: bool,
-) -> Option<EntryIdx> {
+pub fn resolve_scope(index: &VolumeIndex, path: &[u8], match_case: bool) -> Option<EntryIdx> {
     let components: Vec<&[u8]> = path
         .split(|&b| b == b'\\' || b == b'/')
         .filter(|c| !c.is_empty())
@@ -2640,6 +2828,45 @@ mod tests {
         texts(&out)
     }
 
+    /// The owner's bug, at the scan: the index holds each entry once, at its
+    /// real path, so without the links a path through a junction, and a
+    /// scope that holds one, find nothing below its target.
+    #[test]
+    fn a_search_through_links_finds_what_is_below_their_targets() {
+        let mut idx = sample_index();
+        idx.insert_enum(&enum_rec(frn(105), NTFS_ROOT_FRN, "proj", true));
+        idx.insert_enum(&enum_rec(frn(106), frn(105), "out", true));
+        let links = Links::new(vec![
+            crate::links::FolderLink {
+                link: r"C:\proj\out".into(),
+                target: r"C:\docs\sub".into(),
+            },
+            crate::links::FolderLink {
+                link: r"C:\other\via".into(),
+                target: r"C:\docs\sub".into(),
+            },
+        ]);
+        let found = |query: &str, scope: Option<&str>| {
+            let parsed = parse_query(query).unwrap();
+            let query = CompiledQuery::with_links(&parsed, &links, scope).unwrap();
+            let sort = SortSpec::default_for(SortKey::Path);
+            texts(&run_query(&idx, r"C:\", &query, scope, sort, None))
+        };
+        let report = vec![r"C:\docs\sub\Report.PDF".to_string()];
+        assert_eq!(found(r"proj\out\rep", None), report);
+        assert_eq!(found(r"proj\out\rep other\via\rep", None), report);
+        assert!(found(r"proj\out\rep !other\via\rep", None).is_empty());
+        assert!(found(r"proj\out\rep !C:\docs\", None).is_empty());
+        assert!(found(r"report path:proj", None).is_empty());
+        assert_eq!(found("report", Some(r"C:\proj\out")), report);
+        assert_eq!(
+            found("report", Some(r"C:\proj")),
+            report,
+            "the scope holds the junction"
+        );
+        assert!(found("notes", Some(r"C:\proj")).is_empty());
+    }
+
     /// The evaluator reads what the parser writes for `!` and `|`: a clause
     /// passes when any of its terms does, and a negated term
     /// when its test fails, except that a size test of an unknown size fails
@@ -2708,13 +2935,34 @@ mod tests {
     /// for minutes. It counts each `ext:` value, and a clause without terms
     /// as one, because a query from the pipe can hold any number of either.
     #[test]
-    fn a_query_with_more_than_the_maximum_terms_is_refused() {
+    fn queries_through_links_keep_the_user_term_limit() {
         let text = |names: usize, exts: usize| {
             let exts: Vec<String> = (0..exts).map(|i| format!("e{i}")).collect();
             format!("{} ext:{}", vec!["a"; names].join(" "), exts.join(";"))
         };
         let compile = |query: &ParsedQuery| CompiledQuery::new(query).err();
         assert_eq!(compile(&parse_query(&text(200, 56)).unwrap()), None);
+        let links = Links::new(vec![crate::links::FolderLink {
+            link: r"C:\scope\alias".into(),
+            target: r"D:\data".into(),
+        }]);
+        assert!(
+            CompiledQuery::with_links(
+                &parse_query(&text(200, 56)).unwrap(),
+                &links,
+                Some(r"C:\scope")
+            )
+            .is_ok()
+        );
+        assert_eq!(
+            CompiledQuery::with_links(
+                &parse_query(&text(200, 57)).unwrap(),
+                &links,
+                Some(r"C:\scope")
+            )
+            .err(),
+            Some(QueryError::TooManyTerms(257))
+        );
         assert_eq!(
             compile(&parse_query(&text(200, 57)).unwrap()),
             Some(QueryError::TooManyTerms(257))

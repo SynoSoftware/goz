@@ -212,6 +212,11 @@ impl MainWindow {
         let created = self.created();
         let controls = &created.controls;
         match effect {
+            Effect::MarkMatches(list) => {
+                if let Some(input) = self.model.borrow().mark_matches(list) {
+                    created.work.borrow_mut().lists.mark(list, input);
+                }
+            }
             Effect::Fetch(fetch) => {
                 let current = self
                     .model

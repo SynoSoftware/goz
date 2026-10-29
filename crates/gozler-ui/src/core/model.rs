@@ -37,6 +37,7 @@ use super::update;
 use super::work::Retirement;
 use gozler_core::escompat::EsPlan;
 use gozler_core::include::IndexSettings;
+use gozler_core::links::Links;
 use gozler_core::output::Format;
 use gozler_core::proto::{DaemonStatus, ResultItem, VolumeStatus};
 use gozler_core::query::{ParsedQuery, QueryStart};
@@ -85,6 +86,10 @@ pub(crate) struct Model {
     pub(super) search: SearchArea,
     /// The latest status reply.
     pub(super) status: Option<DaemonStatus>,
+    /// The folder links the service last sent, whose paths the Search
+    /// list's matched parts follow.
+    links: Arc<Links>,
+    panel_folders: [Option<(u64, String, String)>; 2],
     /// The service's version, from the connection of the latest status
     /// reply.
     service_version: Option<String>,
@@ -291,6 +296,8 @@ impl Model {
             settings,
             search: SearchArea::new(),
             status: None,
+            links: Arc::default(),
+            panel_folders: [None, None],
             service_version: None,
             programs: Programs::UNKNOWN,
             app_working_set: None,
@@ -1036,9 +1043,21 @@ impl Model {
     /// `None` for a search panel, whose search's coverage shows instead.
     pub(crate) fn panel_coverage(&self) -> Option<Coverage<'_>> {
         self.status.as_ref()?;
-        let panel = self.panels.panel(self.panels.active());
+        let side = self.panels.active();
+        let panel = self.panels.panel(side);
         matches!(panel.view(), View::Folder)
-            .then(|| Coverage::of(self.volumes(), Some(panel.folder()), true))
+            .then(|| Coverage::of(self.volumes(), self.panel_folder(side), true))
+    }
+
+    fn panel_folder(&self, side: Side) -> Option<&str> {
+        let folder = self.panels.panel(side).folder();
+        if self.links.is_empty() {
+            return Some(folder);
+        }
+        self.panel_folders[side.index()]
+            .as_ref()
+            .filter(|(links, held, _)| *links == self.links.fingerprint() && held == folder)
+            .map(|(_, _, real)| real.as_str())
     }
 
     /// The saved window placement, which the window opens at.
@@ -1604,9 +1623,12 @@ impl Model {
             && panel
                 .search()
                 .is_some_and(|search| search.look_in == LookIn::ThisFolder)
-            && (Coverage::of(self.volumes(), Some(panel.folder()), false).volumes())
-                .next()
-                .is_none()
+            && self.panel_folder(side).is_some_and(|folder| {
+                Coverage::of(self.volumes(), Some(folder), false)
+                    .volumes()
+                    .next()
+                    .is_none()
+            })
     }
 
     /// Shows `message` in `list` instead of its rows, with nothing
@@ -1655,7 +1677,9 @@ impl Model {
         self.status_asked = Some(generation);
         Some(Fetch {
             generation,
-            ask: Ask::Status,
+            ask: Ask::Status {
+                links_held: self.links.fingerprint(),
+            },
         })
     }
 
@@ -2424,6 +2448,12 @@ impl Model {
             .list(list)
             .and_then(|shown| shown.results.shown_search());
         let scope = shown.and_then(|search| search.scope.as_deref());
+        let scope = if self.links.is_empty() {
+            scope
+        } else {
+            self.list(list)
+                .and_then(|shown| shown.results.coverage_scope(self.links.fingerprint()))
+        };
         Coverage::of(volumes, scope, self.reads_size_or_date(list))
     }
 
@@ -2546,10 +2576,6 @@ impl Model {
                         shown.set_selection(Selection::None);
                         shown.chosen_size = None;
                         shown.reset_kept();
-                        // A panel draws no matched parts bold.
-                        if list == List::Search {
-                            shown.results.mark_matches();
-                        }
                         let waits = list == List::Search
                             && std::mem::take(&mut self.search.enter_on_answer);
                         {
@@ -2566,6 +2592,7 @@ impl Model {
                                     Effect::InspectAge,
                                 ],
                             };
+                            accepted.effects.push(Effect::MarkMatches(list));
                             if waits
                                 && count > 0
                                 && let Some(ask) = self
@@ -2652,10 +2679,79 @@ impl Model {
         }
     }
 
+    pub(crate) fn mark_matches(&self, list: List) -> Option<super::results::Mark> {
+        let mark = self.list(list).and_then(|shown| {
+            shown
+                .results
+                .mark(Arc::clone(&self.links), list == List::Search)
+        });
+        match list {
+            List::Search => mark,
+            List::Panel(side) => {
+                let folder = self.panels.panel(side).folder().to_owned();
+                Some(match mark {
+                    Some(mark) => mark.with_folder(folder),
+                    None => super::results::Mark::folder(Arc::clone(&self.links), folder),
+                })
+            }
+        }
+    }
+
+    pub(crate) fn accept_marked(
+        &mut self,
+        list: List,
+        mut answer: super::results::Marked,
+    ) -> Accepted {
+        let current = self.list(list).and_then(|shown| shown.results.generation());
+        let stale_folder = answer.folder.as_ref().is_some_and(|(folder, _)| {
+            !matches!(list, List::Panel(side) if self.panels.panel(side).folder() == folder)
+        });
+        if answer.links != self.links.fingerprint()
+            || answer
+                .search
+                .as_ref()
+                .is_some_and(|search| current != Some(search.generation))
+            || stale_folder
+        {
+            self.retired.push(answer, super::work::INLINE_ITEMS + 1);
+            return Accepted::default();
+        }
+        let mut accepted = Accepted {
+            touched: Areas::STATUS | Areas::LOCATIONS,
+            effects: vec![],
+        };
+        if let (List::Panel(side), Some((folder, real))) = (list, answer.folder.take()) {
+            let was = self.not_indexed(side);
+            self.panel_folders[side.index()] = Some((answer.links, folder, real));
+            if self.awaits_index(side) && was != self.not_indexed(side) {
+                accepted.effects.push(Effect::SearchAgain(vec![list]));
+            }
+        }
+        if let Some(search) = answer.search.take() {
+            let results = &mut self
+                .list_mut(list)
+                .expect("a shown list accepts its marks")
+                .results;
+            results.accept_mark(answer.links, search);
+            accepted.effects.push(Effect::Redraw {
+                list,
+                rows: 0..results.count(),
+            });
+        }
+        accepted.effects.push(Effect::Polling);
+        accepted
+    }
+
     fn accept_status(&mut self, outcome: Outcome) -> Accepted {
         self.status_asked = None;
         match outcome {
-            Outcome::Status(status, version, programs) => {
+            Outcome::Status(mut status, version, programs) => {
+                let redraw = status.links.take().map(|links| {
+                    let previous = std::mem::replace(&mut self.links, Arc::new(links));
+                    let items = previous.as_slice().len();
+                    self.retired.push(previous, items);
+                    List::ALL.map(Effect::MarkMatches)
+                });
                 // Each list's own message says whether it failed, because a
                 // list whose rows arrived cleared the shared failure while
                 // another list still shows one.
@@ -2705,6 +2801,7 @@ impl Model {
                     accepted
                         .effects
                         .extend((!lists.is_empty()).then_some(Effect::SearchAgain(lists)));
+                    accepted.effects.extend(redraw.into_iter().flatten());
                     accepted
                         .effects
                         .extend([Effect::Polling, Effect::NoteSavedState]);
@@ -3233,6 +3330,8 @@ pub(crate) mod tests {
         let mut model = model();
         let fetch = search(&mut model, "row");
         model.accept(rows(&fetch, 3));
+        let marked = model.mark_matches(List::Search).unwrap().run();
+        model.accept_marked(List::Search, marked);
         assert_eq!(model.matched_in_cell(1, Column::Name), [0..3]);
         let mut taken = Taken::default();
         taken.insert(OperationId::for_tests(1), Path::new(r"C:\row1"), false);
@@ -3346,6 +3445,111 @@ pub(crate) mod tests {
         assert!(model.status_needed().is_none());
         model.accept(status(&second, VolumePhase::Live));
         assert!(model.status_needed().is_some());
+    }
+
+    #[test]
+    fn stale_bold_from_another_search_or_links_is_rejected() {
+        let mut model = showing(1);
+        let old = model.mark_matches(List::Search).unwrap().run();
+        let read = search(&mut model, "new");
+        model.accept(rows(&read, 1));
+        assert_eq!(model.accept_marked(List::Search, old), Accepted::default());
+
+        let old = model.mark_matches(List::Search).unwrap().run();
+        model.links = Arc::new(Links::new(vec![gozler_core::links::FolderLink {
+            link: r"C:\alias".into(),
+            target: r"D:\folder".into(),
+        }]));
+        assert_eq!(model.accept_marked(List::Search, old), Accepted::default());
+        let current = model.mark_matches(List::Search).unwrap().run();
+        assert_eq!(
+            model.accept_marked(List::Search, current).effects,
+            [
+                Effect::Redraw {
+                    list: List::Search,
+                    rows: 0..1
+                },
+                Effect::Polling
+            ]
+        );
+    }
+
+    #[test]
+    fn folder_coverage_through_links_reports_the_target_instead_of_the_source() {
+        let mut model = model();
+        let ask = model.status_needed().unwrap();
+        let mut reply = status(&ask, VolumePhase::Live);
+        if let Outcome::Status(status, _, _) = &mut reply.outcome {
+            let mut target = status.volumes[0].clone();
+            target.mounts = vec![r"D:\".into()];
+            target.phase = VolumePhase::Offline;
+            status.volumes.push(target);
+            status.links = Some(Links::new(vec![gozler_core::links::FolderLink {
+                link: r"C:\alias".into(),
+                target: r"D:\data".into(),
+            }]));
+        }
+        model.accept(reply);
+        let side = Side::Left;
+        crate::core::panel::tests::list(model.panels_mut(), r"C:\alias", Vec::new());
+        let marked = model.mark_matches(List::Panel(side)).unwrap().run();
+        model.accept_marked(List::Panel(side), marked);
+        assert_eq!(
+            model.panel_coverage().unwrap().incomplete().unwrap().mounts,
+            [r"D:\"]
+        );
+        let target = &mut model.status.as_mut().unwrap().volumes[1];
+        target.phase = VolumePhase::Live;
+        target.metadata_pending = true;
+        assert_eq!(
+            model
+                .panel_coverage()
+                .unwrap()
+                .sizes_or_dates_unknown()
+                .unwrap()
+                .mounts,
+            [r"D:\"]
+        );
+        model.status.as_mut().unwrap().volumes.pop();
+        panel_search(&mut model, r"C:\alias", "");
+        assert!(model.not_indexed(side));
+    }
+
+    #[test]
+    fn coverage_through_links_researches_when_the_target_finishes_indexing() {
+        let mut model = model();
+        let ask = model.status_needed().unwrap();
+        let mut first = status(&ask, VolumePhase::Live);
+        if let Outcome::Status(status, _, _) = &mut first.outcome {
+            let mut target = status.volumes[0].clone();
+            target.mounts = vec![r"D:\".into()];
+            target.phase = VolumePhase::Bootstrapping;
+            status.volumes.push(target);
+            status.links = Some(Links::new(vec![gozler_core::links::FolderLink {
+                link: r"C:\alias".into(),
+                target: r"D:\data".into(),
+            }]));
+        }
+        model.accept(first);
+        let list = List::Panel(Side::Left);
+        let read = fetch_of(panel_search(&mut model, r"C:\alias", "report"));
+        model.accept(rows(&read, 1));
+        let marked = model.mark_matches(list).unwrap().run();
+        model.accept_marked(list, marked);
+        assert_eq!(model.coverage(list).incomplete().unwrap().mounts, [r"D:\"]);
+        let ask = model.status_needed().unwrap();
+        let mut ready = status(&ask, VolumePhase::Live);
+        if let Outcome::Status(status, _, _) = &mut ready.outcome {
+            let mut target = status.volumes[0].clone();
+            target.mounts = vec![r"D:\".into()];
+            status.volumes.push(target);
+        }
+        assert!(
+            model
+                .accept(ready)
+                .effects
+                .contains(&Effect::SearchAgain(vec![list]))
+        );
     }
 
     #[test]
@@ -3531,6 +3735,7 @@ pub(crate) mod tests {
                     Effect::FetchVisible(List::Search),
                     Effect::FillFirstRows(List::Search),
                     Effect::InspectAge,
+                    Effect::MarkMatches(List::Search),
                     Effect::Polling,
                     Effect::NoteSavedState
                 ]
@@ -3555,6 +3760,7 @@ pub(crate) mod tests {
                     Effect::FetchVisible(List::Panel(Side::Left)),
                     Effect::FillFirstRows(List::Panel(Side::Left)),
                     Effect::InspectAge,
+                    Effect::MarkMatches(List::Panel(Side::Left)),
                     Effect::Polling,
                     Effect::NoteSavedState
                 ]
@@ -3692,6 +3898,7 @@ pub(crate) mod tests {
                     include: None,
                     left_out: Vec::new(),
                     caller_sees: CallerSees::EveryFile,
+                    links: None,
                 },
                 "0.4.0".to_owned(),
                 Programs::UNKNOWN,
@@ -3782,6 +3989,7 @@ pub(crate) mod tests {
                     Effect::FetchVisible(List::Search),
                     Effect::FillFirstRows(List::Search),
                     Effect::InspectAge,
+                    Effect::MarkMatches(List::Search),
                     Effect::Polling,
                     Effect::NoteSavedState
                 ]
@@ -4048,7 +4256,7 @@ pub(crate) mod tests {
                 .into_iter()
                 .find(|effect| matches!(effect, Effect::Fetch(_))),
             Some(Effect::Fetch(Fetch {
-                ask: Ask::Status,
+                ask: Ask::Status { .. },
                 ..
             }))
         ));
@@ -4061,7 +4269,7 @@ pub(crate) mod tests {
         let ask = model.status_needed().expect("no status request runs");
         let older = Fetch {
             generation: Generation(ask.generation.0 - 1),
-            ask: Ask::Status,
+            ask: ask.ask.clone(),
         };
         assert_eq!(
             model.accept(status(&older, VolumePhase::Rescanning)),
@@ -4812,6 +5020,7 @@ pub(crate) mod tests {
                     Effect::FetchVisible(List::Search),
                     Effect::FillFirstRows(List::Search),
                     Effect::InspectAge,
+                    Effect::MarkMatches(List::Search),
                     Effect::Polling,
                     Effect::NoteSavedState
                 ]

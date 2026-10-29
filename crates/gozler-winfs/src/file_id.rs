@@ -1,5 +1,5 @@
 //! Opening files and folders by file ID, listing a folder, and reading a
-//! folder's security descriptor.
+//! folder's security descriptor and a reparse point's data.
 //!
 //! Every open uses `ExtendedFileIdType`, the 128-bit ID: ReFS needs it, and
 //! an NTFS ID zero-extended to 128 bits opens the same file. The listing
@@ -16,22 +16,26 @@ use core::ptr;
 use windows_sys::Wdk::System::SystemServices::RtlValidRelativeSecurityDescriptor;
 use windows_sys::Win32::Foundation::{
     CloseHandle, ERROR_ACCESS_DENIED, ERROR_FILE_NOT_FOUND, ERROR_INSUFFICIENT_BUFFER,
-    ERROR_INVALID_PARAMETER, ERROR_INVALID_SECURITY_DESCR, ERROR_NO_MORE_FILES, HANDLE,
-    INVALID_HANDLE_VALUE,
+    ERROR_INVALID_PARAMETER, ERROR_INVALID_SECURITY_DESCR, ERROR_NO_MORE_FILES,
+    ERROR_NOT_A_REPARSE_POINT, HANDLE, INVALID_HANDLE_VALUE,
 };
 use windows_sys::Win32::Security::{
     DACL_SECURITY_INFORMATION, GROUP_SECURITY_INFORMATION, GetKernelObjectSecurity,
     GetSecurityDescriptorLength, LABEL_SECURITY_INFORMATION, OWNER_SECURITY_INFORMATION,
 };
 use windows_sys::Win32::Storage::FileSystem::{
-    CreateFileW, ExtendedFileIdType, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT,
-    FILE_ID_128, FILE_ID_DESCRIPTOR, FILE_ID_INFO, FILE_LIST_DIRECTORY, FILE_READ_ATTRIBUTES,
-    FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, FileIdExtdDirectoryInfo, FileIdInfo,
+    CreateFileW, ExtendedFileIdType, FILE_ATTRIBUTE_TAG_INFO, FILE_FLAG_BACKUP_SEMANTICS,
+    FILE_FLAG_OPEN_REPARSE_POINT, FILE_ID_128, FILE_ID_DESCRIPTOR, FILE_ID_INFO,
+    FILE_LIST_DIRECTORY, FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_READ,
+    FILE_SHARE_WRITE, FileAttributeTagInfo, FileIdExtdDirectoryInfo, FileIdInfo,
     GetFileInformationByHandleEx, OPEN_EXISTING, OpenFileById, READ_CONTROL,
 };
 
 use crate::error::{WinError, last_error};
-use crate::ioctl::{FSCTL_READ_FILE_USN_DATA, ReadFileUsnData, ioctl_in_bytes};
+use crate::ioctl::{
+    FSCTL_GET_REPARSE_POINT, FSCTL_READ_FILE_USN_DATA, ReadFileUsnData, ioctl_in_bytes,
+    ioctl_out_bytes,
+};
 use crate::util::to_wide_nul;
 use crate::volume::VolumeHandle;
 
@@ -248,6 +252,53 @@ pub fn read_folder_security(
         descriptor,
         usn_record,
     }))
+}
+
+/// The reparse data of file or folder `id` on `volume`, a raw
+/// `REPARSE_DATA_BUFFER` that `gozler-core` reads. `Ok(None)` when the file
+/// is gone or is not a junction or symbolic link.
+///
+/// # Errors
+///
+/// [`WinError`] when the file cannot be opened or its data read.
+pub fn read_reparse_point(volume: &VolumeHandle, id: u128) -> Result<Option<Vec<u8>>, WinError> {
+    let Some(file) = open_by_id(volume, id, FILE_READ_ATTRIBUTES)? else {
+        return Ok(None);
+    };
+    // Reading a cloud placeholder's reparse data may invoke its filter.
+    // Inspect the tag first and ask only folder links for their data.
+    // SAFETY: the handle is live and the output has the declared size.
+    let tag = unsafe {
+        let mut info: FILE_ATTRIBUTE_TAG_INFO = zeroed();
+        if GetFileInformationByHandleEx(
+            file.as_handle(),
+            FileAttributeTagInfo,
+            ptr::from_mut(&mut info).cast(),
+            size_of::<FILE_ATTRIBUTE_TAG_INFO>() as u32,
+        ) == 0
+        {
+            return Err(last_error(
+                "GetFileInformationByHandleEx (FileAttributeTagInfo)",
+            ));
+        }
+        info.ReparseTag
+    };
+    if !matches!(tag, 0xA000_0003 | 0xA000_000C) {
+        return Ok(None);
+    }
+    // MAXIMUM_REPARSE_DATA_BUFFER_SIZE: no reparse point holds more.
+    let mut out = vec![0u8; 16 * 1024];
+    match ioctl_out_bytes(file.as_handle(), FSCTL_GET_REPARSE_POINT, &mut out) {
+        Ok(written) => {
+            out.truncate(written as usize);
+            Ok(Some(out))
+        }
+        Err(ERROR_NOT_A_REPARSE_POINT) => Ok(None),
+        Err(code) => Err(WinError {
+            code,
+            context: "DeviceIoControl (FSCTL_GET_REPARSE_POINT)",
+        }),
+    }
 }
 
 /// A buffer for one USN record: the largest header, 76 bytes for V3, and the

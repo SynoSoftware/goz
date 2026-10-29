@@ -898,7 +898,7 @@ impl<V: IndexedVolume> ResultRows<V> {
         // the rows up to the limit's end.
         let per_volume_limit = spec.limit.map(|limit| spec.offset.saturating_add(limit));
         let (found, mut coverage) = run_held(
-            targets(volumes, scope)?,
+            targets(volumes, query.search_scope(scope).as_deref())?,
             query.match_case(),
             viewer,
             |index, mount_prefix, scope, seen_by| {
@@ -1020,7 +1020,7 @@ pub fn search_totals<V: IndexedVolume>(
     viewer: Viewer<'_>,
 ) -> Result<SearchTotals, TotalsError> {
     let (per_volume, coverage) = run_held(
-        targets(volumes, scope)?,
+        targets(volumes, query.search_scope(scope).as_deref())?,
         query.match_case(),
         viewer,
         |index, mount_prefix, scope, seen_by| {
@@ -1067,20 +1067,32 @@ fn targets<'s, V: IndexedVolume>(
     volumes: Vec<V>,
     scope: Option<&'s str>,
 ) -> Result<Vec<(V, VolScope<'s>)>, NotIndexed> {
-    match Scope::of(scope, volumes.iter().map(|v| v.mounts())) {
-        Scope::Everywhere => Ok(volumes.into_iter().map(|v| (v, VolScope::All)).collect()),
-        Scope::Folder { volume, folder } => {
-            let volume = volumes
-                .into_iter()
-                .nth(volume)
-                .expect("Scope::of routes to one of the volumes");
-            Ok(vec![(volume, VolScope::Folder(folder))])
-        }
-        Scope::Nowhere => Err(NotIndexed {
-            scope: scope
-                .expect("only a scope can miss every volume")
-                .to_string(),
-        }),
+    let routed = Scope::of(scope, volumes.iter().map(|v| v.mounts()));
+    let targets: Vec<_> = volumes
+        .into_iter()
+        .enumerate()
+        .filter_map(|(number, volume)| {
+            if !routed.includes(scope, number, volume.mounts()) {
+                return None;
+            }
+            let scoped = match routed {
+                Scope::Folder {
+                    volume: owner,
+                    folder,
+                } if owner == number => VolScope::Folder(folder),
+                _ => VolScope::All,
+            };
+            Some((volume, scoped))
+        })
+        .collect();
+    if let Some(scope) = scope
+        && targets.is_empty()
+    {
+        Err(NotIndexed {
+            scope: scope.to_owned(),
+        })
+    } else {
+        Ok(targets)
     }
 }
 
@@ -1325,7 +1337,7 @@ mod tests {
                     .iter()
                     .map(|&at| {
                         let (v, idx) = all[at];
-                        DirPaths::new(held[v], NameForm::Raw, mounts[v]).full_path_into(held[v], idx, &mut path);
+                        let _ = DirPaths::new(held[v], NameForm::Raw, mounts[v]).full_path_into(held[v], idx, &mut path);
                         path.clone()
                     })
                     .collect();

@@ -187,9 +187,10 @@ impl Client {
         &self.server
     }
 
-    /// Asks for the daemon's state.
-    pub fn status(&mut self) -> Result<DaemonStatus, ClientError> {
-        self.send(&Request::Status)?;
+    /// Asks for the daemon's state, with the folder links when they differ
+    /// from the ones whose fingerprint is `links_held` ([`Request::Status`]).
+    pub fn status(&mut self, links_held: Option<u64>) -> Result<DaemonStatus, ClientError> {
+        self.send(&Request::Status { links_held })?;
         match self.next_response()? {
             Response::Status(status) => Ok(status),
             _ => Err(ClientError::Communication(

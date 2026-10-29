@@ -1099,6 +1099,12 @@ impl Panels {
         }
         let shown = &update.before;
         let listed = matches!(update.kind, UpdatedKind::Listed { .. });
+        if listed {
+            let list = List::Panel(side);
+            if let Some(input) = window.model.borrow().mark_matches(list) {
+                window.created().work.borrow_mut().lists.mark(list, input);
+            }
+        }
         if listed || update.sizes {
             self.ask_panel_sizes(window, side);
         }

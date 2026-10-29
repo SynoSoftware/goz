@@ -48,6 +48,8 @@ pub const USN_REASON_BASIC_INFO_CHANGE: u32 = 0x0000_8000;
 /// `USN_REASON_HARD_LINK_CHANGE`: a hard link was added to or removed from
 /// the file. The record may name a link that no longer exists.
 pub const USN_REASON_HARD_LINK_CHANGE: u32 = 0x0001_0000;
+/// `USN_REASON_REPARSE_POINT_CHANGE`: the reparse data changed.
+pub const USN_REASON_REPARSE_POINT_CHANGE: u32 = 0x0010_0000;
 /// `USN_REASON_CLOSE`: the final record of an open-close window; reason-bit
 /// accumulation resets after it.
 pub const USN_REASON_CLOSE: u32 = 0x8000_0000;

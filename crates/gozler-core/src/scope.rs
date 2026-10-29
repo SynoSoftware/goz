@@ -23,11 +23,9 @@ impl<'a> VolumeMounts<'a> {
         self.mounts.first().map_or(self.guid, String::as_str)
     }
 
-    /// Every prefix a scope can name the volume by: each mount, or the GUID
-    /// path when it has no mount.
+    /// Every prefix a scope or a link target can name the volume by.
     fn prefixes(self) -> impl Iterator<Item = &'a str> {
-        let guid = self.mounts.is_empty().then_some(self.guid);
-        self.mounts.iter().map(String::as_str).chain(guid)
+        self.mounts.iter().map(String::as_str).chain([self.guid])
     }
 }
 
@@ -47,6 +45,14 @@ pub enum Scope<'p> {
 }
 
 impl<'p> Scope<'p> {
+    /// Includes the owning volume and volumes whose printed mount lies
+    /// below the scope, including a volume with only a folder mount.
+    pub fn includes(self, scope: Option<&str>, volume: usize, mounts: VolumeMounts<'_>) -> bool {
+        matches!(self, Scope::Everywhere)
+            || matches!(self, Scope::Folder { volume: owner, .. } if owner == volume)
+            || scope.is_some_and(|scope| mount_len(mounts.display_prefix(), scope).is_some())
+    }
+
     /// Routes `scope`, an absolute folder, to the volume with the longest
     /// mount that starts it. A mount matches ignoring ASCII case and only up
     /// to a separator, so a volume mounted at `C:\mnt\data\` owns
@@ -92,11 +98,13 @@ impl<'s> Coverage<'s> {
     /// reaches, routed by [`Scope::of`]. `reads_size_or_date` says whether the
     /// search tests sizes or dates, or totals sizes.
     pub fn of(volumes: &'s [VolumeStatus], scope: Option<&str>, reads_size_or_date: bool) -> Self {
-        let volumes = match Scope::of(scope, volumes.iter().map(VolumeStatus::mounted)) {
-            Scope::Everywhere => volumes.iter().collect(),
-            Scope::Folder { volume, .. } => vec![&volumes[volume]],
-            Scope::Nowhere => Vec::new(),
-        };
+        let routed = Scope::of(scope, volumes.iter().map(VolumeStatus::mounted));
+        let volumes = volumes
+            .iter()
+            .enumerate()
+            .filter(|(number, v)| routed.includes(scope, *number, v.mounted()))
+            .map(|(_, v)| v)
+            .collect();
         Coverage {
             volumes,
             reads_size_or_date,
@@ -225,5 +233,30 @@ mod tests {
         assert_eq!(mount(everywhere.sizes_or_dates_unknown()), None);
         let nowhere = Coverage::of(&volumes, Some(r"E:\x"), true);
         assert_eq!(nowhere.volumes().count(), 0);
+    }
+
+    #[test]
+    fn coverage_through_links_includes_targets_and_descendant_primary_mounts() {
+        let links = crate::links::Links::new(vec![crate::links::FolderLink {
+            link: r"C:\alias".into(),
+            target: r"D:\data".into(),
+        }]);
+        let volumes = [
+            volume(r"C:\", VolumePhase::Live, false),
+            volume(r"D:\", VolumePhase::Bootstrapping, false),
+            volume(r"C:\repo\data\", VolumePhase::Rescanning, false),
+        ];
+        let effective = links.search_scope(Some(r"C:\alias"));
+        let reached = Coverage::of(&volumes, effective.as_deref(), false);
+        assert_eq!(reached.incomplete().unwrap().mounts, [r"D:\"]);
+        let reached = Coverage::of(&volumes, Some(r"C:\repo"), false);
+        assert_eq!(reached.incomplete().unwrap().mounts, [r"C:\repo\data\"]);
+        assert_eq!(reached.volumes().count(), 2);
+        assert_eq!(
+            Coverage::of(&volumes[2..], Some(r"C:\repo"), false)
+                .volumes()
+                .count(),
+            1
+        );
     }
 }

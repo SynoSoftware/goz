@@ -16,6 +16,7 @@ mod measure;
 
 use criterion::{Criterion, criterion_group, criterion_main};
 use gozler_core::index::{NTFS_ROOT_FRN, VolumeIndex};
+use gozler_core::links::{FolderLink, Links};
 use gozler_core::query::{
     CompiledQuery, HeldVolume, IndexedVolume, ParseOptions, ResultRows, ResultSnapshot, RowsSpec,
     Viewer, parse_query, parse_query_with, run_query,
@@ -153,6 +154,29 @@ fn bench_query(c: &mut Criterion<measure::Measure>) {
             })
         });
     }
+
+    // The path term above through a junction to one leaf folder, as gozlerd
+    // compiles it: the entries outside the target must cost what they cost
+    // without links.
+    let links = Links::new(vec![FolderLink {
+        link: r"C:\elsewhere".into(),
+        target: r"C:\amd64_microsoft-windows-component-000_31bf3856ad364e35_10.0.26100.1_none_deadbeef\subcomponent_000_none_cafef00dbaadf00d\module_group_000\bin_x64_00".into(),
+    }]);
+    let parsed = parse_query(r"module_group_007\bin_x64_03").unwrap();
+    let parsed = CompiledQuery::with_links(&parsed, &links, None).unwrap();
+    group.bench_function("path-term(group_007\\bin_x64_03) one link", |b| {
+        b.iter(|| {
+            let out = run_query(
+                black_box(&idx),
+                r"C:\",
+                black_box(&parsed),
+                None,
+                SortSpec::default(),
+                Some(100),
+            );
+            black_box(out.total)
+        })
+    });
 
     // With -p every term tests the full path. `kernel32` lies in file names,
     // `module_group_007` in folder names, so their subtrees match too,

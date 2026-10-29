@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::attributes::Attributes;
 use crate::include::IndexSettings;
+use crate::links::Links;
 use crate::query::{MatchSums, ParsedQuery, RowsSpec, SearchTotals};
 use crate::scope::VolumeMounts;
 use crate::types::{IndexProgress, SortSpec, VolumePhase};
@@ -19,7 +20,7 @@ use crate::types::{IndexProgress, SortSpec, VolumePhase};
 /// refuses any other with [`ProtoError::Unsupported`], rather than agreeing on
 /// a version one side cannot actually speak. The client asks for this version
 /// alone, so a daemon of another build refuses it.
-pub const PROTO_VERSION: u16 = 16;
+pub const PROTO_VERSION: u16 = 17;
 
 /// The oldest protocol version a daemon of this build serves. **Owner
 /// ruling:** gozler serves no older protocol, of gozler or of goz, because
@@ -60,7 +61,12 @@ pub enum Request {
         client: String,
     },
     /// Ask for per-volume index status.
-    Status,
+    Status {
+        /// The [`Links::fingerprint`] of the folder links the client holds,
+        /// so the reply carries the table only when it changed, or `None`
+        /// for a client that does not use them.
+        links_held: Option<u64>,
+    },
     /// A search whose query the client parsed.
     Search(SearchRequest),
     /// An administrator saved the Include settings, so the
@@ -380,6 +386,10 @@ pub struct DaemonStatus {
     pub left_out: Vec<LeftOutVolume>,
     /// What the client that asked sees in its searches.
     pub caller_sees: CallerSees,
+    /// The folder links the client sees, when they differ from the ones it
+    /// holds ([`Request::Status`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub links: Option<Links>,
 }
 
 /// What a client sees in its searches, which gozlerd decides from the
@@ -604,7 +614,9 @@ mod tests {
 
     #[test]
     fn request_status_round_trips() {
-        rt_request(&Request::Status);
+        rt_request(&Request::Status {
+            links_held: Some(7),
+        });
     }
 
     #[test]
@@ -698,6 +710,10 @@ mod tests {
                 mounts: vec![r"D:\".into()],
             }],
             caller_sees: CallerSees::Filtered,
+            links: Some(Links::new(vec![crate::links::FolderLink {
+                link: r"C:\repo\artifacts".into(),
+                target: r"V:\artifacts".into(),
+            }])),
         }));
     }
 

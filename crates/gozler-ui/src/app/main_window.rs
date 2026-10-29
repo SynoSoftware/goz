@@ -2471,6 +2471,20 @@ impl MainWindow {
             }
             self.release_operations();
         }
+        let marked = self.created().work.borrow_mut().lists.take_marked();
+        let mut retired = Retirement::default();
+        for (list, answer) in marked {
+            if !self.update_live() {
+                retired.push(answer, crate::core::work::INLINE_ITEMS + 1);
+                continue;
+            }
+            let accepted = self.model.borrow_mut().accept_marked(list, answer);
+            self.apply(hwnd, accepted);
+        }
+        self.created().work.borrow_mut().retire(retired);
+        if !self.update_live() {
+            return;
+        }
         let filtered = self.created().work.borrow_mut().lists.take_filtered();
         let mut retired = Retirement::default();
         for (list, answer) in filtered {

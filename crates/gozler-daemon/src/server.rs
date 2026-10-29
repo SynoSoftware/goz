@@ -20,7 +20,8 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use gozler_core::include::IndexSettings;
-use gozler_core::index::VolumeIndex;
+use gozler_core::index::{PathStatus, VolumeIndex};
+use gozler_core::links::{FolderLink, Links};
 use gozler_core::proto::{
     CallerSees, DaemonStatus, MAX_CLIENT_FRAME, MemPair, OLDEST_PROTO_VERSION, PIPE_NAME,
     PROTO_VERSION, ProtoError, Request, Response, ResultSnapshotId, Returns, Rows, SentFolders,
@@ -31,7 +32,7 @@ use gozler_core::query::{
     CompiledQuery, HeldVolume, MatchSums, ResultRows, ResultSnapshot, RowsSpec, TotalsError,
     Viewer, search_totals,
 };
-use gozler_core::scope::VolumeMounts;
+use gozler_core::scope::{Scope, VolumeMounts};
 use gozler_winfs::{PipeSecurity, build_pipe_security};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::windows::named_pipe::{NamedPipeServer, ServerOptions};
@@ -311,11 +312,13 @@ fn serve(
             proto_max,
             ..
         }) => return reply(emit, hello(volumes, proto_min, proto_max)),
-        Ok(Request::Status) => {
-            return reply(
-                emit,
-                Response::Status(build_status(volumes, include, access.caller_sees())),
-            );
+        Ok(Request::Status { links_held }) => {
+            let mut status = build_status(volumes, include, access.caller_sees());
+            if let (Some(held), Access::Sees(visibility)) = (links_held, access) {
+                let links = folder_links(volumes, visibility.viewer());
+                status.links = (links.fingerprint() != held).then_some(links);
+            }
+            return reply(emit, Response::Status(status));
         }
         Ok(Request::SettingsSaved) => {
             include.reload();
@@ -349,21 +352,22 @@ fn serve(
         Request::SortResultSnapshot(sort) => {
             return sort_snapshot(volumes, snapshots, user, &sort, viewer, emit);
         }
-        Request::Hello { .. } | Request::Status | Request::SettingsSaved => {
+        Request::Hello { .. } | Request::Status { .. } | Request::SettingsSaved => {
             unreachable!("answered before the client's access is taken")
         }
     };
     if let Err(off) = include.applied().allows(&search.query) {
         return reply(emit, refusal(off.to_string()));
     }
-    let query = match CompiledQuery::new(&search.query) {
+    let scope = search.scope.as_deref();
+    let links = folder_links(volumes, viewer);
+    let query = match CompiledQuery::with_links(&search.query, &links, scope) {
         Ok(query) => query,
         Err(e) => return reply(emit, refusal(e.to_string())),
     };
     // In `VolumeSet` order, the order every request takes the volumes' locks
     // in.
     let targets = volumes.to_vec();
-    let scope = search.scope.as_deref();
     match search.returns {
         Returns::Rows(wanted) => {
             match ResultRows::search(targets, &query, scope, wanted.spec(), viewer) {
@@ -703,7 +707,59 @@ fn build_status(volumes: &VolumeSet, include: &Include, caller_sees: CallerSees)
         include: Some((*include.applied()).clone()),
         left_out: include.left_out(),
         caller_sees,
+        links: None,
     }
+}
+
+/// The folder links on `volumes` whose names `viewer` sees
+/// ([`VolumeIndex::folder_links`]), and each mount of a volume after its
+/// first, as a link to the mount its paths print with.
+fn folder_links(volumes: &VolumeSet, viewer: Viewer<'_>) -> Links {
+    let may_list = match viewer {
+        Viewer::Everything => None,
+        Viewer::Filtered(may_list) => Some(may_list),
+    };
+    let mut links = Vec::new();
+    for volume in volumes.iter() {
+        let prefix = volume.mount_prefix();
+        links.extend(volume.read().index().folder_links(prefix, may_list));
+        links.extend(volume.mounts.iter().skip(1).map(|mount| FolderLink {
+            link: mount.trim_end_matches('\\').to_owned(),
+            target: prefix.trim_end_matches('\\').to_owned(),
+        }));
+    }
+    let mut links = Links::new(links).into_vec();
+    let volumes: Vec<_> = volumes.iter().collect();
+    let mut pending = vec![Vec::new(); volumes.len()];
+    for (number, link) in links.iter().enumerate() {
+        if let Scope::Folder { volume, folder } =
+            Scope::of(Some(&link.target), volumes.iter().map(|v| v.mounted()))
+        {
+            pending[volume].push((number, folder.to_owned()));
+        }
+    }
+    let mut path = Vec::new();
+    for (volume, pending) in volumes.iter().zip(pending) {
+        let held = volume.read();
+        for (number, folder) in pending {
+            let index = held.index();
+            let Some(folder) =
+                gozler_core::query::engine::resolve_scope(index, folder.as_bytes(), false)
+            else {
+                continue;
+            };
+            path.clear();
+            if index.path_of(folder, &mut path) == PathStatus::Ok {
+                let prefix = volume.mount_prefix().trim_end_matches('\\');
+                links[number].target = if path.is_empty() {
+                    prefix.to_owned()
+                } else {
+                    format!("{prefix}\\{}", gozler_core::wtf8::to_string_lossy(&path))
+                };
+            }
+        }
+    }
+    links.into()
 }
 
 /// A volume's index, held through [`VolumeState::read`] for a search.
@@ -785,6 +841,44 @@ mod tests {
 
     fn live_volume(mount: &str) -> Arc<VolumeState> {
         volume(mount, windows_index(), VolumePhase::Live)
+    }
+
+    #[test]
+    fn links_use_indexed_target_case_and_scopes_enter_primary_folder_mounts() {
+        let mut host = VolumeIndex::new(NTFS_ROOT_FRN);
+        for (frn, name, target) in [
+            (100, "alias", r"D:\Windows"),
+            (101, "nested", r"D:\Windows\SYSTEM32"),
+        ] {
+            host.insert_enum(&dir_record(frn, NTFS_ROOT_FRN.0, name));
+            host.set_folder_link(
+                Frn(frn),
+                Some(gozler_core::links::ReparseTarget::Absolute(target.into())),
+            );
+        }
+        let mut data = windows_index();
+        let mut file = dir_record(102, 101, "driver.dll");
+        file.attributes = 0;
+        data.insert_enum(&file);
+        let vols = set(&[
+            volume(r"C:\", host, VolumePhase::Live),
+            volume(r"D:\", data, VolumePhase::Live),
+        ]);
+        let mut named = query(r"alias\System32\driver");
+        named.match_case = true;
+        let found = results(&encode_query_binary(&vols, named));
+        assert_eq!(found[0].total, 1);
+        assert_eq!(found[0].items[0].path, r"D:\Windows\System32\driver.dll");
+        let mut wrong_case = query(r"alias\SYSTEM32\driver");
+        wrong_case.match_case = true;
+        assert_eq!(results(&encode_query_binary(&vols, wrong_case))[0].total, 0);
+
+        let mounted = set(&[live_volume(r"C:\"), live_volume(r"C:\repo\data\")]);
+        let mut scoped = query("System32");
+        scoped.scope = Some(r"C:\repo".into());
+        let found = results(&encode_query_binary(&mounted, scoped));
+        assert_eq!(found[0].total, 1);
+        assert_eq!(found[0].items[0].path, r"C:\repo\data\Windows\System32");
     }
 
     /// An index whose name order is the REVERSE of its path order: `a\z.log`
@@ -991,7 +1085,7 @@ mod tests {
             Response::Hello { .. }
         ));
         assert!(matches!(
-            answer_as(&vols, &refused, &Request::Status),
+            answer_as(&vols, &refused, &Request::Status { links_held: None }),
             Response::Status(DaemonStatus {
                 caller_sees: CallerSees::Unidentified,
                 ..

@@ -16,6 +16,7 @@ pub mod fold;
 pub mod include;
 pub mod index;
 pub mod layout;
+pub mod links;
 pub mod output;
 pub mod proto;
 pub mod query;

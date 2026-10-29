@@ -119,7 +119,7 @@ pub use entry::{Access, AttributeTag, Entry, EntryStat, FileIdentity, Reparse, o
 #[cfg(windows)]
 pub use file_id::{
     Folder, RawFolderSecurity, open_folder, read_folder_descriptor, read_folder_security,
-    root_folder_id,
+    read_reparse_point, root_folder_id,
 };
 
 #[cfg(windows)]

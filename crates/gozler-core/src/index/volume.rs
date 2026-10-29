@@ -32,6 +32,7 @@ use super::store::{
 use crate::attributes::{Attributes, PackedAttributes};
 use crate::include::VolumeRules;
 use crate::layout::LayoutFile;
+use crate::links::{FolderLink, ReparseTarget};
 use crate::types::{EntryIdx, Frn, NIL};
 use crate::usn::record::{FILE_ATTRIBUTE_REPARSE_POINT, USN_REASON_RENAME_NEW_NAME};
 use crate::usn::{ParsedUsnRecord, UsnOp, ops_for};
@@ -274,6 +275,9 @@ pub struct VolumeIndex {
     left_out: FxHashSet<Frn>,
     /// The bytes behind every folder's [`DescriptorId`](super::DescriptorId).
     descriptors: DescriptorTable,
+    /// Where each folder link on the volume leads, by its file ID, as gozlerd
+    /// read it from the disk ([`crate::links`]).
+    folder_links: FxHashMap<Frn, ReparseTarget>,
 }
 
 impl VolumeIndex {
@@ -341,6 +345,7 @@ impl VolumeIndex {
             include: None,
             left_out: FxHashSet::default(),
             descriptors: DescriptorTable::default(),
+            folder_links: FxHashMap::default(),
         };
         this.link_same_name(root_idx, root_name);
         this.link_same_name(lost_found, lf_name);
@@ -722,6 +727,72 @@ impl VolumeIndex {
     pub fn folder_descriptor(&self, frn: Frn) -> Option<&[u8]> {
         let id = self.entries.descriptor(self.head_of(frn)?)?;
         Some(self.descriptors.bytes(id))
+    }
+
+    /// Every folder that is a reparse point, whose reparse data says
+    /// whether it is a folder link: after a build, gozlerd reads each one.
+    pub fn reparse_folders(&self) -> Vec<Frn> {
+        let reparse = PackedAttributes::from_record(FILE_ATTRIBUTE_REPARSE_POINT);
+        self.entries
+            .iter_live()
+            .filter(|&e| {
+                self.entries.flags(e).contains(EntryFlags::DIR)
+                    && self.entries.attributes(e).contains(reparse)
+            })
+            .map(|e| self.entries.frn(e))
+            .collect()
+    }
+
+    /// Records where folder `frn` leads, or with `None` that it is no folder
+    /// link any more.
+    pub fn set_folder_link(&mut self, frn: Frn, target: Option<ReparseTarget>) {
+        match target {
+            Some(target) => self.folder_links.insert(frn, target),
+            None => self.folder_links.remove(&frn),
+        };
+    }
+
+    /// The volume's folder links, mounted at `mount_prefix` (`C:\`), with
+    /// their full paths as they are now: a link that has none, such as one
+    /// below lost+found, is left out, and a relative symbolic link leads
+    /// below the folder that holds it. With `may_list`, a filtered user's
+    /// answer for a folder's descriptor, only the links in folders the user
+    /// may list are given, as a search shows their names; `None` gives every
+    /// link, for a user who sees every file.
+    pub fn folder_links(
+        &self,
+        mount_prefix: &str,
+        may_list: Option<&(impl Fn(&[u8]) -> bool + ?Sized)>,
+    ) -> Vec<FolderLink> {
+        let root = mount_prefix.trim_end_matches('\\');
+        let mut path = Vec::new();
+        self.folder_links
+            .iter()
+            .filter_map(|(&frn, target)| {
+                path.clear();
+                let head = self.head_of(frn)?;
+                if let Some(may_list) = may_list {
+                    let parent = self.entries.parent(head);
+                    let listed = parent != NIL
+                        && (self.entries.descriptor(parent))
+                            .is_some_and(|id| may_list(self.descriptors.bytes(id)));
+                    if !listed {
+                        return None;
+                    }
+                }
+                if self.path_of(head, &mut path) != PathStatus::Ok {
+                    return None;
+                }
+                let link = format!("{root}\\{}", crate::wtf8::to_string_lossy(&path));
+                let target = match target {
+                    ReparseTarget::Absolute(target) => target.clone(),
+                    ReparseTarget::Relative(relative) => {
+                        crate::winpath::absolute(relative, &crate::winpath::parent_of(&link))
+                    }
+                };
+                Some(FolderLink { link, target })
+            })
+            .collect()
     }
 
     /// Reconciles the hard-link set of `frn` to exactly `actual` (the daemon's
@@ -1265,6 +1336,7 @@ impl VolumeIndex {
     /// moves its children to lost+found, takes its size from the folders above
     /// it, releases its name and frees its slot.
     fn remove_entry(&mut self, idx: EntryIdx) {
+        self.folder_links.remove(&self.entries.frn(idx));
         self.dir_index_remove(idx); // while the name/parent are still readable
         self.unlink_same_name(idx);
         self.unlink_child(idx);

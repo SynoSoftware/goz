@@ -3,9 +3,10 @@
 
 use crate::core::fetch::List;
 use crate::core::model::ScopeCheck;
+use crate::core::results::{Mark, Marked};
 use crate::core::search_list::{Keep, Kept};
 use crate::core::selection::{Filter, Filtered, Telling, Told};
-use crate::core::work::{Replacement, Retirement, Waiting};
+use crate::core::work::{INLINE_ITEMS, Replacement, Retirement, Waiting};
 use crate::win::wake::OpenWaker;
 use crate::win::work::{OffThread, Task};
 use gozler_client::CancelToken;
@@ -16,6 +17,7 @@ struct Slot {
     telling: Task<Telling, Told>,
     keeping: Task<Keep, Kept>,
     filtering: Task<Filter, Filtered>,
+    marking: Task<Mark, Marked>,
 }
 
 pub(in crate::app) struct Work {
@@ -50,6 +52,11 @@ impl Work {
                         Filter::retained_items,
                         |input, _| input.run(),
                     ),
+                    marking: Task::new(waker.clone(), Replacement::Cancel, |input: Mark, _, _| {
+                        input.run()
+                    })
+                    .with_size(|_| INLINE_ITEMS + 1)
+                    .background(),
                 })
                 .collect(),
             location: Task::new(waker, Replacement::Cancel, check_location).background(),
@@ -68,6 +75,22 @@ impl Work {
                 None => self.location.cancel(),
             }
         }
+    }
+
+    pub(in crate::app) fn mark(&mut self, list: List, input: Mark) {
+        let work = self
+            .slots
+            .iter_mut()
+            .find(|work| work.list == list)
+            .expect("each list has a work slot");
+        work.marking.replace(input);
+    }
+
+    pub(in crate::app) fn take_marked(&mut self) -> Vec<(List, Marked)> {
+        self.slots
+            .iter_mut()
+            .filter_map(|work| work.marking.take().map(|(_, answer)| (work.list, answer)))
+            .collect()
     }
 
     pub(in crate::app) fn refresh_location(&mut self) {
@@ -177,6 +200,7 @@ impl Work {
     pub(super) fn tick(&mut self, now: Instant) -> bool {
         let mut active = self.location.tick(now).is_some();
         for work in &mut self.slots {
+            active |= work.marking.tick(now).is_some();
             active |= work.telling.tick(now).is_some();
             active |= work.keeping.tick(now).is_some();
             active |= work.filtering.tick(now).is_some();
@@ -187,6 +211,7 @@ impl Work {
     pub(super) fn take_retired(&mut self) -> Retirement {
         self.retired.append(self.location.take_retired());
         for work in &mut self.slots {
+            self.retired.append(work.marking.take_retired());
             self.retired.append(work.telling.take_retired());
             self.retired.append(work.keeping.take_retired());
             self.retired.append(work.filtering.take_retired());
@@ -198,6 +223,8 @@ impl Work {
         self.location.cancel();
         self.retired.append(self.location.close_delivery());
         for work in &mut self.slots {
+            work.marking.cancel();
+            self.retired.append(work.marking.close_delivery());
             work.telling.cancel();
             work.keeping.cancel();
             work.filtering.cancel();

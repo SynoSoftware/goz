@@ -15,11 +15,14 @@ use std::time::{Duration, Instant};
 
 use gozler_core::include::VolumeRules;
 use gozler_core::index::settle::{Batch, settle_batch};
+use gozler_core::links::{ReparseTarget, parse_reparse_data};
+use gozler_core::types::Frn;
+use gozler_core::usn::ParsedUsnRecord;
 use gozler_core::usn::record::{
     USN_REASON_BASIC_INFO_CHANGE, USN_REASON_CLOSE, USN_REASON_DATA_EXTEND,
     USN_REASON_DATA_OVERWRITE, USN_REASON_DATA_TRUNCATION, USN_REASON_FILE_CREATE,
     USN_REASON_FILE_DELETE, USN_REASON_HARD_LINK_CHANGE, USN_REASON_RENAME_NEW_NAME,
-    USN_REASON_RENAME_OLD_NAME, USN_REASON_SECURITY_CHANGE,
+    USN_REASON_RENAME_OLD_NAME, USN_REASON_REPARSE_POINT_CHANGE, USN_REASON_SECURITY_CHANGE,
 };
 use gozler_core::usn::walk_journal_buffer;
 use gozler_winfs::{
@@ -43,6 +46,7 @@ const REASON_MASK: u32 = USN_REASON_FILE_CREATE
     | USN_REASON_DATA_EXTEND
     | USN_REASON_DATA_TRUNCATION
     | USN_REASON_SECURITY_CHANGE
+    | USN_REASON_REPARSE_POINT_CHANGE
     | USN_REASON_CLOSE;
 
 /// Why the tail rebuilds its volume's index. The log names it, and a volume
@@ -402,6 +406,7 @@ fn tail_loop(state: &VolumeState, handle: VolumeHandle, stop: &AtomicBool, pulse
                     for anomaly in &settled.anomalies {
                         tracing::debug!(volume = %state.mount_prefix(), ?anomaly, "index anomaly");
                     }
+                    refresh_folder_links(state, handle, &walk.records, stop);
                     if settled.missed_folders > 0 {
                         tracing::debug!(
                             volume = %state.mount_prefix(),
@@ -549,7 +554,7 @@ fn rescan(
     // Pass the stop flag so a shutdown arriving mid-rebuild aborts promptly
     // instead of blocking `TailHandle::shutdown`'s join for the full read.
     let rules = state.rules();
-    let built = match bootstrap::build_index(
+    let mut built = match bootstrap::build_index(
         handle,
         &state.guid,
         state.filesystem,
@@ -567,6 +572,15 @@ fn rescan(
             return None;
         }
     };
+
+    // Before the index is shared, so no search sees it without its links.
+    let reparse_folders = built.index.reparse_folders();
+    for (frn, target) in read_folder_links(state, handle, &reparse_folders, stop) {
+        built.index.set_folder_link(frn, target);
+    }
+    if stop.load(Ordering::Relaxed) {
+        return None;
+    }
 
     let entries = built.index.len();
     let descriptor_reads = built.descriptor_reads;
@@ -601,6 +615,63 @@ fn rescan(
             tracing::warn!(volume = %state.mount_prefix(), "index built but no journal is available; live updates paused");
             None
         }
+    }
+}
+
+/// Reads where each folder of `frns` leads, from its reparse data. A
+/// reparse point that is no folder link, a folder that is gone, and one
+/// whose data does not read or parse lead nowhere; the last two are logged.
+fn read_folder_links(
+    state: &VolumeState,
+    handle: &VolumeHandle,
+    frns: &[Frn],
+    stop: &AtomicBool,
+) -> Vec<(Frn, Option<ReparseTarget>)> {
+    frns.iter()
+        .take_while(|_| !stop.load(Ordering::Relaxed))
+        .map(|&frn| {
+            let target = match gozler_winfs::read_reparse_point(handle, frn.0) {
+                Ok(Some(data)) => parse_reparse_data(&data).unwrap_or_else(|error| {
+                    tracing::warn!(volume = %state.mount_prefix(), ?frn, %error, "unreadable folder link");
+                    None
+                }),
+                Ok(None) => None,
+                Err(error) => {
+                    tracing::warn!(volume = %state.mount_prefix(), ?frn, %error, "could not read a folder link");
+                    None
+                }
+            };
+            (frn, target)
+        })
+        .collect()
+}
+
+/// Renames rebuild their paths from the index; only a reparse change needs
+/// another disk read of the target.
+fn refresh_folder_links(
+    state: &VolumeState,
+    handle: &VolumeHandle,
+    records: &[ParsedUsnRecord],
+    stop: &AtomicBool,
+) {
+    let changed: Vec<Frn> = {
+        let mut changed: Vec<Frn> = records
+            .iter()
+            .filter(|rec| rec.is_dir() && rec.reason & USN_REASON_REPARSE_POINT_CHANGE != 0)
+            .map(|rec| rec.frn)
+            .collect();
+        changed.sort_unstable();
+        changed.dedup();
+        changed
+    };
+    if changed.is_empty() {
+        return;
+    }
+    // Read without the index lock: each read is a blocking open.
+    let targets = read_folder_links(state, handle, &changed, stop);
+    let mut index = state.index_mut();
+    for (frn, target) in targets {
+        index.set_folder_link(frn, target);
     }
 }
 

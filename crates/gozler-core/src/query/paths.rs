@@ -54,7 +54,13 @@ impl NameForm {
 struct Folder {
     start: usize,
     end: usize,
+    ancestry: Ancestry,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Ancestry {
     depth: usize,
+    pub(crate) target: Option<(usize, usize)>,
 }
 
 /// Folder paths longer than this are rebuilt from their nearest cached
@@ -87,6 +93,7 @@ pub(crate) struct DirPaths {
     /// Cached folders, and `None` for folders known to have no path. A folder
     /// missing here is not built yet, or has a path too long to cache.
     memo: FxHashMap<EntryIdx, Option<Folder>>,
+    targets: FxHashMap<EntryIdx, usize>,
 }
 
 impl DirPaths {
@@ -97,7 +104,10 @@ impl DirPaths {
         let root = Folder {
             start: 0,
             end: arena.len(),
-            depth: 1,
+            ancestry: Ancestry {
+                depth: 1,
+                target: None,
+            },
         };
         let mut memo = FxHashMap::default();
         memo.insert(index.root(), Some(root));
@@ -106,41 +116,56 @@ impl DirPaths {
             arena,
             root: (index.root(), root),
             memo,
+            targets: FxHashMap::default(),
+        }
+    }
+
+    /// Set before paths are read, so cached folders inherit their nearest
+    /// target in the same walk that builds their path.
+    pub(crate) fn set_targets(&mut self, targets: FxHashMap<EntryIdx, usize>) {
+        self.targets = targets;
+        if let Some(&number) = self.targets.get(&self.root.0) {
+            self.root.1.ancestry.target = Some((number, self.root.1.end));
+            self.memo.insert(self.root.0, Some(self.root.1));
         }
     }
 
     /// Writes the full path of entry `idx` into `out` (cleared first).
-    /// Returns `false`, leaving `out` empty, when the entry has no path.
+    /// Returns `None`, leaving `out` empty, when the entry has no path.
     pub(crate) fn full_path_into(
         &mut self,
         index: &VolumeIndex,
         idx: EntryIdx,
         out: &mut Vec<u8>,
-    ) -> bool {
+    ) -> Option<Ancestry> {
         match self.folder_path_into(index, index.entry(idx).parent(), out) {
             // The entry's own walk is one entry longer than its folder's.
-            Some(depth) if depth < MAX_PATH_HOPS => {
+            Some(mut folder) if folder.depth < MAX_PATH_HOPS => {
+                folder.depth += 1;
                 if !out.is_empty() {
                     out.push(b'\\');
                 }
                 out.extend_from_slice(self.form.name_of(index, idx));
-                true
+                if let Some(&number) = self.targets.get(&idx) {
+                    folder.target = Some((number, out.len()));
+                }
+                Some(folder)
             }
             _ => {
                 out.clear();
-                false
+                None
             }
         }
     }
 
     /// Writes the full path of folder `dir` into `out` (cleared first) and
-    /// returns the folder's depth, or `None` when it has no path.
+    /// returns its cached ancestry, or `None` when it has no path.
     pub(crate) fn folder_path_into(
         &mut self,
         index: &VolumeIndex,
         dir: EntryIdx,
         out: &mut Vec<u8>,
-    ) -> Option<usize> {
+    ) -> Option<Ancestry> {
         out.clear();
         if self.arena.len() > CACHE_LIMIT {
             let (root_idx, root) = self.root;
@@ -175,10 +200,10 @@ impl DirPaths {
             return None;
         };
         out.extend_from_slice(&self.arena[base.start..base.end]);
-        let mut depth = base.depth;
+        let mut ancestry = base.ancestry;
         for (i, &folder) in chain.iter().rev().enumerate() {
-            depth += 1;
-            if depth > MAX_PATH_HOPS {
+            ancestry.depth += 1;
+            if ancestry.depth > MAX_PATH_HOPS {
                 // This folder and every one below it walk too far.
                 for &deeper in chain.iter().rev().skip(i) {
                     self.memo.insert(deeper, None);
@@ -190,14 +215,24 @@ impl DirPaths {
                 out.push(b'\\');
             }
             out.extend_from_slice(self.form.name_of(index, folder));
+            if let Some(&number) = self.targets.get(&folder) {
+                ancestry.target = Some((number, out.len()));
+            }
             if out.len() <= CACHED_PATH_MAX {
                 let start = self.arena.len();
                 self.arena.extend_from_slice(out);
                 let end = self.arena.len();
-                self.memo.insert(folder, Some(Folder { start, end, depth }));
+                self.memo.insert(
+                    folder,
+                    Some(Folder {
+                        start,
+                        end,
+                        ancestry,
+                    }),
+                );
             }
         }
-        Some(depth)
+        Some(ancestry)
     }
 }
 
@@ -618,6 +653,7 @@ mod tests {
                 );
                 let built = dirs
                     .full_path_into(&index, idx, &mut out)
+                    .is_some()
                     .then(|| out.clone());
                 assert_eq!(built, expected(idx), "entry {idx}");
                 let copied = copy.entry_folder(&index, idx, &mut names).map(|folder| {

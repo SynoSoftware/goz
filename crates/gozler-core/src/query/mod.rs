@@ -16,6 +16,7 @@ pub mod order;
 pub mod parse;
 mod paths;
 mod rows;
+mod through;
 pub(crate) mod wildcard;
 
 pub use dates::{DateField, DateRange, QueryStart};
