@@ -415,7 +415,7 @@
     "service": "Hizmet {0}",
     "service_unknown": "Hizmet bağlı değil",
     "description": "Dosyaları anında bulun. Yıldırım hızıyla kopyalayın, taşıyın ve silin.\n\nWindows 10 ve 11 için ücretsiz ve açık kaynaklıdır.",
-    "copyright": "© 2026 Synapse N.V. ve Mustafa Ahci.\ngoz temel alınmıştır. MIT lisansı."
+    "copyright": "© 2026 Synapse N.V.\ngoz temel alınmıştır. MIT lisansı."
   },
   "service_report": {
     "title": "Hizmet raporu",

@@ -5,7 +5,7 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
-authors.workspace = true
+authors = ["Synapse N.V."]
 repository.workspace = true
 publish = false
 

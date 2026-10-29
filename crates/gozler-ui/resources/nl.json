@@ -415,7 +415,7 @@
     "service": "Service {0}",
     "service_unknown": "Service niet verbonden",
     "description": "Vind bestanden direct. Kopieer, verplaats en verwijder ze razendsnel.\n\nGratis en open source, voor Windows 10 en 11.",
-    "copyright": "© 2026 Synapse N.V. en Mustafa Ahci.\nGebaseerd op goz. MIT-licentie."
+    "copyright": "© 2026 Synapse N.V.\nGebaseerd op goz. MIT-licentie."
   },
   "service_report": {
     "title": "Servicerapport",

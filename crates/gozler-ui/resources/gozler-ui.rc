@@ -24,7 +24,7 @@ BEGIN
             VALUE "FileDescription", "Gozler"
             VALUE "FileVersion", GOZLER_VERSION
             VALUE "InternalName", "gozler-ui"
-            VALUE "LegalCopyright", "Copyright (C) 2026 Synapse N.V. and Mustafa Ahci"
+            VALUE "LegalCopyright", "Copyright (C) 2026 Synapse N.V."
             VALUE "OriginalFilename", "gozler-ui.exe"
             VALUE "ProductName", "Gozler"
             VALUE "ProductVersion", GOZLER_VERSION
