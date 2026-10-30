@@ -1155,6 +1155,11 @@ impl MainWindow {
     }
 
     pub(super) fn slow_list_work(&self, list: List) -> Option<Awaited> {
+        if let List::Panel(side) = list
+            && self.matching_selection_slow(list)
+        {
+            return Some(Awaited::Matching(side));
+        }
         let selecting = {
             let model = self.model.borrow();
             model.list(list).is_some_and(|list| {
@@ -1186,6 +1191,12 @@ impl MainWindow {
 
     pub(super) fn cancel_list_work(&self, hwnd: Hwnd, list: List, awaited: Awaited) {
         if self.slow_list_work(list) != Some(awaited) {
+            return;
+        }
+        if let Awaited::Matching(side) = awaited {
+            self.cancel_matching_selection(List::Panel(side));
+            self.controls().panels.show_panel(self, side);
+            self.poll_work(hwnd);
             return;
         }
         if let Awaited::Listing(side) = awaited {
@@ -1627,7 +1638,6 @@ impl MainWindow {
     ) -> Vec<(u16, bool, bool)> {
         let focus = context.focus;
         let model = self.model.borrow();
-        let pending = self.selection_command_pending(context.list);
         let global_cancel = self.main_waiting().is_some_and(Awaited::can_cancel);
         let state = State {
             model: &model,
@@ -1642,8 +1652,7 @@ impl MainWindow {
                     item.id(),
                     (item.enabled(&state)
                         || (*item == MenuItem::Run(CommandId::Cancel) && global_cancel))
-                        && !(pending
-                            && (item.reads_selection(focus) || item.writes_selection(focus))),
+                        && !self.selection_command_disabled(context.list, *item, focus),
                     item.checked(&state),
                 )
             })
@@ -1679,10 +1688,17 @@ impl MainWindow {
         if !self.selection_context_current(context) {
             return;
         }
+        if self.selection_command_disabled(context.list, item, context.focus) {
+            return;
+        }
         let writing = item.writes_selection(context.focus)
             && (self.native_update_active(context.list)
                 || self.native_deselection_pending(context.list)
-                || self.selection_command_pending(context.list));
+                || self.selection_command_pending(context.list)
+                || matches!(
+                    item,
+                    MenuItem::Run(CommandId::SelectFiles | CommandId::UnselectFiles)
+                ));
         if (item.reads_selection(context.focus) || writing)
             && !self.prepare_selection_command(hwnd, item, context)
         {
@@ -1819,13 +1835,13 @@ impl MainWindow {
                     return self
                         .controls()
                         .panels
-                        .select_files(self, hwnd, active, true);
+                        .select_matching(self, hwnd, active, true);
                 }
                 CommandId::UnselectFiles => {
                     return self
                         .controls()
                         .panels
-                        .select_files(self, hwnd, active, false);
+                        .select_matching(self, hwnd, active, false);
                 }
                 CommandId::Find => {
                     if mode == Mode::Commander {
@@ -2468,8 +2484,8 @@ impl MainWindow {
             self.retire_model();
         }
         let selected = self.created().work.borrow_mut().panels.take_selected();
-        for (side, answer) in selected {
-            self.controls().panels.show_matching(self, side, answer);
+        for (side, id, answer) in selected {
+            self.controls().panels.show_matching(self, side, id, answer);
         }
         let counted = self.created().work.borrow_mut().panels.take_counts();
         for (side, answer) in counted {
@@ -2879,6 +2895,15 @@ impl MainWindow {
     /// window rule 8). Returns whether the window took it.
     fn on_key(&self, hwnd: Hwnd, target: Hwnd, mut keystroke: Keystroke) -> bool {
         if keystroke == Keystroke::plain(commands::Key::Escape) {
+            let active = self.model.borrow().active_list();
+            if self.matching_selection_pending(active) {
+                self.cancel_matching_selection(active);
+                if let List::Panel(side) = active {
+                    self.controls().panels.show_panel(self, side);
+                }
+                self.poll_work(hwnd);
+                return true;
+            }
             let list = if target == self.controls().search.list.hwnd() {
                 Some(List::Search)
             } else {
@@ -3493,6 +3518,9 @@ impl MainWindow {
     }
 
     fn start_list_passes(&self) {
+        for side in Side::BOTH {
+            self.continue_matching_selection(side);
+        }
         self.gate_changed_selections();
         let input =
             if self.delivering_operations.get() || self.operation_delivery.borrow().is_some() {

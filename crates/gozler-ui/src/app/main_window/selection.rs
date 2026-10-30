@@ -19,6 +19,7 @@ pub(super) struct NativeSelection {
     writing: bool,
     update: Option<NativeUpdate>,
     action: Option<SelectionAction>,
+    matching: Option<MatchingSelection>,
     /// The last run of `Shift` with a cursor key ([`MainWindow::select_key`]).
     shift_run: Option<ShiftRun>,
     restore_focus: bool,
@@ -27,6 +28,23 @@ pub(super) struct NativeSelection {
     /// The rows that Clear selection cleared in Search's list, which
     /// `Num +` selects again while the list's key is still the one here.
     cleared: Option<(CaptureKey, Arc<Vec<Range<u64>>>)>,
+}
+
+struct MatchingSelection {
+    since: Instant,
+    phase: MatchingPhase,
+}
+
+enum MatchingPhase {
+    Preparing {
+        mask: gozler_core::query::NameMask,
+        select: bool,
+        folders: bool,
+    },
+    Running {
+        id: Id,
+        key: CaptureKey,
+    },
 }
 
 #[derive(Clone, Copy)]
@@ -117,6 +135,158 @@ impl NativeRead {
 }
 
 impl MainWindow {
+    pub(super) fn matching_selection_pending(&self, list: List) -> bool {
+        self.native_selection(list).borrow().matching.is_some()
+    }
+
+    pub(super) fn selection_command_disabled(
+        &self,
+        list: List,
+        item: MenuItem,
+        focus: Focus,
+    ) -> bool {
+        (self.selection_command_pending(list) || self.matching_selection_pending(list))
+            && (item.reads_selection(focus) || item.writes_selection(focus))
+    }
+
+    pub(super) fn matching_selection_slow(&self, list: List) -> bool {
+        self.native_selection(list)
+            .borrow()
+            .matching
+            .as_ref()
+            .is_some_and(|matching| matching.since.elapsed() >= crate::core::work::SLOW)
+    }
+
+    pub(super) fn start_matching_selection(
+        &self,
+        side: Side,
+        mask: gozler_core::query::NameMask,
+        select: bool,
+        folders: bool,
+    ) {
+        let list = List::Panel(side);
+        self.native_selection(list).borrow_mut().matching = Some(MatchingSelection {
+            since: Instant::now(),
+            phase: MatchingPhase::Preparing {
+                mask,
+                select,
+                folders,
+            },
+        });
+        self.set_selection_enabled(list, false);
+        self.continue_matching_selection(side);
+        self.controls().key_bar.update_key_bar(self);
+    }
+
+    pub(super) fn continue_matching_selection(&self, side: Side) {
+        let list = List::Panel(side);
+        let preparing = self
+            .native_selection(list)
+            .borrow()
+            .matching
+            .as_ref()
+            .is_some_and(|matching| matches!(matching.phase, MatchingPhase::Preparing { .. }));
+        if !preparing
+            || !self.read_target_selection(self.list_control(list).hwnd().parent(), list)
+            || self.model.borrow().panels().panel(side).rows_pending()
+        {
+            return;
+        }
+        let key = self.native_key(list);
+        let matching = self
+            .native_selection(list)
+            .borrow_mut()
+            .matching
+            .take_if(|matching| matches!(matching.phase, MatchingPhase::Preparing { .. }));
+        let Some(MatchingSelection {
+            since,
+            phase:
+                MatchingPhase::Preparing {
+                    mask,
+                    select,
+                    folders,
+                },
+        }) = matching
+        else {
+            return;
+        };
+        let input = self
+            .model
+            .borrow()
+            .panels()
+            .select_matching(side, mask, select, folders);
+        if let Some(input) = input {
+            let id = self.created().work.borrow_mut().panels.select(side, input);
+            self.native_selection(list).borrow_mut().matching = Some(MatchingSelection {
+                since,
+                phase: MatchingPhase::Running { id, key },
+            });
+        } else {
+            self.set_selection_enabled(list, true);
+        }
+    }
+
+    pub(super) fn matching_selection_current(&self, side: Side, id: Id) -> bool {
+        let list = List::Panel(side);
+        let key = self.native_key(list);
+        let commander = self.model.borrow().mode() == Mode::Commander;
+        self.native_selection(list)
+            .borrow()
+            .matching
+            .as_ref()
+            .is_some_and(|matching| {
+                commander && matches!(matching.phase, MatchingPhase::Running { id: current, key: captured }
+                    if current == id && captured == key)
+            })
+    }
+
+    // Replacement transfers the gate to native application before calling
+    // Windows. Explicit cancellation restores the existing selection instead.
+    fn end_matching_selection(&self, list: List) -> bool {
+        let matching = self.native_selection(list).borrow_mut().matching.take();
+        if matching.is_none() {
+            return false;
+        }
+        if let List::Panel(side) = list {
+            self.created()
+                .work
+                .borrow_mut()
+                .panels
+                .cancel_matching(side);
+        }
+        true
+    }
+
+    pub(super) fn cancel_matching_selection(&self, list: List) {
+        let ended = self.end_matching_selection(list);
+        if ended
+            && !self.native_update_active(list)
+            && !self.native_deselection_pending(list)
+            && !self.selection_command_pending(list)
+        {
+            self.set_selection_enabled(list, true);
+        }
+        if ended {
+            self.controls().key_bar.update_key_bar(self);
+        }
+    }
+
+    pub(super) fn reject_matching_selection(
+        &self,
+        side: Side,
+        id: Id,
+        answer: crate::core::panel::Selected,
+    ) {
+        let list = List::Panel(side);
+        let current = self.native_selection(list).borrow().matching.as_ref().is_some_and(|matching| {
+            matches!(matching.phase, MatchingPhase::Running { id: current, .. } if current == id)
+        });
+        if current {
+            self.cancel_matching_selection(list);
+        }
+        self.retire_selection(answer);
+    }
+
     /// EnableWindow clears a disabled list's focus; only restore focus that
     /// this update displaced, while the person has not focused another control.
     fn set_selection_enabled(&self, list: List, enabled: bool) {
@@ -259,7 +429,10 @@ impl MainWindow {
                 }
             }
             self.native_selection(list).borrow_mut().action = None;
-            if !self.native_update_active(list) && !self.native_deselection_pending(list) {
+            if !self.native_update_active(list)
+                && !self.native_deselection_pending(list)
+                && !self.matching_selection_pending(list)
+            {
                 self.set_selection_enabled(list, true);
             }
             if current {
@@ -293,7 +466,7 @@ impl MainWindow {
     }
 
     fn selection_waiting(&self, list: List) -> bool {
-        if self.native_deselection_pending(list) {
+        if self.native_deselection_pending(list) || self.matching_selection_pending(list) {
             return true;
         }
         let model = self.model.borrow();
@@ -339,6 +512,7 @@ impl MainWindow {
         }
         native.capture.changed(change);
         drop(native);
+        self.cancel_matching_selection(list);
         self.retire_native_selection(list);
         true
     }
@@ -365,6 +539,7 @@ impl MainWindow {
     }
 
     pub(super) fn seed_native_selection(&self, list: List, selected: RowSelection) {
+        self.end_matching_selection(list);
         let count = self.list_control(list).count();
         let mut retired = Retirement::default();
         let input = {
@@ -526,7 +701,9 @@ impl MainWindow {
         point: Option<(i32, i32)>,
     ) -> Option<CommandContext> {
         let context = self.command_context();
-        if self.selection_command_pending(context.list) {
+        if self.selection_command_pending(context.list)
+            || self.matching_selection_pending(context.list)
+        {
             return None;
         }
         if self.read_target_selection(hwnd, context.list) && !self.selection_waiting(context.list) {
@@ -545,7 +722,9 @@ impl MainWindow {
         let mut context = self.command_context();
         context.list = List::Panel(side);
         context.key = self.native_key(context.list);
-        if self.selection_command_pending(context.list) {
+        if self.selection_command_pending(context.list)
+            || self.matching_selection_pending(context.list)
+        {
             return None;
         }
         if self.read_target_selection(hwnd, context.list) && !self.selection_waiting(context.list) {
@@ -749,7 +928,7 @@ impl MainWindow {
                 native.unhighlight.is_none()
             };
             if complete && current {
-                if !self.selection_command_pending(list) {
+                if !self.selection_command_pending(list) && !self.matching_selection_pending(list) {
                     self.set_selection_enabled(list, true);
                 }
                 match list {
@@ -789,6 +968,7 @@ impl MainWindow {
         to_focus: bool,
         keep_action: bool,
     ) {
+        self.end_matching_selection(list);
         let (count, selected_count) = match list {
             List::Panel(side) => {
                 let model = self.model.borrow();
@@ -945,7 +1125,10 @@ impl MainWindow {
         }
         self.created().work.borrow_mut().lists.tell(list, input);
         self.retire_native_selection(list);
-        if !self.selection_command_pending(list) && !self.native_deselection_pending(list) {
+        if !self.selection_command_pending(list)
+            && !self.native_deselection_pending(list)
+            && !self.matching_selection_pending(list)
+        {
             self.set_selection_enabled(list, true);
         }
         self.retire_selection(update);

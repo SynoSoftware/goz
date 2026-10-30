@@ -128,18 +128,16 @@ fn bench_query(c: &mut Criterion<measure::Measure>) {
 
     for (target, match_path) in [("names", false), ("paths", true)] {
         for (version, ordered) in [("before", false), ("after", true)] {
-            let mut parsed = parse_query_with(
+            let parsed = parse_query_with(
                 "doc rep",
                 ParseOptions {
                     match_path,
+                    ordered_terms: ordered,
                     term_match: TermMatch::WordStart,
                     ..ParseOptions::default()
                 },
             )
             .unwrap();
-            if ordered {
-                parsed.order_terms(TermMatch::WordStart);
-            }
             let parsed = CompiledQuery::new(&parsed).unwrap();
             let total =
                 run_query(&idx, r"C:\", &parsed, None, SortSpec::default(), Some(100)).total;

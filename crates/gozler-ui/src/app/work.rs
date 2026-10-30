@@ -77,6 +77,7 @@ pub(super) enum Surface {
 pub(super) enum Awaited {
     Request(Purpose),
     Selection(List),
+    Matching(Side),
     Shell(ShellPurpose),
     Paths(PathPurpose),
     Clipboard,
@@ -227,6 +228,7 @@ impl Work {
         match awaited {
             Awaited::Request(purpose) => self.requests.cancel(purpose),
             Awaited::Selection(list) => self.lists.cancel_selection(list),
+            Awaited::Matching(side) => self.panels.cancel_matching(side),
             Awaited::Shell(purpose) => self.shell.cancel(purpose),
             Awaited::Paths(purpose) => self.operations.cancel_paths(purpose),
             Awaited::Clipboard => self.clipboard.cancel(),

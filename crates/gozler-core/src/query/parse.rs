@@ -195,7 +195,9 @@ pub enum Test {
     NameStart(String),
     /// The full path starts with this text. From protocol 7.
     PathStart(String),
-    /// Positive text terms in their typed order, without overlapping matches.
+    /// Positive bare literal terms in their typed order, without overlapping
+    /// matches. [`TermMatch::NameStart`] anchors the first term and matches
+    /// later terms at word starts; the other modes apply to every term.
     Ordered {
         terms: Vec<String>,
         term_match: TermMatch,
@@ -219,56 +221,6 @@ pub enum Test {
 }
 
 impl ParsedQuery {
-    /// Keeps positive literal terms in order. Path terms retain their
-    /// individual clauses for the path-component prefilters.
-    pub fn order_terms(&mut self, term_match: TermMatch) {
-        for match_path in [false, true] {
-            let mut positions = Vec::new();
-            let terms: Vec<_> = self
-                .clauses
-                .iter()
-                .enumerate()
-                .filter_map(|(index, clause)| {
-                    let [
-                        Term {
-                            negated: false,
-                            test,
-                        },
-                    ] = clause.terms.as_slice()
-                    else {
-                        return None;
-                    };
-                    match (test, term_match, match_path) {
-                        (Test::Name(text), TermMatch::Anywhere, false)
-                        | (Test::Path(text), TermMatch::Anywhere, true)
-                        | (Test::NameWordStart(text), TermMatch::WordStart, false)
-                        | (Test::PathWordStart(text), TermMatch::WordStart, true)
-                        | (Test::NameWholeWord(text), TermMatch::WholeWords, false)
-                        | (Test::PathWholeWord(text), TermMatch::WholeWords, true)
-                        | (Test::NameStart(text), TermMatch::NameStart, false)
-                        | (Test::PathStart(text), TermMatch::NameStart, true) => {
-                            positions.push(index);
-                            Some(text.clone())
-                        }
-                        _ => None,
-                    }
-                })
-                .collect();
-            if terms.len() > 1 {
-                if !match_path {
-                    for index in positions.into_iter().rev() {
-                        self.clauses.remove(index);
-                    }
-                }
-                self.clauses.push(Clause::single(Test::Ordered {
-                    terms,
-                    term_match,
-                    match_path,
-                }));
-            }
-        }
-    }
-
     /// Whether a term tests the size or a date, so an answer from a volume
     /// whose sizes and dates could not be read may leave files out.
     pub fn tests_size_or_date(&self) -> bool {
@@ -556,6 +508,9 @@ pub struct ParseOptions<'a> {
     /// Wildcards without a separator test the name even with `match_path`.
     /// Explicit `path:` patterns keep testing the full path.
     pub name_wildcards: bool,
+    /// Positive literal words without a separator match in typed order.
+    /// Search functions, negated terms and alternatives keep their meanings.
+    pub ordered_terms: bool,
     /// How text terms without a wildcard match: es `-ww` asks for whole
     /// words, as `ww:` values match, and the window passes its match mode.
     pub term_match: TermMatch,
@@ -629,6 +584,7 @@ pub fn parse_query_with(input: &str, options: ParseOptions) -> Result<ParsedQuer
         .unwrap_or(options.match_case);
 
     let mut clauses = Vec::new();
+    let mut ordered = Vec::new();
     let mut kind = None;
     let mut size = None;
     let mut ext = None;
@@ -641,7 +597,27 @@ pub fn parse_query_with(input: &str, options: ParseOptions) -> Result<ParsedQuer
         ] = group.as_slice()
         {
             match operand(word, &options)? {
-                Operand::Text(test) => clauses.push(Clause::single(test)),
+                Operand::Text(test) => {
+                    if options.ordered_terms
+                        && function_parts(word).is_none()
+                        && !word.text.contains(['\\', '/'])
+                        && matches!(
+                            test,
+                            Test::Name(_)
+                                | Test::Path(_)
+                                | Test::NameWordStart(_)
+                                | Test::PathWordStart(_)
+                                | Test::NameWholeWord(_)
+                                | Test::PathWholeWord(_)
+                                | Test::NameStart(_)
+                                | Test::PathStart(_)
+                        )
+                    {
+                        ordered.push(word.text.clone());
+                    } else {
+                        clauses.push(Clause::single(test));
+                    }
+                }
                 Operand::Kind(new_kind, text) => {
                     kind = Some(new_kind);
                     clauses.extend(text.map(Clause::single));
@@ -683,6 +659,22 @@ pub fn parse_query_with(input: &str, options: ParseOptions) -> Result<ParsedQuer
         clauses.extend(any_of(alternatives)?);
     }
 
+    if ordered.len() == 1 {
+        clauses.extend(
+            text_of(
+                ordered.pop().expect("one ordered word remains"),
+                options.match_path,
+                Form::Text(options.term_match),
+            )
+            .map(Clause::single),
+        );
+    } else if !ordered.is_empty() {
+        clauses.push(Clause::single(Test::Ordered {
+            terms: ordered,
+            term_match: options.term_match,
+            match_path: options.match_path,
+        }));
+    }
     clauses.extend(kind.map(|kind| Clause::single(Test::Kind(kind))));
     clauses.extend(size.map(|range| Clause::single(Test::Size(range))));
     let ext_terms = ext.map(Extensions::terms).unwrap_or_default();
@@ -1731,6 +1723,32 @@ mod tests {
         assert_eq!(
             tests_with(r"para docs\ag", options(TermMatch::NameStart, true)),
             [Test::PathStart("para".to_string()), path(r"docs\ag")]
+        );
+    }
+
+    #[test]
+    fn ordered_words_leave_functions_and_explicit_paths_independent() {
+        assert_eq!(
+            tests_with(
+                r"ww:para wordstart:50 startwith:par C:\docs para 50",
+                ParseOptions {
+                    match_path: true,
+                    ordered_terms: true,
+                    term_match: TermMatch::WordStart,
+                    ..ParseOptions::default()
+                },
+            ),
+            [
+                Test::PathWholeWord("para".into()),
+                Test::PathWordStart("50".into()),
+                Test::PathStart("par".into()),
+                path(r"C:\docs"),
+                Test::Ordered {
+                    terms: vec!["para".into(), "50".into()],
+                    term_match: TermMatch::WordStart,
+                    match_path: true,
+                },
+            ]
         );
     }
 

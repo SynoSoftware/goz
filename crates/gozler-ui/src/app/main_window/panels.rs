@@ -899,6 +899,7 @@ impl Panels {
         window.created().work.borrow_mut().folders.stop_all();
         window.model.borrow_mut().panels_mut().stop_reading();
         for side in Side::BOTH {
+            window.cancel_matching_selection(List::Panel(side));
             let dropped = {
                 let mut model = window.model.borrow_mut();
                 let search = model.panels_mut().search_mut(side);
@@ -947,6 +948,7 @@ impl Panels {
 
     pub(super) fn read(&self, window: &MainWindow, side: Side, ask: Option<ReadAsk>) {
         if let Some(ask) = ask {
+            window.cancel_matching_selection(List::Panel(side));
             window.created().work.borrow_mut().folders.read(side, ask);
             window.retire_model();
             self.show_panel(window, side);
@@ -2263,7 +2265,13 @@ impl Panels {
     /// `Num +` and `Num -`: the mask, then the entries of `side`'s folder that
     /// it matches are selected, or unselected when not `select`
     /// (DESIGN.md: Selecting entries).
-    pub(super) fn select_files(&self, window: &MainWindow, hwnd: Hwnd, side: Side, select: bool) {
+    pub(super) fn select_matching(
+        &self,
+        window: &MainWindow,
+        hwnd: Hwnd,
+        side: Side,
+        select: bool,
+    ) {
         let dialog = SelectFiles::new(&self.select_mask.borrow());
         let id = if select {
             DialogId::SelectFiles
@@ -2277,30 +2285,22 @@ impl Panels {
             return;
         };
         self.select_mask.replace(text);
-        let input = {
-            let model = window.model.borrow();
-            model
-                .panels()
-                .select_matching(side, mask, select, model.choices().select_folders)
-        };
-        if let Some(input) = input {
-            window
-                .created()
-                .work
-                .borrow_mut()
-                .panels
-                .select(side, input);
-        }
+        let folders = window.model.borrow().choices().select_folders;
+        window.start_matching_selection(side, mask, select, folders);
     }
 
     pub(super) fn show_matching(
         &self,
         window: &MainWindow,
         side: Side,
+        id: crate::core::work::Id,
         answer: crate::core::panel::Selected,
     ) {
-        self.read_selection(window, side, false);
-        let shown = self.place(window, side);
+        if !window.matching_selection_current(side, id) {
+            window.reject_matching_selection(side, id, answer);
+            return;
+        }
+        let shown = window.model.borrow().panels().place(side);
         let place = window
             .model
             .borrow_mut()
@@ -2308,6 +2308,8 @@ impl Panels {
             .accept_matching(side, answer);
         if let Some(place) = place {
             self.show_place(window, side, &shown, &place, Scroll::Keep, false);
+        } else {
+            window.cancel_matching_selection(List::Panel(side));
         }
         window.retire_model();
     }

@@ -393,6 +393,53 @@ impl CompiledQuery {
                 components.push(matcher);
             }
         }
+        // Ordered path words imply these component checks. They are scan
+        // prefilters, not extra terms in the request or its term budget.
+        let mut prefilters = Vec::new();
+        for clause in &clauses {
+            let [
+                CompiledTerm {
+                    negated: false,
+                    check: Check::Text(Target::Path, Matcher::Ordered { terms, term_match }),
+                    ..
+                },
+            ] = clause.terms.as_slice()
+            else {
+                continue;
+            };
+            for (index, finder) in terms.iter().enumerate() {
+                if components.len() == MAX_COMPONENT_TERMS {
+                    break;
+                }
+                let matcher = match term_match {
+                    TermMatch::Anywhere => Matcher::Contains(finder.clone()),
+                    TermMatch::WholeWords => Matcher::WholeWord(finder.clone()),
+                    TermMatch::NameStart if index == 0 => Matcher::Start(finder.needle().to_vec()),
+                    TermMatch::WordStart | TermMatch::NameStart
+                        if is_word(crate::wtf8::CodePoints::new(finder.needle()).next()) =>
+                    {
+                        Matcher::WordStart(finder.clone())
+                    }
+                    TermMatch::WordStart | TermMatch::NameStart => {
+                        Matcher::Contains(finder.clone())
+                    }
+                };
+                if matcher.component_needle().is_none() && !matcher.is_first_component_start() {
+                    continue;
+                }
+                let bit = u8::try_from(components.len())
+                    .expect("at most MAX_COMPONENT_TERMS component terms");
+                components.push(matcher);
+                prefilters.push(CompiledClause {
+                    terms: vec![CompiledTerm {
+                        negated: false,
+                        check: Check::Component(bit),
+                        through: None,
+                    }],
+                });
+            }
+        }
+        clauses.extend(prefilters);
         let mut component_literal: Option<(u8, &[u8])> = None;
         for clause in &clauses {
             if let [term] = clause.terms.as_slice()
@@ -893,7 +940,7 @@ impl Matcher {
     /// Whether this is a start without a separator, which the first
     /// component of a full path decides: the path starts with the text
     /// exactly when that component does, because the `\` after it is in no
-    /// such text. So with Match path, each word of Start of name, a
+    /// such text. So with Match path, the first word of Start of name, or a
     /// `startwith:` of the full path, needs no path.
     fn is_first_component_start(&self) -> bool {
         matches!(self, Matcher::Start(start) if !start.contains(&b'\\'))
@@ -948,7 +995,7 @@ impl Matcher {
     ) {
         let found = |finder: &memmem::Finder, accept: fn(&Occurrence) -> bool| {
             let len = finder.needle().len();
-            occurrences(finder, text)
+            occurrences(finder, text, 0)
                 .filter(accept)
                 .map(move |o| o.start..o.start + len)
                 .collect::<Vec<_>>()
@@ -981,18 +1028,15 @@ fn ordered_parts(
     mut matched: impl FnMut(Range<usize>),
 ) -> bool {
     let mut from = 0;
-    for finder in terms {
-        let occurrence = occurrences(finder, text).find(|occurrence| {
-            occurrence.start >= from
-                && match term_match {
-                    TermMatch::Anywhere => true,
-                    TermMatch::WholeWords => occurrence.is_whole_word(),
-                    TermMatch::WordStart => {
-                        !is_word(crate::wtf8::CodePoints::new(finder.needle()).next())
-                            || occurrence.is_word_start()
-                    }
-                    TermMatch::NameStart => occurrence.start == 0,
-                }
+    for (index, finder) in terms.iter().enumerate() {
+        let occurrence = occurrences(finder, text, from).find(|occurrence| match term_match {
+            TermMatch::Anywhere => true,
+            TermMatch::WholeWords => occurrence.is_whole_word(),
+            TermMatch::NameStart if index == 0 => occurrence.start == 0,
+            TermMatch::WordStart | TermMatch::NameStart => {
+                !is_word(crate::wtf8::CodePoints::new(finder.needle()).next())
+                    || occurrence.is_word_start()
+            }
         });
         let Some(occurrence) = occurrence else {
             return false;
@@ -1009,14 +1053,14 @@ fn ordered_parts(
 /// included, ends a word; letters and digits outside ASCII are word
 /// characters too.
 fn contains_whole_word(finder: &memmem::Finder, text: &[u8]) -> bool {
-    occurrences(finder, text).any(|o| o.is_whole_word())
+    occurrences(finder, text, 0).any(|o| o.is_whole_word())
 }
 
 /// Whether `text` contains the finder's needle where a word starts: at the
 /// start of `text`, or after a character that is not a letter or digit, as
 /// [`contains_whole_word`] reads a word.
 fn contains_at_word_start(finder: &memmem::Finder, text: &[u8]) -> bool {
-    occurrences(finder, text).any(|o| o.is_word_start())
+    occurrences(finder, text, 0).any(|o| o.is_word_start())
 }
 
 /// Whether a code point is a letter or a digit; `None`, the edge of the
@@ -1052,14 +1096,14 @@ fn last_code_point(bytes: &[u8]) -> Option<u32> {
     crate::wtf8::CodePoints::new(&tail[lead..]).next()
 }
 
-/// Each occurrence of the finder's needle in `text`, overlapping ones
-/// included.
+/// Each occurrence of the finder's needle at or after `from` in `text`,
+/// overlapping ones included, with boundaries read from the whole text.
 fn occurrences<'a>(
     finder: &'a memmem::Finder,
     text: &'a [u8],
+    mut from: usize,
 ) -> impl Iterator<Item = Occurrence> + 'a {
     use crate::wtf8::CodePoints;
-    let mut from = 0;
     std::iter::from_fn(move || {
         let start = from + finder.find(text.get(from..)?)?;
         let end = start + finder.needle().len();
@@ -1603,8 +1647,7 @@ fn scan<'q, 'i>(
     seen_by: &'i SeenBy,
 ) -> Scan<'q, 'i> {
     let mut scan = Scan::new(index, mount_prefix, query, seen_by);
-    // A start that the root's name fails, as each word of Start of name
-    // with Match path does on every volume, matches nothing here.
+    // A start that the root's name fails matches nothing on this volume.
     let root = root_name(mount_prefix);
     let root = if query.match_case {
         root.to_vec()
@@ -3072,6 +3115,7 @@ mod tests {
             "500mg paracetamol",
             "comparator 500mg paracetamol",
             "paracetamol",
+            "para50",
         ]
         .into_iter()
         .enumerate()
@@ -3081,16 +3125,16 @@ mod tests {
         idx.insert_enum(&enum_rec(frn(300), NTFS_ROOT_FRN, "Paracetamol", true));
         idx.insert_enum(&enum_rec(frn(301), frn(300), "500mg.txt", false));
         for match_path in [false, true] {
-            let mut query = parse_query_with(
+            let query = parse_query_with(
                 "para 50",
                 ParseOptions {
                     match_path,
+                    ordered_terms: true,
                     term_match: TermMatch::WordStart,
                     ..ParseOptions::default()
                 },
             )
             .unwrap();
-            query.order_terms(TermMatch::WordStart);
             let mut found = paths_of(&idx, query);
             found.sort();
             let expected = if match_path {
@@ -3100,9 +3144,86 @@ mod tests {
             };
             assert_eq!(found, expected);
         }
-        let mut query = parse_query("paracetamol paracetamol").unwrap();
-        query.order_terms(TermMatch::Anywhere);
+        let query = parse_query_with(
+            "paracetamol paracetamol",
+            ParseOptions {
+                ordered_terms: true,
+                ..ParseOptions::default()
+            },
+        )
+        .unwrap();
         assert!(paths_of(&idx, query).is_empty());
+    }
+
+    #[test]
+    fn ordered_prefixes_allow_gaps_and_span_folders_names_and_extensions() {
+        let mut index = sample_index();
+        index.insert_enum(&enum_rec(frn(200), NTFS_ROOT_FRN, "Paracetamol", true));
+        index.insert_enum(&enum_rec(frn(201), frn(200), "other words", true));
+        index.insert_enum(&enum_rec(frn(202), frn(201), "500 tablets.mg", false));
+        index.insert_enum(&enum_rec(
+            frn(203),
+            NTFS_ROOT_FRN,
+            "Paracetamol extra 500 tablets.mg",
+            false,
+        ));
+        index.insert_enum(&enum_rec(
+            frn(204),
+            NTFS_ROOT_FRN,
+            "other Paracetamol 500 tablets.mg",
+            false,
+        ));
+        for (term_match, match_path, text) in [
+            (TermMatch::WordStart, true, "para 50 mg"),
+            (TermMatch::NameStart, false, "para 50 mg"),
+            (TermMatch::NameStart, true, "c: para 50 mg"),
+        ] {
+            let parsed = parse_query_with(
+                text,
+                ParseOptions {
+                    term_match,
+                    match_path,
+                    ordered_terms: true,
+                    ..ParseOptions::default()
+                },
+            )
+            .unwrap();
+            let mut found = paths_of(&index, parsed);
+            found.sort();
+            let expected = if match_path {
+                vec![
+                    r"C:\Paracetamol extra 500 tablets.mg",
+                    r"C:\Paracetamol\other words\500 tablets.mg",
+                    r"C:\other Paracetamol 500 tablets.mg",
+                ]
+            } else {
+                vec![r"C:\Paracetamol extra 500 tablets.mg"]
+            };
+            assert_eq!(found, expected);
+        }
+    }
+
+    #[test]
+    fn ordered_words_use_the_semantic_term_limit() {
+        for match_path in [false, true] {
+            for count in [256, 257] {
+                let parsed = parse_query_with(
+                    &vec!["a"; count].join(" "),
+                    ParseOptions {
+                        match_path,
+                        ordered_terms: true,
+                        ..ParseOptions::default()
+                    },
+                )
+                .unwrap();
+                let result = CompiledQuery::new(&parsed);
+                if count == 256 {
+                    assert!(result.is_ok());
+                } else {
+                    assert_eq!(result.err(), Some(QueryError::TooManyTerms(257)));
+                }
+            }
+        }
     }
 
     #[test]
@@ -3116,17 +3237,16 @@ mod tests {
         ));
         idx.insert_enum(&enum_rec(frn(201), frn(100), "Paracetamol 500mg", false));
         let ordered = |text| {
-            let mut parsed = parse_query_with(
+            parse_query_with(
                 text,
                 ParseOptions {
                     match_path: true,
+                    ordered_terms: true,
                     term_match: TermMatch::WordStart,
                     ..ParseOptions::default()
                 },
             )
-            .unwrap();
-            parsed.order_terms(TermMatch::WordStart);
-            parsed
+            .unwrap()
         };
         assert_eq!(
             paths_of(&idx, ordered("para 50 !path:docs")),
@@ -3169,6 +3289,27 @@ mod tests {
         };
         let report = vec![r"C:\docs\sub\Report.PDF".to_string()];
         assert_eq!(found(r"proj\out\rep", None), report);
+        let parsed = parse_query_with(
+            r"proj\out\rep report",
+            ParseOptions {
+                match_path: true,
+                ordered_terms: true,
+                ..ParseOptions::default()
+            },
+        )
+        .unwrap();
+        let query = CompiledQuery::with_links(&parsed, &links, None).unwrap();
+        assert_eq!(
+            texts(&run_query(
+                &idx,
+                r"C:\",
+                &query,
+                None,
+                SortSpec::default(),
+                None
+            )),
+            report
+        );
         assert_eq!(found(r"proj\out\rep other\via\rep", None), report);
         assert!(found(r"proj\out\rep !other\via\rep", None).is_empty());
         assert!(found(r"proj\out\rep !C:\docs\", None).is_empty());
@@ -4450,13 +4591,13 @@ mod tests {
         }
 
         /// With -p, terms without a separator, negated or not, of AND and OR
-        /// clauses, in each match mode, and wildcards, which one name decides
-        /// only as `*a` or `*a*`, find exactly the entries whose full path,
-        /// built by walking to the root, passes them. The root's name `C:`
-        /// holds `c` and starts every path, a root mounted nowhere leaves the
-        /// path to start with the name below it, folders hold the matches
-        /// below them, and orphans have no path, so a component walk or a
-        /// test of the components that misses any of them fails.
+        /// clauses, ordered or not, in each match mode, and wildcards, which
+        /// one name decides only as `*a` or `*a*`, find exactly the entries
+        /// whose full path, built by walking to the root, passes them. The
+        /// root's name `C:` holds `c` and starts every path, a root mounted
+        /// nowhere leaves the path to start with the name below it, folders
+        /// hold the matches below them, and orphans have no path, so a
+        /// component walk or test that misses any of them fails.
         #[test]
         fn match_path_terms_agree_with_a_test_of_the_full_path(
             parents in prop::collection::vec(0usize..14, 1..80),
@@ -4469,6 +4610,7 @@ mod tests {
                 TermMatch::NameStart,
             ][..]),
             match_case: bool,
+            ordered_terms: bool,
             mount_prefix in prop::sample::select(&[r"C:\", ""][..]),
         ) {
             let mut idx = VolumeIndex::new(NTFS_ROOT_FRN);
@@ -4484,6 +4626,7 @@ mod tests {
                 match_case,
                 match_path: true,
                 term_match,
+                ordered_terms,
                 ..ParseOptions::default()
             };
             let parsed = parse_query_with(&query, options).unwrap();

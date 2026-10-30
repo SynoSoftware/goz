@@ -30,23 +30,20 @@ pub(crate) fn search(
     } else {
         (folder, None)
     };
-    let mut search = Search::new(&SearchInput {
+    Search::new(&SearchInput {
         text,
         text_match,
         match_case: matching.case,
         match_path: matching.path,
         name_wildcards: true,
+        ordered_terms: true,
         filters: &filters.clauses(),
         regexes: &[],
         scope,
         parent,
         working_dir: None,
         query_start,
-    })?;
-    if let TextMatch::Terms(term_match) = text_match {
-        search.query.order_terms(term_match);
-    }
-    Ok(search)
+    })
 }
 
 /// How the typed name terms match; one choice, because the modes exclude

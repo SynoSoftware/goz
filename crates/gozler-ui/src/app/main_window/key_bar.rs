@@ -97,8 +97,10 @@ impl KeyBar {
             };
             (0..KEY_BAR.len())
                 .map(|index| {
-                    commands::key_bar_item(index, self.alt.get())
-                        .is_some_and(|item| item.enabled(&state))
+                    commands::key_bar_item(index, self.alt.get()).is_some_and(|item| {
+                        item.enabled(&state)
+                            && !window.selection_command_disabled(state.list, item, state.focus)
+                    })
                 })
                 .collect()
         };

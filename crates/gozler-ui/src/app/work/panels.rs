@@ -3,7 +3,7 @@
 use crate::core::panel::{
     Calculated, Calculation, Counted, Counting, Finding, Found, Selected, Selecting, Side,
 };
-use crate::core::work::{Replacement, Retirement, Waiting};
+use crate::core::work::{Id, Replacement, Retirement, Waiting};
 use crate::win::wake::OpenWaker;
 use crate::win::work::Task;
 use std::time::Instant;
@@ -83,22 +83,27 @@ impl Work {
         self.retired.append(retired);
     }
 
-    pub(in crate::app) fn select(&mut self, side: Side, input: Selecting) {
+    pub(in crate::app) fn select(&mut self, side: Side, input: Selecting) -> Id {
         let task = &mut self.selecting[side.index()];
-        task.replace(input);
+        let id = task.replace(input);
         self.retired.append(task.take_retired());
+        id
     }
 
-    pub(in crate::app) fn take_selected(&mut self) -> Vec<(Side, Selected)> {
+    pub(in crate::app) fn take_selected(&mut self) -> Vec<(Side, Id, Selected)> {
         let mut answers = Vec::new();
         for side in Side::BOTH {
             let task = &mut self.selecting[side.index()];
-            if let Some((_, answer)) = task.take() {
-                answers.push((side, answer));
+            if let Some((id, answer)) = task.take() {
+                answers.push((side, id, answer));
             }
             self.retired.append(task.take_retired());
         }
         answers
+    }
+
+    pub(in crate::app) fn cancel_matching(&mut self, side: Side) {
+        self.selecting[side.index()].cancel();
     }
 
     pub(in crate::app) fn find(&mut self, side: Side, input: Finding) {

@@ -30,6 +30,8 @@ pub struct SearchInput<'a> {
     /// Wildcards without a separator test the name; `path:` still tests
     /// the full path.
     pub name_wildcards: bool,
+    /// Positive literal words match in typed order, as in the window.
+    pub ordered_terms: bool,
     /// More query texts, such as the window's filters, each parsed on its
     /// own and every clause added to the text's, so neither can change what
     /// the other means: an unclosed `"` or a trailing `|` in the text stays
@@ -71,6 +73,7 @@ impl Search {
                 match_case: input.match_case,
                 match_path: input.match_path,
                 name_wildcards: input.name_wildcards,
+                ordered_terms: input.ordered_terms,
                 term_match,
                 working_dir: input.working_dir,
                 query_start: Some(input.query_start),
@@ -134,6 +137,7 @@ mod tests {
             match_case: false,
             match_path: false,
             name_wildcards: false,
+            ordered_terms: false,
             filters: &["ext:pdf".to_owned()],
             regexes: &[],
             scope: None,
@@ -163,6 +167,7 @@ mod tests {
                 match_case: true,
                 match_path: false,
                 name_wildcards: false,
+                ordered_terms: false,
                 filters: &[],
                 regexes: &[],
                 scope: None,
