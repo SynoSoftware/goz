@@ -30,9 +30,10 @@ use windows::Win32::Graphics::Dwm::{
 use windows::Win32::Graphics::Gdi::{
     BI_RGB, BITMAPINFO, BITMAPINFOHEADER, BitBlt, ClientToScreen, CombineRgn, CreateCompatibleDC,
     CreateDIBSection, CreateRectRgn, CreateRoundRectRgn, DIB_RGB_COLORS, DeleteDC, DeleteObject,
-    GdiFlush, GetDC, GetUpdateRect, GetUpdateRgn, HBITMAP, HGDIOBJ, MapWindowPoints,
-    RDW_ALLCHILDREN, RDW_ERASE, RDW_FRAME, RDW_INVALIDATE, RDW_UPDATENOW, REDRAW_WINDOW_FLAGS,
-    RGN_DIFF, RedrawWindow, ReleaseDC, SRCCOPY, SelectObject, SetWindowRgn, UpdateWindow,
+    GdiFlush, GetDC, GetUpdateRect, GetUpdateRgn, HBITMAP, HGDIOBJ, InvalidateRect,
+    MapWindowPoints, RDW_ALLCHILDREN, RDW_ERASE, RDW_FRAME, RDW_INVALIDATE, RDW_UPDATENOW,
+    REDRAW_WINDOW_FLAGS, RGN_DIFF, RedrawWindow, ReleaseDC, SRCCOPY, SelectObject, SetWindowRgn,
+    UpdateWindow,
 };
 use windows::Win32::System::Performance::{QueryPerformanceCounter, QueryPerformanceFrequency};
 use windows::Win32::System::Threading::GetCurrentThreadId;
@@ -565,12 +566,12 @@ fn is_shown_in_main(window: Hwnd) -> bool {
     main.is_some_and(|main| unsafe { GetAncestor(window.0, GA_ROOT) } == main.window.0)
 }
 
-/// Runs `scroll`, a native message that scrolls `list`, and paints the
-/// list at once. A list copies its rows on the screen inside the message,
-/// even while its drawing is off, so the rows it uncovers paint now too,
-/// instead of a frame or two later, when the update ends.
+/// Invalidates before scrolling to prevent corrupt text during repeated
+/// partial-page scrolls, even with native double buffering.
 pub(crate) fn scroll_now<T>(list: Hwnd, scroll: impl FnOnce() -> T) -> T {
     release(list);
+    // SAFETY: plain values.
+    let _ = unsafe { InvalidateRect(Some(list.0), None, false) };
     let result = scroll();
     // SAFETY: plain values.
     let _ = unsafe { UpdateWindow(list.0) };
