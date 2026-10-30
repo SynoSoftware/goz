@@ -244,13 +244,13 @@ impl SettingsBridge {
         }
     }
 
-    pub(in crate::app) fn open_repository(&self, window: &MainWindow) {
+    pub(in crate::app) fn open_link(&self, window: &MainWindow, target: ShellTarget) {
         window
             .created()
             .work
             .borrow_mut()
             .shell
-            .open(ShellTarget::Repository, window.work_surface());
+            .open(target, window.work_surface());
         self.post_settings_reply();
     }
 

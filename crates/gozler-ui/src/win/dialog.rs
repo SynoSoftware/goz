@@ -46,9 +46,9 @@ const DWLP_USER: WINDOW_LONG_PTR_INDEX = WINDOW_LONG_PTR_INDEX(2 * size_of::<isi
 /// `DWLP_MSGRESULT`: the dialog's answer to the message it handled.
 const DWLP_MSGRESULT: WINDOW_LONG_PTR_INDEX = WINDOW_LONG_PTR_INDEX(0);
 
-/// The private message that tells a dialog that the main window holds a
-/// reply for it ([`DialogMessage::Reply`]).
-const REPLY: u32 = super::wake::WAKE + 6;
+/// The private message that tells a dialog a reply is ready
+/// ([`DialogMessage::Reply`]).
+pub(crate) const REPLY: u32 = super::wake::WAKE + 6;
 
 /// A dialog message decoded for its handler.
 pub(crate) enum DialogMessage {

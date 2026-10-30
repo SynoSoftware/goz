@@ -413,11 +413,16 @@
   },
   "about": {
     "title": "About",
-    "version": "Gozler {0}",
+    "version": "Version {0}",
     "service": "Service {0}",
     "service_unknown": "Service not connected",
-    "description": "Find files instantly. Copy, move and delete them blazingly fast.\n\nFree and open source, for Windows 10 and 11.",
-    "copyright": "© 2026 Synapse N.V.\nBased on goz. MIT License."
+    "description": "Find files instantly.\nCopy, move and delete them blazingly fast.\n\nFree and open source, for Windows 10 and 11.",
+    "copyright": "© 2026 Synapse N.V.",
+    "publisher": "Made by Synapse N.V.",
+    "source": "Open source",
+    "source_link": "View source on GitHub",
+    "license": "MIT License",
+    "credits": "Credits"
   },
   "service_report": {
     "title": "Service report",

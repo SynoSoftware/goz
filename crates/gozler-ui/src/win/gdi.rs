@@ -87,8 +87,7 @@ impl Font {
         Font::from_logfont(&logfont(hwnd.font())?)
     }
 
-    /// This font in semibold, as Settings' page headings and the About
-    /// dialog's version are.
+    /// This font in semibold, as Settings' section headings are.
     pub(crate) fn semibold(&self) -> windows::core::Result<Font> {
         let mut logfont = logfont(self.0)?;
         logfont.lfWeight = FW_SEMIBOLD.0 as i32;
@@ -124,7 +123,7 @@ impl Font {
         self.0
     }
 
-    fn from_logfont(logfont: &LOGFONTW) -> windows::core::Result<Font> {
+    pub(super) fn from_logfont(logfont: &LOGFONTW) -> windows::core::Result<Font> {
         // SAFETY: `logfont` is a complete LOGFONTW.
         let font = unsafe { CreateFontIndirectW(logfont) };
         if font.is_invalid() {

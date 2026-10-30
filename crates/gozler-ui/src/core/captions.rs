@@ -240,9 +240,12 @@ impl CaptionTable {
                 title: "about.title",
                 keyed: &[],
                 plain: &[
+                    (Control(C::AboutName), "window.title"),
                     (Control(C::AboutDescription), "about.description"),
                     (Control(C::AboutCopyright), "about.copyright"),
-                    (Cancel, "button.close"),
+                    (Control(C::AboutClose), "button.close"),
+                    (Control(C::AboutCredits), "about.credits"),
+                    (Cancel, "button.ok"),
                 ],
             },
             DialogId::SearchSyntax => CaptionTable {

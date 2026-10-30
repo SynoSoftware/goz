@@ -36,20 +36,21 @@ BEGIN
     END
 END
 
-// About Gozler: the icon, the window's version, the service's version, what
-// Gozler is, the copyright and the repository link. The description and the
-// copyright leave room for longer translations.
-IDD_ABOUT DIALOGEX 0, 0, 240, 135
-STYLE DS_SHELLFONT | DS_MODALFRAME | DS_CENTER | WS_POPUP | WS_CAPTION | WS_SYSMENU
+IDD_ABOUT DIALOGEX 0, 0, 514, 224
+STYLE DS_SHELLFONT | DS_CENTER | WS_POPUP | WS_CAPTION | WS_THICKFRAME | WS_SYSMENU
 FONT 9, "Segoe UI", 400, 0, 0x1
 BEGIN
-    ICON            IDI_GOZLER, IDC_ABOUT_ICON, 7, 7, 21, 20
-    LTEXT           "", IDC_ABOUT_VERSION, 36, 7, 197, 8, SS_NOPREFIX
-    LTEXT           "", IDC_ABOUT_SERVICE, 36, 15, 197, 8, SS_NOPREFIX
-    LTEXT           "", IDC_ABOUT_DESCRIPTION, 36, 23, 197, 40, SS_NOPREFIX
-    LTEXT           "", IDC_ABOUT_COPYRIGHT, 36, 67, 197, 24, SS_NOPREFIX
-    CONTROL         "", IDC_ABOUT_LINK, "SysLink", WS_TABSTOP, 36, 95, 197, 8
-    DEFPUSHBUTTON   "", IDCANCEL, 183, 114, 50, 14
+    CONTROL         "", IDC_ABOUT_ICON, "Static", SS_OWNERDRAW, 0, 0, 1, 1
+    CONTROL         "", IDC_ABOUT_NAME, "Static", SS_OWNERDRAW, 0, 0, 1, 1
+    CONTROL         "", IDC_ABOUT_DESCRIPTION, "Static", SS_OWNERDRAW, 0, 0, 1, 1
+    CONTROL         "", IDC_ABOUT_VERSION, "Static", SS_OWNERDRAW, 0, 0, 1, 1
+    CONTROL         "", IDC_ABOUT_SERVICE, "Static", SS_OWNERDRAW, 0, 0, 1, 1
+    CONTROL         "", IDC_ABOUT_COPYRIGHT, "Static", SS_OWNERDRAW, 0, 0, 1, 1
+    CONTROL         "", IDC_ABOUT_COMPANY, "Button", BS_OWNERDRAW | WS_TABSTOP, 0, 0, 1, 1
+    CONTROL         "", IDC_ABOUT_LINK, "Button", BS_OWNERDRAW | WS_TABSTOP, 0, 0, 1, 1
+    CONTROL         "", IDC_ABOUT_CREDITS, "Button", BS_OWNERDRAW | WS_TABSTOP, 0, 0, 1, 1
+    CONTROL         "", IDC_ABOUT_CLOSE, "Button", BS_OWNERDRAW | WS_TABSTOP, 0, 0, 1, 1
+    CONTROL         "", IDCANCEL, "Button", BS_OWNERDRAW | WS_TABSTOP, 0, 0, 1, 1
 END
 
 // Search syntax: the search terms, the search functions and the attribute

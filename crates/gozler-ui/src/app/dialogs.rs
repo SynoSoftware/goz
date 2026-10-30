@@ -4,7 +4,7 @@
 //! sets its fixed captions from `core::captions::CaptionTable`.
 
 use super::main_window::MainWindow;
-use super::work::REPOSITORY;
+use super::work::{ShellTarget, Transparency};
 use crate::core::captions::DialogItem;
 use crate::core::ids::ControlId;
 use crate::core::query::{DateRange, DateRangeError, Day, SizeRange, SizeRangeError, SizeUnit};
@@ -23,6 +23,10 @@ pub(super) struct About<'a> {
     main: &'a MainWindow,
     version: String,
     service: String,
+    company: String,
+    source: String,
+    surface: OnceCell<win::about::Surface>,
+    transparency: RefCell<Option<Transparency>>,
 }
 
 impl<'a> About<'a> {
@@ -40,52 +44,94 @@ impl<'a> About<'a> {
                 Some(version) => strings.format("about.service", &[version]),
                 None => strings.text("about.service_unknown").to_owned(),
             },
+            company: format!(
+                "{}\n{}",
+                strings.text("about.publisher"),
+                ShellTarget::Company
+                    .address()
+                    .trim_start_matches("https://")
+            ),
+            source: format!(
+                "{}\n{} · {}",
+                strings.text("about.source"),
+                strings.text("about.source_link"),
+                strings.text("about.license")
+            ),
+            surface: OnceCell::new(),
+            transparency: RefCell::new(None),
         }
     }
 }
 
 impl DialogProc for About<'_> {
     fn init(&self, dialog: Hwnd) -> Opened {
-        let mut fonts = Vec::new();
-        if let Some(version) = dialog::item(dialog, ControlId::AboutVersion.id()) {
-            version.set_text(&self.version);
-            if let Ok(font) = Font::of(version).and_then(|font| font.semibold()) {
-                version.set_font(&font);
-                fonts.push(font);
+        for (id, text) in [
+            (ControlId::AboutVersion, &self.version),
+            (ControlId::AboutService, &self.service),
+            (ControlId::AboutCompany, &self.company),
+            (ControlId::AboutLink, &self.source),
+        ] {
+            if let Some(control) = dialog::item(dialog, id.id()) {
+                control.set_text(text);
             }
         }
-        if let Some(service) = dialog::item(dialog, ControlId::AboutService.id()) {
-            service.set_text(&self.service);
+        match win::about::Surface::attach(dialog) {
+            Ok(surface) => {
+                let _ = self.surface.set(surface);
+                *self.transparency.borrow_mut() = Some(Transparency::new(
+                    win::wake::OpenWaker::posting(dialog, dialog::REPLY),
+                ));
+            }
+            Err(_) => dialog::end(dialog, DialogEnd::Cancel),
         }
-        // The address is not translated, so it is the link's text.
-        let address = REPOSITORY.trim_start_matches("https://");
-        if let Some(link) = dialog::item(dialog, ControlId::AboutLink.id()) {
-            link.set_text(&format!("<a>{address}</a>"));
-        }
-        // Close starts with the focus, so Enter closes the dialog instead
-        // of opening the link.
         Opened {
             focus: DialogItem::Cancel.id(),
-            fonts,
+            fonts: Vec::new(),
         }
     }
 
-    fn message(&self, _dialog: Hwnd, message: DialogMessage) -> bool {
+    fn message(&self, dialog: Hwnd, message: DialogMessage) -> bool {
         match message {
-            DialogMessage::LinkActivated { id } if id == ControlId::AboutLink.id() => {
-                self.main.settings.open_repository(self.main);
+            DialogMessage::Reply => {
+                if let Some(enabled) = self
+                    .transparency
+                    .borrow_mut()
+                    .as_mut()
+                    .and_then(Transparency::take)
+                    && let Some(surface) = self.surface.get()
+                {
+                    surface.set_transparency(enabled);
+                }
+                true
+            }
+            DialogMessage::Command { id, .. } => {
+                let target = match id {
+                    id if id == ControlId::AboutCompany.id() => ShellTarget::Company,
+                    id if id == ControlId::AboutLink.id() => ShellTarget::Repository,
+                    id if id == ControlId::AboutCredits.id() => ShellTarget::Credits,
+                    id if id == ControlId::AboutClose.id() => {
+                        dialog::end(dialog, DialogEnd::Cancel);
+                        return true;
+                    }
+                    _ => return false,
+                };
+                self.main.settings.open_link(self.main, target);
                 true
             }
             DialogMessage::LinkActivated { .. }
             | DialogMessage::DoubleClicked { .. }
-            | DialogMessage::Command { .. }
             | DialogMessage::Edited { .. }
             | DialogMessage::Timer { .. }
-            | DialogMessage::Reply
             | DialogMessage::Tree { .. }
             | DialogMessage::Focus { .. }
             | DialogMessage::KeysCaptured { .. }
             | DialogMessage::Other => false,
+        }
+    }
+
+    fn closed(&self, _dialog: Hwnd) {
+        if let Some(transparency) = self.transparency.borrow_mut().as_mut() {
+            transparency.close();
         }
     }
 }

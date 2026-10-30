@@ -6,6 +6,7 @@
 //! A handle is a plain value here. A Win32 call on a stale handle fails or
 //! does nothing, so a safe wrapper over one is sound.
 
+pub(crate) mod about;
 pub(crate) mod accounts;
 pub(crate) mod clipboard;
 pub(crate) mod controls;

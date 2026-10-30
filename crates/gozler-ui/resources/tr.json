@@ -413,11 +413,16 @@
   },
   "about": {
     "title": "Hakkında",
-    "version": "Gozler {0}",
+    "version": "Sürüm {0}",
     "service": "Hizmet {0}",
     "service_unknown": "Hizmet bağlı değil",
     "description": "Dosyaları anında bulun. Yıldırım hızıyla kopyalayın, taşıyın ve silin.\n\nWindows 10 ve 11 için ücretsiz ve açık kaynaklıdır.",
-    "copyright": "© 2026 Synapse N.V.\ngoz temel alınmıştır. MIT lisansı."
+    "copyright": "© 2026 Synapse N.V.",
+    "publisher": "Synapse N.V. tarafından geliştirildi",
+    "source": "Açık kaynak",
+    "source_link": "Kaynak kodunu GitHub’da görüntüle",
+    "license": "MIT lisansı",
+    "credits": "Katkıda bulunanlar"
   },
   "service_report": {
     "title": "Hizmet raporu",

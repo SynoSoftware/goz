@@ -413,11 +413,16 @@
   },
   "about": {
     "title": "Over",
-    "version": "Gozler {0}",
+    "version": "Versie {0}",
     "service": "Service {0}",
     "service_unknown": "Service niet verbonden",
     "description": "Vind bestanden direct. Kopieer, verplaats en verwijder ze razendsnel.\n\nGratis en open source, voor Windows 10 en 11.",
-    "copyright": "© 2026 Synapse N.V.\nGebaseerd op goz. MIT-licentie."
+    "copyright": "© 2026 Synapse N.V.",
+    "publisher": "Gemaakt door Synapse N.V.",
+    "source": "Open source",
+    "source_link": "Broncode bekijken op GitHub",
+    "license": "MIT-licentie",
+    "credits": "Credits"
   },
   "service_report": {
     "title": "Servicerapport",

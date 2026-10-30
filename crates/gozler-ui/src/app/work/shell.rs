@@ -19,6 +19,8 @@ use std::time::Instant;
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(in crate::app) enum ShellTarget {
     Repository,
+    Company,
+    Credits,
     Services,
 }
 
@@ -26,6 +28,11 @@ impl ShellTarget {
     pub(in crate::app) fn address(self) -> &'static str {
         match self {
             Self::Repository => REPOSITORY,
+            Self::Company => "https://synapse.sr",
+            Self::Credits => concat!(
+                env!("CARGO_PKG_REPOSITORY"),
+                "/blob/main/ACKNOWLEDGMENTS.md"
+            ),
             Self::Services => "services.msc",
         }
     }
@@ -109,8 +116,13 @@ impl Work {
                     [Surface::Main, Surface::Settings]
                         .into_iter()
                         .flat_map(|surface| {
-                            [ShellTarget::Repository, ShellTarget::Services]
-                                .map(|target| ShellPurpose::Target(surface, target))
+                            [
+                                ShellTarget::Repository,
+                                ShellTarget::Company,
+                                ShellTarget::Credits,
+                                ShellTarget::Services,
+                            ]
+                            .map(|target| ShellPurpose::Target(surface, target))
                         }),
                 )
                 .chain([ShellPurpose::Setup])

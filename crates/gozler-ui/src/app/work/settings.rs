@@ -19,6 +19,32 @@ struct Save {
     report_failure: bool,
 }
 
+pub(in crate::app) struct Transparency {
+    delivery: OpenWaker,
+    read: Task<(), bool>,
+}
+
+impl Transparency {
+    pub(in crate::app) fn new(delivery: OpenWaker) -> Self {
+        let mut read = Task::new(delivery.clone(), Replacement::Cancel, |(), worker, _| {
+            crate::win::about::transparency(worker)
+        })
+        .background();
+        read.submit((), |_, new| new);
+        Self { delivery, read }
+    }
+
+    pub(in crate::app) fn take(&mut self) -> Option<bool> {
+        self.delivery.woken();
+        self.read.take().map(|(_, enabled)| enabled)
+    }
+
+    pub(in crate::app) fn close(&mut self) {
+        self.delivery.close();
+        self.read.cancel();
+    }
+}
+
 pub(in crate::app) struct Saved {
     pub(in crate::app) report_failure: bool,
     pub(in crate::app) result: io::Result<()>,

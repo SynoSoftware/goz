@@ -413,11 +413,16 @@
   },
   "about": {
     "title": "Acerca de",
-    "version": "Gozler {0}",
+    "version": "Versión {0}",
     "service": "Servicio {0}",
     "service_unknown": "Servicio no conectado",
     "description": "Encuentra archivos al instante. Cópialos, muévelos y elimínalos a una velocidad vertiginosa.\n\nGratis y de código abierto, para Windows 10 y 11.",
-    "copyright": "© 2026 Synapse N.V.\nBasado en goz. Licencia MIT."
+    "copyright": "© 2026 Synapse N.V.",
+    "publisher": "Creado por Synapse N.V.",
+    "source": "Código abierto",
+    "source_link": "Ver código fuente en GitHub",
+    "license": "Licencia MIT",
+    "credits": "Créditos"
   },
   "service_report": {
     "title": "Informe del servicio",

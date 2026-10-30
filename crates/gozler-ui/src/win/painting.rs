@@ -192,6 +192,13 @@ fn allowed(file: &str, function: &str) -> bool {
         // longer than a frame, appears in one step. No native control
         // holds the old picture. The owner approved it.
         "win/present.rs" => function == "copy_client",
+        // The owner requested TinyTorrent's acrylic About surface, including
+        // its painted text and buttons, on 2026-10-30. Native controls retain
+        // the captions, accessibility and activation.
+        "win/about.rs" => matches!(
+            function,
+            "procedure" | "paint" | "draw_control" | "new" | "solid" | "text"
+        ),
         _ => false,
     }
 }
