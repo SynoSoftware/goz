@@ -2,27 +2,27 @@
 
 ## Gozler 0.5.8
 
-**— Improved usability and rendering, plus in-app updates**
+### Improved usability and rendering, plus in-app updates
 
-### Progress for several jobs at once
+#### Progress for several jobs at once
 
 Export, Delete, updates and service repair each show their own progress in the status bar, alongside transfers and indexing. Each job has its own Cancel button when it can be stopped.
 
-### Selection masks and column fitting
+#### Selection masks and column fitting
 
 - **Choose whether selection masks include folders.** Num + and Num − include matching folders by default. To select files only, change **Selection** under **Settings > General**. Canceling a mask keeps your previous selection.
 - **Fit columns from the header.** Double-click a column divider to fit that column, or right-click a header to fit one or all columns.
 - **See panel totals in the main status bar.** It shows the active panel's entry count, the size of selected items and the drive's free space.
 
-### Update Gozler from the app
+#### Update Gozler from the app
 
 When an update is available, choose **Help > Update** in Search or Commander, or click the update in the status bar.
 
-### New About dialog
+#### New About dialog
 
 The About dialog has a new layout with the app and service versions, plus links to Synapse, the source code and project credits.
 
-### Fixed
+#### Fixed
 
 - Repeated PgUp/PgDn scrolling could mix or corrupt row text.
 - Returning to a parent folder or receiving folder updates could leave the cursor out of view. The folder you left is now focused when you return, and a visible cursor stays in view as rows change.
