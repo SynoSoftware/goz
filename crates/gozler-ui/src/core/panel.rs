@@ -24,14 +24,13 @@ use super::fetch::{Ask, ChunkAsk, FromSnapshot, Generation, Outcome};
 use super::model::Column;
 use super::query::{self, Filters, Matching};
 use super::search_list::{Deselect, SearchList};
-use super::selection::{DragEntry, RowSelection, push_rows, wide_path};
+use super::selection::{DragEntry, RowSelection, wide_path};
 use super::work::{self, Pass, Retirement};
 use gozler_core::fold::fold;
 use gozler_core::proto::ResultItem;
-use gozler_core::query::{MaskScratch, NameMask, QueryStart};
+use gozler_core::query::{NameMask, QueryStart};
 use gozler_core::types::{SortDir, SortKey, SortSpec};
 use gozler_core::winpath::{absolute, is_root, parent_of};
-use gozler_core::wtf8;
 use gozler_fileops::{OperationId, Request, Taken};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -43,6 +42,7 @@ mod calculation;
 mod counting;
 mod quick;
 mod rows;
+mod selecting;
 pub(crate) use calculation::{Calculated, Calculation, PanelUpdate, UpdatedKind};
 use calculation::{Change as RowChange, End, Input, Interaction};
 pub(crate) use counting::{Counted, Counting};
@@ -50,6 +50,7 @@ use quick::Quick;
 pub(crate) use quick::{Finding, Found, QuickAction};
 use rows::{FolderRows, Name, name_hash, name_key, same_name};
 pub(crate) use rows::{give_sizes, sort_listing};
+pub(crate) use selecting::{Selected, Selecting};
 
 const PENDING_ROWS: usize = 32;
 
@@ -2192,42 +2193,26 @@ impl Panels {
         searched
     }
 
-    /// Select files… and Unselect files…: `side`'s place with every file
-    /// whose name `mask` matches selected, or unselected when not `select`;
-    /// folders keep their state, as in Total Commander. `None` when the
-    /// panel lists no folder.
+    /// Captures the folder and selection that the mask acts on; a later
+    /// interaction invalidates its answer.
     pub(crate) fn select_matching(
-        &mut self,
+        &self,
         side: Side,
-        mask: &NameMask,
+        mask: NameMask,
         select: bool,
-    ) -> Option<Place> {
+        folders: bool,
+    ) -> Option<Selecting> {
         let panel = self.panel(side);
-        if !matches!(panel.view, View::Folder) {
+        if !matches!(panel.view, View::Folder) || panel.rows_pending() {
             return None;
         }
-        let mut scratch = MaskScratch::default();
-        let mut name = Vec::new();
-        let mut was = panel.selected.iter().peekable();
-        let mut selected = Vec::new();
-        for row in 0..panel.count() {
-            while was.next_if(|rows| rows.end <= row).is_some() {}
-            let mut is = was.peek().is_some_and(|rows| rows.contains(&row));
-            if let Some(entry) = panel.entry(row)
-                && !entry.is_folder()
-            {
-                name.clear();
-                wtf8::from_utf16(&entry.name, &mut name);
-                if mask.matches(&name, &mut scratch) {
-                    is = select;
-                }
-            }
-            if is {
-                push_rows(&mut selected, row..row + 1);
-            }
-        }
-        self.set_selected(side, RowSelection::from(selected));
-        Some(self.place(side))
+        Some(Selecting::new(panel, mask, select, folders))
+    }
+
+    pub(crate) fn accept_matching(&mut self, side: Side, answer: Selected) -> Option<Place> {
+        answer
+            .accept(self.panel_mut(side))
+            .then(|| self.place(side))
     }
 
     /// The list's selected rows, as it tells them; whether they changed.
@@ -2707,6 +2692,65 @@ pub(crate) mod tests {
 
     fn folder(name: &str) -> Entry {
         Entry::new(wide(name), FILE_ATTRIBUTE_DIRECTORY, 0, 0)
+    }
+
+    #[test]
+    fn masks_include_folders_by_default_and_files_only_preserves_them() {
+        let mut panels = showing(
+            r"C:\d",
+            vec![
+                folder("Docs.txt"),
+                folder("Other"),
+                file("a.TXT", 5, 0),
+                file("b.bin", 9, 0),
+            ],
+        );
+        let folders = crate::core::settings::Choices::default().select_folders;
+        let mask = || NameMask::parse("*.txt").unwrap();
+        let input = panels
+            .select_matching(Side::Left, mask(), true, folders)
+            .unwrap();
+        let place = panels.accept_matching(Side::Left, input.run()).unwrap();
+        assert_eq!(place.selected.as_ref(), &[1..2, 3..4]);
+
+        let input = panels
+            .select_matching(Side::Left, mask(), false, false)
+            .unwrap();
+        let place = panels.accept_matching(Side::Left, input.run()).unwrap();
+        assert_eq!(place.selected.as_ref(), &[1..2]);
+
+        let input = panels
+            .select_matching(Side::Left, mask(), false, folders)
+            .unwrap();
+        let place = panels.accept_matching(Side::Left, input.run()).unwrap();
+        assert!(place.selected.is_empty());
+
+        let input = panels
+            .select_matching(Side::Left, NameMask::parse("*.*").unwrap(), true, folders)
+            .unwrap();
+        let place = panels.accept_matching(Side::Left, input.run()).unwrap();
+        assert_eq!(place.selected.as_ref(), &[1..5]);
+    }
+
+    #[test]
+    fn a_mask_answer_cannot_replace_a_newer_selection_or_folder() {
+        let mut panels = showing(r"C:\d", vec![file("a", 5, 0), file("b", 9, 0)]);
+        let input = || NameMask::parse("*.*").unwrap();
+        let answer = panels
+            .select_matching(Side::Left, input(), true, true)
+            .unwrap()
+            .run();
+        panels.set_selected(Side::Left, vec![2..3].into());
+        assert!(panels.accept_matching(Side::Left, answer).is_none());
+        assert_eq!(panels.place(Side::Left).selected.as_ref(), &[2..3]);
+
+        let answer = panels
+            .select_matching(Side::Left, input(), true, true)
+            .unwrap()
+            .run();
+        list(&mut panels, r"C:\other", vec![file("c", 1, 0)]);
+        assert!(panels.accept_matching(Side::Left, answer).is_none());
+        assert!(panels.place(Side::Left).selected.is_empty());
     }
 
     pub(super) fn names(panels: &Panels, side: Side) -> Vec<String> {

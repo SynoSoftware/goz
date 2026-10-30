@@ -491,6 +491,9 @@
     "one_window": "Allow only one &window at a time",
     "show_icons": "Show &icons in menus, buttons and lists",
     "show_memory": "Show &memory use in the status bar",
+    "selection": "Selection (Num + / Num −)",
+    "select_files": "Select &files only",
+    "select_folders": "Also select f&olders",
     "sizes": "Show si&zes in:",
     "dates": "Short &date format:"
   },

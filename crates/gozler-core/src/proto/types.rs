@@ -20,7 +20,7 @@ use crate::types::{IndexProgress, SortSpec, VolumePhase};
 /// refuses any other with [`ProtoError::Unsupported`], rather than agreeing on
 /// a version one side cannot actually speak. The client asks for this version
 /// alone, so a daemon of another build refuses it.
-pub const PROTO_VERSION: u16 = 17;
+pub const PROTO_VERSION: u16 = 18;
 
 /// The oldest protocol version a daemon of this build serves. **Owner
 /// ruling:** gozler serves no older protocol, of gozler or of goz, because

@@ -827,6 +827,16 @@ impl MainWindow {
     }
 
     fn update_status(&self) {
+        let remaining = self.model.borrow_mut().refresh_job_notice(Instant::now());
+        let parent = self.panel(Side::Left).list.hwnd().parent();
+        if let Some(remaining) = remaining {
+            parent.set_timer(
+                Timer::StatusNotice.id(),
+                remaining.as_millis().clamp(1, u128::from(u32::MAX)) as u32,
+            );
+        } else {
+            parent.kill_timer(Timer::StatusNotice.id());
+        }
         let status = StatusCaptions::new(&self.model.borrow(), &*self.numbers.borrow());
         self.show_status(&status);
     }
@@ -2070,6 +2080,40 @@ impl MainWindow {
         }
     }
 
+    fn grow_extension(&self, list: List) {
+        let columns: Vec<_> = match list {
+            List::Search => self.model.borrow().columns().to_vec(),
+            List::Panel(side) => self
+                .panel(side)
+                .columns()
+                .iter()
+                .map(|column| column.search_column())
+                .collect(),
+        };
+        let Some(index) = columns
+            .iter()
+            .position(|column| *column == Column::Extension)
+        else {
+            return;
+        };
+        let fits = match list {
+            List::Search => self.controls().search.fits_of(self, index..index + 1),
+            List::Panel(side) => self
+                .controls()
+                .panels
+                .panel_fits_of(self, side, index..index + 1),
+        };
+        let control = self.list_control(list);
+        let widths: Vec<_> = (0..columns.len())
+            .map(|index| control.column_width(index))
+            .collect();
+        if let Some(widths) =
+            crate::core::layout::column_sizing::grow_extension(&columns, &widths, fits[0].widest)
+        {
+            control.set_column_widths(widths.into_iter().enumerate());
+        }
+    }
+
     /// The selection timer of `list` ran out: its selected rows are asked
     /// for.
     fn fetch_selection(&self, hwnd: Hwnd, list: List) {
@@ -2422,6 +2466,10 @@ impl MainWindow {
                     .apply_panel_update(self, hwnd, side, update);
             }
             self.retire_model();
+        }
+        let selected = self.created().work.borrow_mut().panels.take_selected();
+        for (side, answer) in selected {
+            self.controls().panels.show_matching(self, side, answer);
         }
         let counted = self.created().work.borrow_mut().panels.take_counts();
         for (side, answer) in counted {
@@ -4308,6 +4356,7 @@ impl MainWindow {
                 self.controls().panels.ask_panel_sizes(self, side);
             }
             Timer::Status => self.ask_status(),
+            Timer::StatusNotice => self.update_status(),
             Timer::Age => {
                 self.controls().inspector.show_age(self);
                 self.controls().inspector.fit_inspector(self);

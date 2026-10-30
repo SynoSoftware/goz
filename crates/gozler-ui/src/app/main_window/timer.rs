@@ -19,6 +19,7 @@ pub(super) enum Timer {
     Work,
     NativeSelection,
     OperationDelivery,
+    StatusNotice,
 }
 
 const IDS: &[(Timer, usize)] = &[
@@ -47,6 +48,7 @@ const IDS: &[(Timer, usize)] = &[
     (Timer::OperationDelivery, 25),
     (Timer::PanelReading(Side::Left), 26),
     (Timer::PanelReading(Side::Right), 27),
+    (Timer::StatusNotice, 28),
 ];
 
 impl Timer {

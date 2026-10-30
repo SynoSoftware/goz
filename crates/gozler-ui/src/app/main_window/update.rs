@@ -328,6 +328,7 @@ impl MainWindow {
                 } else {
                     control.set_count(count);
                 }
+                self.grow_extension(list);
             }
             Effect::Redraw { list, rows } => self.list_control(list).redraw_rows(rows),
             Effect::Deselect { list, rows } => self.show_list_taken(list, rows),

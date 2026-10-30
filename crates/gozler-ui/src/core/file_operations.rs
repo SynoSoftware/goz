@@ -1683,6 +1683,18 @@ pub(crate) enum Pending {
 }
 
 impl StatusOperation {
+    pub(crate) fn succeeded(&self) -> bool {
+        match self {
+            Self::Summary { completion, .. } => {
+                completion.end == End::Complete && completion.failed == 0
+            }
+            Self::Ended { outcome, .. } => {
+                outcome.end == End::Complete && outcome.listed.is_empty()
+            }
+            Self::Pending { .. } | Self::Running { .. } => false,
+        }
+    }
+
     pub(crate) fn id(&self) -> OperationId {
         match self {
             StatusOperation::Summary { id, .. } => *id,

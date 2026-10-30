@@ -18,7 +18,7 @@ use super::dates::DateRange;
 use super::order::{
     KeyValue, OrderFields, SortRecord, compare, folder_ranks, packed_folder_rank, primary_key,
 };
-use super::parse::{Kind, Malformed, ParsedQuery, QueryError, SizeRange, Test};
+use super::parse::{Kind, Malformed, ParsedQuery, QueryError, SizeRange, TermMatch, Test};
 use super::paths::{ComponentBits, DirPaths, FolderCopy, NameForm, ResultNames, root_name};
 use super::rows::VolumeRows;
 use super::through::{LinkPaths, Target as LinkTarget, Through};
@@ -195,6 +195,9 @@ pub struct CompiledQuery {
     clauses: Vec<CompiledClause>,
     component_clauses: usize,
     path_clauses: usize,
+    /// An ordered filename proves every component and path clause; its
+    /// parent still has to have a valid path.
+    names_decide_path: bool,
     /// The matcher of each [`Check::Component`], by its bit.
     components: Vec<Matcher>,
     /// The bit and the needle of the [`Check::Component`] with the longest
@@ -281,6 +284,10 @@ pub(super) enum Matcher {
     /// tests the folded text like every other matcher. The pattern itself is
     /// never folded, because folding would turn `\D` into `\d`.
     Regex(Regex),
+    Ordered {
+        terms: Vec<memmem::Finder<'static>>,
+        term_match: TermMatch,
+    },
 }
 
 impl CompiledQuery {
@@ -295,6 +302,7 @@ impl CompiledQuery {
                     .iter()
                     .map(|term| match &term.test {
                         Test::Extension(exts) => exts.len().max(1),
+                        Test::Ordered { terms, .. } => terms.len().max(1),
                         _ => 1,
                     })
                     .sum();
@@ -403,11 +411,20 @@ impl CompiledQuery {
         let reading = |reads| clauses.partition_point(|clause| clause.cost().0 < reads);
         let component_clauses = reading(Reads::Components);
         let path_clauses = reading(Reads::Path);
+        let names_decide_path = !components.is_empty()
+            && match &clauses[path_clauses..] {
+                [ordered] => ordered.name_decides_components(
+                    &clauses[component_clauses..path_clauses],
+                    &components,
+                ),
+                _ => false,
+            };
         Ok(Self {
             match_case,
             clauses,
             component_clauses,
             path_clauses,
+            names_decide_path,
             components,
             component_literal,
             prefilter,
@@ -448,6 +465,7 @@ impl CompiledQuery {
                     through: None,
                 }],
             });
+            query.names_decide_path = false;
         }
         query.scope = scope.map(|scope| (scope.to_owned(), reads));
         if links.is_empty() || !query.clauses.iter().flat_map(|c| &c.terms)
@@ -536,6 +554,52 @@ enum Reads {
 }
 
 impl CompiledClause {
+    fn name_decides_components(&self, clauses: &[CompiledClause], components: &[Matcher]) -> bool {
+        let [
+            CompiledTerm {
+                negated: false,
+                check: Check::Text(Target::Path, Matcher::Ordered { terms, term_match }),
+                ..
+            },
+        ] = self.terms.as_slice()
+        else {
+            return false;
+        };
+        if *term_match == TermMatch::NameStart {
+            return false;
+        }
+        clauses.iter().all(|clause| {
+            let [
+                CompiledTerm {
+                    negated: false,
+                    check: Check::Component(bit),
+                    ..
+                },
+            ] = clause.terms.as_slice()
+            else {
+                return false;
+            };
+            let finder = match (&components[usize::from(*bit)], term_match) {
+                (Matcher::Contains(finder), _) => finder,
+                (Matcher::WordStart(finder), TermMatch::WordStart | TermMatch::WholeWords) => {
+                    finder
+                }
+                (Matcher::WholeWord(finder), TermMatch::WholeWords) => finder,
+                _ => return false,
+            };
+            terms.iter().any(|term| term.needle() == finder.needle())
+        })
+    }
+
+    fn passes_in_name(&self, name: &[u8], code_points: &mut CodePointBuf) -> bool {
+        self.terms.iter().any(|term| {
+            !term.negated
+                && matches!(&term.check,
+                Check::Text(Target::Path, matcher @ Matcher::Ordered { term_match, .. })
+                if *term_match != TermMatch::NameStart && matcher.matches(name, code_points))
+        })
+    }
+
     /// The literal every name that passes this clause contains, when the
     /// clause is one positive name term, whole-word, word-start or name-start
     /// name term, name wildcard or single extension.
@@ -553,6 +617,10 @@ impl CompiledClause {
                 | Matcher::WordStart(finder) => Some(finder.needle().to_vec()),
                 Matcher::Start(start) => Some(start.clone()),
                 Matcher::Wildcard(wildcard) => wildcard.longest_literal(),
+                Matcher::Ordered { terms, .. } => terms
+                    .iter()
+                    .max_by_key(|finder| finder.needle().len())
+                    .map(|finder| finder.needle().to_vec()),
                 Matcher::Regex(_) => None,
             },
             Check::Extension(exts) => match exts.as_slice() {
@@ -666,6 +734,21 @@ impl Check {
             Test::PathWildcard(s) => Check::Text(Target::Path, Matcher::Wildcard(wildcard(s))),
             Test::NameRegex(s) => Check::Text(Target::Name, Matcher::Regex(regex(s)?)),
             Test::PathRegex(s) => Check::Text(Target::Path, Matcher::Regex(regex(s)?)),
+            Test::Ordered {
+                terms,
+                term_match,
+                match_path,
+            } => Check::Text(
+                if *match_path {
+                    Target::Path
+                } else {
+                    Target::Name
+                },
+                Matcher::Ordered {
+                    terms: terms.iter().map(|term| finder(term)).collect(),
+                    term_match: *term_match,
+                },
+            ),
             Test::Extension(exts) => {
                 Check::Extension(exts.iter().map(|ext| fold(ext.as_bytes())).collect())
             }
@@ -695,6 +778,7 @@ impl Check {
                 | Matcher::Start(_) => 2,
                 Matcher::Wildcard(_) => 3,
                 Matcher::Regex(_) => 5,
+                Matcher::Ordered { .. } => 4,
             },
             Check::Extension(_) => 4,
             Check::Component(_) => 0,
@@ -781,6 +865,9 @@ impl Matcher {
             Matcher::Start(start) => text.starts_with(start),
             Matcher::Wildcard(wildcard) => wildcard.matches_into(text, code_points),
             Matcher::Regex(regex) => regex.is_match(text),
+            Matcher::Ordered { terms, term_match } => {
+                ordered_parts(terms, *term_match, text, |_| {})
+            }
         }
     }
 
@@ -796,7 +883,10 @@ impl Matcher {
             Matcher::Contains(finder) | Matcher::WholeWord(finder) | Matcher::WordStart(finder) => {
                 Some(finder.needle()).filter(|needle| !needle.contains(&b'\\'))
             }
-            Matcher::Start(_) | Matcher::Wildcard(_) | Matcher::Regex(_) => None,
+            Matcher::Start(_)
+            | Matcher::Wildcard(_)
+            | Matcher::Regex(_)
+            | Matcher::Ordered { .. } => None,
         }
     }
 
@@ -842,7 +932,7 @@ impl Matcher {
                 Some(finder.needle())
             }
             Matcher::Start(start) => Some(start),
-            Matcher::Wildcard(_) | Matcher::Regex(_) => None,
+            Matcher::Wildcard(_) | Matcher::Regex(_) | Matcher::Ordered { .. } => None,
         }
     }
     /// Appends to `parts` each part of `text` that this matcher matches, as
@@ -874,8 +964,44 @@ impl Matcher {
             }
             Matcher::Wildcard(wildcard) => wildcard.literal_parts(text, code_points, parts),
             Matcher::Regex(regex) => parts.extend(regex.find_iter(text).map(|m| m.range())),
+            Matcher::Ordered { terms, term_match } => {
+                let before = parts.len();
+                if !ordered_parts(terms, *term_match, text, |range| parts.push(range)) {
+                    parts.truncate(before);
+                }
+            }
         }
     }
+}
+
+fn ordered_parts(
+    terms: &[memmem::Finder<'static>],
+    term_match: TermMatch,
+    text: &[u8],
+    mut matched: impl FnMut(Range<usize>),
+) -> bool {
+    let mut from = 0;
+    for finder in terms {
+        let occurrence = occurrences(finder, text).find(|occurrence| {
+            occurrence.start >= from
+                && match term_match {
+                    TermMatch::Anywhere => true,
+                    TermMatch::WholeWords => occurrence.is_whole_word(),
+                    TermMatch::WordStart => {
+                        !is_word(crate::wtf8::CodePoints::new(finder.needle()).next())
+                            || occurrence.is_word_start()
+                    }
+                    TermMatch::NameStart => occurrence.start == 0,
+                }
+        });
+        let Some(occurrence) = occurrence else {
+            return false;
+        };
+        let end = occurrence.start + finder.needle().len();
+        matched(occurrence.start..end);
+        from = end;
+    }
+    true
 }
 
 /// Whether `text` contains the finder's needle with no letter or digit right
@@ -1899,22 +2025,39 @@ impl<'q, 'i> Scan<'q, 'i> {
             return None;
         }
 
+        let in_name = query.names_decide_path
+            && path_clauses[0].passes_in_name(subject.name, &mut self.scratch.code_points);
         if let Some(bits) = &mut self.component_bits {
             let code_points = &mut self.scratch.code_points;
             // An entry without a path matches no path test.
-            let found = bits.entry_bits(index, idx, |text, first| {
-                query.component_bits(text, first, code_points)
-            })?;
-            subject.components = Some(found);
-            if !component_clauses
-                .iter()
-                .all(|clause| clause.passes(&subject, None, &mut self.scratch))
-            {
-                return None;
+            if in_name {
+                bits.parent_bits(index, idx, |text, first| {
+                    query.component_bits(text, first, code_points)
+                })?;
+            } else {
+                let found = bits.entry_bits(index, idx, |text, first| {
+                    query.component_bits(text, first, code_points)
+                })?;
+                subject.components = Some(found);
+                if !component_clauses
+                    .iter()
+                    .all(|clause| clause.passes(&subject, None, &mut self.scratch))
+                {
+                    return None;
+                }
             }
         }
 
-        if let Some(paths) = &mut self.query_paths {
+        // An ordered sequence already in the filename also occurs in its
+        // full path. Component checks above have validated its ancestry, so
+        // that case needs no path construction.
+        let in_name = in_name
+            || !query.names_decide_path
+                && subject.components.is_some()
+                && path_clauses.iter().all(|clause| {
+                    clause.passes_in_name(subject.name, &mut self.scratch.code_points)
+                });
+        if let Some(paths) = self.query_paths.as_mut().filter(|_| !in_name) {
             let path = paths.full_path_into(index, idx, &mut self.path)?;
             subject.path = Some(&self.path);
             if !path_clauses
@@ -2921,6 +3064,85 @@ mod tests {
         texts(&out)
     }
 
+    #[test]
+    fn ordered_terms_reject_reversed_and_overlapping_matches() {
+        let mut idx = sample_index();
+        for (i, name) in [
+            "Paracetamol 500mg",
+            "500mg paracetamol",
+            "comparator 500mg paracetamol",
+            "paracetamol",
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            idx.insert_enum(&enum_rec(frn(200 + i as u64), NTFS_ROOT_FRN, name, false));
+        }
+        idx.insert_enum(&enum_rec(frn(300), NTFS_ROOT_FRN, "Paracetamol", true));
+        idx.insert_enum(&enum_rec(frn(301), frn(300), "500mg.txt", false));
+        for match_path in [false, true] {
+            let mut query = parse_query_with(
+                "para 50",
+                ParseOptions {
+                    match_path,
+                    term_match: TermMatch::WordStart,
+                    ..ParseOptions::default()
+                },
+            )
+            .unwrap();
+            query.order_terms(TermMatch::WordStart);
+            let mut found = paths_of(&idx, query);
+            found.sort();
+            let expected = if match_path {
+                vec![r"C:\Paracetamol 500mg", r"C:\Paracetamol\500mg.txt"]
+            } else {
+                vec![r"C:\Paracetamol 500mg"]
+            };
+            assert_eq!(found, expected);
+        }
+        let mut query = parse_query("paracetamol paracetamol").unwrap();
+        query.order_terms(TermMatch::Anywhere);
+        assert!(paths_of(&idx, query).is_empty());
+    }
+
+    #[test]
+    fn ordered_names_do_not_bypass_other_path_constraints() {
+        let mut idx = sample_index();
+        idx.insert_enum(&enum_rec(
+            frn(200),
+            NTFS_ROOT_FRN,
+            "Paracetamol 500mg",
+            false,
+        ));
+        idx.insert_enum(&enum_rec(frn(201), frn(100), "Paracetamol 500mg", false));
+        let ordered = |text| {
+            let mut parsed = parse_query_with(
+                text,
+                ParseOptions {
+                    match_path: true,
+                    term_match: TermMatch::WordStart,
+                    ..ParseOptions::default()
+                },
+            )
+            .unwrap();
+            parsed.order_terms(TermMatch::WordStart);
+            parsed
+        };
+        assert_eq!(
+            paths_of(&idx, ordered("para 50 !path:docs")),
+            [r"C:\Paracetamol 500mg"]
+        );
+        assert!(paths_of(&idx, ordered("para 50 ww:para")).is_empty());
+        let links = Links::new(vec![crate::links::FolderLink {
+            link: r"C:\docs\jump".into(),
+            target: r"D:\target".into(),
+        }]);
+        let query =
+            CompiledQuery::with_links(&ordered("para 50"), &links, Some(r"C:\docs")).unwrap();
+        let out = run_query(&idx, r"C:\", &query, None, SortSpec::default(), None);
+        assert_eq!(texts(&out), [r"C:\docs\Paracetamol 500mg"]);
+    }
+
     /// The owner's bug, at the scan: the index holds each entry once, at its
     /// real path, so without the links a path through a junction, and a
     /// scope that holds one, find nothing below its target.
@@ -3179,6 +3401,13 @@ mod tests {
                 text().prop_map(Test::PathWordStart),
                 text().prop_map(Test::NameStart),
                 text().prop_map(Test::PathStart),
+                (prop::collection::vec(text(), 0..3), any::<bool>()).prop_map(
+                    |(terms, match_path)| Test::Ordered {
+                        terms,
+                        term_match: TermMatch::WordStart,
+                        match_path,
+                    }
+                ),
                 regex().prop_map(Test::NameRegex),
                 regex().prop_map(Test::PathRegex),
                 prop::collection::vec(text(), 0..3).prop_map(Test::Extension),

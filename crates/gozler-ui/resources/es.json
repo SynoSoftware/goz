@@ -491,6 +491,9 @@
     "one_window": "Permitir solo una &ventana a la vez",
     "show_icons": "Mostrar i&conos en menús, botones y listas",
     "show_memory": "Mostrar el uso de memoria en la &barra de estado",
+    "selection": "Selección (Num + / Num −)",
+    "select_files": "Seleccionar solo archiv&os",
+    "select_folders": "Seleccionar también car&petas",
     "sizes": "Mostrar &tamaños en:",
     "dates": "Formato de &fecha corta:"
   },

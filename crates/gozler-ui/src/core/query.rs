@@ -30,18 +30,23 @@ pub(crate) fn search(
     } else {
         (folder, None)
     };
-    Search::new(&SearchInput {
+    let mut search = Search::new(&SearchInput {
         text,
         text_match,
         match_case: matching.case,
         match_path: matching.path,
+        name_wildcards: true,
         filters: &filters.clauses(),
         regexes: &[],
         scope,
         parent,
         working_dir: None,
         query_start,
-    })
+    })?;
+    if let TextMatch::Terms(term_match) = text_match {
+        search.query.order_terms(term_match);
+    }
+    Ok(search)
 }
 
 /// How the typed name terms match; one choice, because the modes exclude
@@ -702,6 +707,57 @@ mod tests {
 
     fn day(text: &str) -> Day {
         Day(text.parse().expect("a date"))
+    }
+
+    #[test]
+    fn filename_wildcards_work_with_match_path_without_changing_explicit_paths() {
+        let start = QueryStart {
+            now: jiff::Timestamp::UNIX_EPOCH,
+            time_zone: jiff::tz::TimeZone::UTC,
+        };
+        let query = search(
+            r"gozler*.exe path:*.exe *\bin\*.exe",
+            Matching {
+                path: true,
+                ..Matching::default()
+            },
+            &Filters::default(),
+            &start,
+        )
+        .unwrap()
+        .query;
+        let tests: Vec<_> = query
+            .clauses
+            .into_iter()
+            .flat_map(|clause| clause.terms.into_iter().map(|term| term.test))
+            .collect();
+        assert_eq!(
+            tests,
+            [
+                Test::NameWildcard("gozler*.exe".into()),
+                Test::PathWildcard("*.exe".into()),
+                Test::PathWildcard(r"*\bin\*.exe".into())
+            ]
+        );
+    }
+
+    #[test]
+    fn the_window_keeps_positive_words_in_their_typed_order() {
+        let start = QueryStart {
+            now: jiff::Timestamp::UNIX_EPOCH,
+            time_zone: jiff::tz::TimeZone::UTC,
+        };
+        let query = search("para 50", Matching::default(), &Filters::default(), &start)
+            .unwrap()
+            .query;
+        assert_eq!(
+            query.clauses.last().unwrap().terms[0].test,
+            Test::Ordered {
+                terms: vec!["para".into(), "50".into()],
+                term_match: TermMatch::WordStart,
+                match_path: false,
+            }
+        );
     }
 
     /// A filter that the window reads otherwise than the `gozler` query it

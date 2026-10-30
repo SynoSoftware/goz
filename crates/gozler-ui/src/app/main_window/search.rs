@@ -363,6 +363,10 @@ impl Search {
                 }
                 Some(LRESULT(0))
             }
+            ListNotify::ScrollEnded => {
+                window.grow_extension(List::Search);
+                Some(LRESULT(0))
+            }
             ListNotify::ColumnClick(index) => {
                 let accepted = {
                     let mut model = window.model.borrow_mut();

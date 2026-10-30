@@ -52,6 +52,7 @@ pub fn build_search(
         }),
         match_case: plan.match_case,
         match_path: plan.match_path,
+        name_wildcards: false,
         filters: &[],
         regexes: &plan.regexes,
         scope: scope.as_deref(),

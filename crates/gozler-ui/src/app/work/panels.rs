@@ -1,6 +1,8 @@
-//! Per-panel row calculation, counting and quick-search execution.
+//! Per-panel row calculation, counting, quick search and mask selection.
 
-use crate::core::panel::{Calculated, Calculation, Counted, Counting, Finding, Found, Side};
+use crate::core::panel::{
+    Calculated, Calculation, Counted, Counting, Finding, Found, Selected, Selecting, Side,
+};
 use crate::core::work::{Replacement, Retirement, Waiting};
 use crate::win::wake::OpenWaker;
 use crate::win::work::Task;
@@ -10,6 +12,7 @@ pub(in crate::app) struct Work {
     calculations: [Task<Calculation, Calculated>; 2],
     counts: [Task<Counting, Counted>; 2],
     finding: [Task<Finding, Found>; 2],
+    selecting: [Task<Selecting, Selected>; 2],
     retired: Retirement,
 }
 
@@ -37,6 +40,14 @@ impl Work {
                     waker.clone(),
                     Replacement::Finish,
                     Finding::items,
+                    |input, _| input.run(),
+                )
+            }),
+            selecting: std::array::from_fn(|_| {
+                Task::pass(
+                    waker.clone(),
+                    Replacement::Cancel,
+                    Selecting::items,
                     |input, _| input.run(),
                 )
             }),
@@ -70,6 +81,24 @@ impl Work {
         task.replace(input);
         let retired = task.take_retired();
         self.retired.append(retired);
+    }
+
+    pub(in crate::app) fn select(&mut self, side: Side, input: Selecting) {
+        let task = &mut self.selecting[side.index()];
+        task.replace(input);
+        self.retired.append(task.take_retired());
+    }
+
+    pub(in crate::app) fn take_selected(&mut self) -> Vec<(Side, Selected)> {
+        let mut answers = Vec::new();
+        for side in Side::BOTH {
+            let task = &mut self.selecting[side.index()];
+            if let Some((_, answer)) = task.take() {
+                answers.push((side, answer));
+            }
+            self.retired.append(task.take_retired());
+        }
+        answers
     }
 
     pub(in crate::app) fn find(&mut self, side: Side, input: Finding) {
@@ -126,6 +155,9 @@ impl Work {
         for task in &mut self.finding {
             active |= task.tick(now).is_some();
         }
+        for task in &mut self.selecting {
+            active |= task.tick(now).is_some();
+        }
         active
     }
 
@@ -137,6 +169,9 @@ impl Work {
             self.retired.append(task.take_retired());
         }
         for task in &mut self.finding {
+            self.retired.append(task.take_retired());
+        }
+        for task in &mut self.selecting {
             self.retired.append(task.take_retired());
         }
         std::mem::take(&mut self.retired)
@@ -152,6 +187,10 @@ impl Work {
             self.retired.append(task.close_delivery());
         }
         for task in &mut self.finding {
+            task.cancel();
+            self.retired.append(task.close_delivery());
+        }
+        for task in &mut self.selecting {
             task.cancel();
             self.retired.append(task.close_delivery());
         }

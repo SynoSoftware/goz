@@ -19,7 +19,7 @@ use gozler_core::index::{NTFS_ROOT_FRN, VolumeIndex};
 use gozler_core::links::{FolderLink, Links};
 use gozler_core::query::{
     CompiledQuery, HeldVolume, IndexedVolume, ParseOptions, ResultRows, ResultSnapshot, RowsSpec,
-    Viewer, parse_query, parse_query_with, run_query,
+    TermMatch, Viewer, parse_query, parse_query_with, run_query,
 };
 use gozler_core::scope::VolumeMounts;
 use gozler_core::types::{Frn, SortDir, SortKey, SortSpec};
@@ -125,6 +125,44 @@ fn bench_query(c: &mut Criterion<measure::Measure>) {
 
     let mut group = c.benchmark_group("query_2M");
     group.sample_size(20);
+
+    for (target, match_path) in [("names", false), ("paths", true)] {
+        for (version, ordered) in [("before", false), ("after", true)] {
+            let mut parsed = parse_query_with(
+                "doc rep",
+                ParseOptions {
+                    match_path,
+                    term_match: TermMatch::WordStart,
+                    ..ParseOptions::default()
+                },
+            )
+            .unwrap();
+            if ordered {
+                parsed.order_terms(TermMatch::WordStart);
+            }
+            let parsed = CompiledQuery::new(&parsed).unwrap();
+            let total =
+                run_query(&idx, r"C:\", &parsed, None, SortSpec::default(), Some(100)).total;
+            assert!(
+                total > 2_000_000,
+                "the broad comparison must exercise over two million matches"
+            );
+            eprintln!("ordering/{target}/{version}: {total} matches");
+            group.bench_function(format!("ordering/{target}/{version}"), |b| {
+                b.iter(|| {
+                    let out = run_query(
+                        black_box(&idx),
+                        r"C:\",
+                        black_box(&parsed),
+                        None,
+                        SortSpec::default(),
+                        Some(100),
+                    );
+                    black_box(out.total)
+                })
+            });
+        }
+    }
 
     for (label, query) in [
         ("rare(kernel32)", "kernel32"),

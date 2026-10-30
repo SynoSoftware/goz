@@ -532,6 +532,20 @@ impl<'a> SettingsDialog<'a> {
                     }
                 }
                 if page == SettingsPage::General {
+                    for (control, checked) in [
+                        (
+                            ControlId::GeneralSelectFiles,
+                            !values.choices.select_folders,
+                        ),
+                        (
+                            ControlId::GeneralSelectFolders,
+                            values.choices.select_folders,
+                        ),
+                    ] {
+                        if let Some(button) = self.check_box(page, control) {
+                            button.set_checked(checked);
+                        }
+                    }
                     if let Some(list) = self.language_list() {
                         // A saved tag that no longer ships shows as Windows
                         // default; it stays saved unless the person chooses.
@@ -2472,7 +2486,12 @@ impl<'a> SettingsDialog<'a> {
     /// A click on a button or a check box of a page; answers whether it was
     /// one of the pages'.
     fn clicked(&self, dialog: Hwnd, id: u16) -> bool {
-        if let Some((page, control, value)) = CHECK_BOXES.into_iter().find(|(_, c, _)| is(id, *c)) {
+        if is(id, ControlId::GeneralSelectFiles) || is(id, ControlId::GeneralSelectFolders) {
+            self.draft.borrow_mut().edited.choices.select_folders =
+                is(id, ControlId::GeneralSelectFolders);
+        } else if let Some((page, control, value)) =
+            CHECK_BOXES.into_iter().find(|(_, c, _)| is(id, *c))
+        {
             let checked = self
                 .check_box(page, control)
                 .is_some_and(CheckBox::is_checked);

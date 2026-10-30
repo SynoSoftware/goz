@@ -491,6 +491,9 @@
     "one_window": "Aynı anda yalnızca bir &pencereye izin ver",
     "show_icons": "Menülerde, düğmelerde ve listelerde s&imgeleri göster",
     "show_memory": "Durum çubuğunda bellek &kullanımını göster",
+    "selection": "Seçim (Num + / Num −)",
+    "select_files": "Yalnızca do&syaları seç",
+    "select_folders": "Klasörleri d&e seç",
     "sizes": "&Boyut birimi:",
     "dates": "Kısa &tarih biçimi:"
   },

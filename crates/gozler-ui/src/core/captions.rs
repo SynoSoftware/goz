@@ -360,12 +360,21 @@ impl CaptionTable {
                         "settings_general.show_memory",
                     ),
                     (Control(C::GeneralRestore), "settings.reset"),
+                    (
+                        Control(C::GeneralSelectFiles),
+                        "settings_general.select_files",
+                    ),
+                    (
+                        Control(C::GeneralSelectFolders),
+                        "settings_general.select_folders",
+                    ),
                 ],
                 plain: &[
                     (Control(C::GeneralHeading), "settings.general"),
                     (Control(C::GeneralDisplay), "settings_general.display"),
                     (Control(C::GeneralFormats), "settings_general.formats"),
                     (Control(C::GeneralStarting), "settings_general.starting"),
+                    (Control(C::GeneralSelection), "settings_general.selection"),
                 ],
             },
             // The item group's caption names the selected item, which the

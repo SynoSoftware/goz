@@ -92,6 +92,35 @@ pub(crate) fn fill_widths(fits: &[ColumnFit], width: Px) -> Vec<Px> {
     whole_pixels(&widths)
 }
 
+/// Widens Extension for the rows now visible. Name and Path give up the
+/// needed room in their current proportions; the other columns stay put.
+pub(crate) fn grow_extension(columns: &[Column], widths: &[Px], needed: Px) -> Option<Vec<Px>> {
+    let extension = columns
+        .iter()
+        .position(|&column| column == Column::Extension)?;
+    if needed <= widths[extension] {
+        return None;
+    }
+    let fits: Vec<_> = columns
+        .iter()
+        .zip(widths)
+        .map(|(&column, &width)| ColumnFit {
+            widest: if column == Column::Extension {
+                needed
+            } else {
+                width
+            },
+            empty: false,
+            shrinks: matches!(column, Column::Name | Column::Path),
+            grows: false,
+        })
+        .collect();
+    Some(fill_widths(
+        &fits,
+        widths.iter().copied().fold(Px(0), |sum, width| sum + width),
+    ))
+}
+
 /// Changes the widths of the columns at `step` by `change` in all, by one
 /// factor, so the widest columns keep the most room and a resize makes no
 /// column jump. A column that the factor would take below its fit when it
@@ -304,6 +333,20 @@ mod tests {
             shrinks: true,
             grows: true,
         }
+    }
+
+    #[test]
+    fn newly_visible_extensions_grow_without_refitting_other_values() {
+        let columns = [
+            Column::Name,
+            Column::Extension,
+            Column::Size,
+            Column::DateModified,
+        ];
+        let widths = [Px(300), Px(25), Px(70), Px(150)];
+        let grown = grow_extension(&columns, &widths, Px(65)).unwrap();
+        assert_eq!(grown, [Px(260), Px(65), Px(70), Px(150)]);
+        assert_eq!(grow_extension(&columns, &grown, Px(25)), None);
     }
 
     /// A column that a fill neither shrinks nor grows, such as Size.

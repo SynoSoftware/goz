@@ -220,7 +220,7 @@ impl PanelControls {
     }
 
     /// The columns the list shows.
-    fn columns(&self) -> &'static [PanelColumn] {
+    pub(super) fn columns(&self) -> &'static [PanelColumn] {
         match self.kind.get() {
             Some(_) => &PanelColumn::SEARCH,
             None => &PanelColumn::FOLDER,
@@ -467,6 +467,9 @@ impl Panels {
         let mut shown = Vec::new();
         self.prepare_panel(window, side, placed.as_ref(), &mut moves, &mut shown);
         win::place_children(&moves, &shown);
+        if side == window.model.borrow().panels().active() {
+            window.update_status();
+        }
     }
 
     pub(super) fn prepare_panel(
@@ -781,6 +784,15 @@ impl Panels {
     /// [`ListView::fit_rows`], within the limits of Search's column of the
     /// same kind, as Search's columns do.
     fn panel_fits(&self, window: &MainWindow, side: Side) -> Vec<ColumnFit> {
+        self.panel_fits_of(window, side, 0..self.panel(side).columns().len())
+    }
+
+    pub(super) fn panel_fits_of(
+        &self,
+        window: &MainWindow,
+        side: Side,
+        indexes: std::ops::Range<usize>,
+    ) -> Vec<ColumnFit> {
         let c = self.panel(side);
         let (rows, label) = c.list.fit_rows();
         // The model is borrowed while the texts are formatted, and the
@@ -794,6 +806,7 @@ impl Panels {
             let panels = model.panels();
             let panel = panels.panel(side);
             (c.columns().iter().enumerate())
+                .filter(|(index, _)| indexes.contains(index))
                 .map(|(index, &column)| MeasuredColumn {
                     column: column.search_column(),
                     first: index == 0,
@@ -1851,6 +1864,10 @@ impl Panels {
                 window.fetch_visible(List::Panel(side));
                 Some(LRESULT(0))
             }
+            ListNotify::ScrollEnded => {
+                window.grow_extension(List::Panel(side));
+                Some(LRESULT(0))
+            }
             ListNotify::ColumnClick(index) => {
                 self.close_quick_search_of(window, side);
                 let column = self.panel(side).columns().get(index);
@@ -2243,7 +2260,7 @@ impl Panels {
         }
     }
 
-    /// `Num +` and `Num -`: the mask, then the files of `side`'s folder that
+    /// `Num +` and `Num -`: the mask, then the entries of `side`'s folder that
     /// it matches are selected, or unselected when not `select`
     /// (DESIGN.md: Selecting entries).
     pub(super) fn select_files(&self, window: &MainWindow, hwnd: Hwnd, side: Side, select: bool) {
@@ -2260,11 +2277,39 @@ impl Panels {
             return;
         };
         self.select_mask.replace(text);
+        let input = {
+            let model = window.model.borrow();
+            model
+                .panels()
+                .select_matching(side, mask, select, model.choices().select_folders)
+        };
+        if let Some(input) = input {
+            window
+                .created()
+                .work
+                .borrow_mut()
+                .panels
+                .select(side, input);
+        }
+    }
+
+    pub(super) fn show_matching(
+        &self,
+        window: &MainWindow,
+        side: Side,
+        answer: crate::core::panel::Selected,
+    ) {
+        self.read_selection(window, side, false);
         let shown = self.place(window, side);
-        let place = (window.model.borrow_mut().panels_mut()).select_matching(side, &mask, select);
+        let place = window
+            .model
+            .borrow_mut()
+            .panels_mut()
+            .accept_matching(side, answer);
         if let Some(place) = place {
             self.show_place(window, side, &shown, &place, Scroll::Keep, false);
         }
+        window.retire_model();
     }
 
     /// After a delete is submitted, the selection is cleared and the first

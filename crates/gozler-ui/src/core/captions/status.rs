@@ -149,8 +149,6 @@ pub(crate) struct StatusWidest {
 }
 
 impl StatusCaptions {
-    /// Commander mode shows no results, so it leaves out their counts and
-    /// totals.
     pub(crate) fn new(model: &Model, numbers: &dyn Numbers) -> StatusCaptions {
         let service = index_status(model);
         let search = model.mode() == Mode::Search;
@@ -162,7 +160,9 @@ impl StatusCaptions {
                     selection_status(model, numbers),
                 )
             } else {
-                String::new()
+                let (counts, free) =
+                    super::PanelCaptions::status(model, model.panels().active(), numbers);
+                joined(model.strings(), counts, free)
             },
             job: {
                 let (text, progress) = match model.job() {
@@ -178,7 +178,11 @@ impl StatusCaptions {
                     Job::Operation => operation_status(model, numbers),
                 };
                 JobCaption {
-                    text,
+                    text: if model.job_notice_visible() {
+                        text
+                    } else {
+                        String::new()
+                    },
                     transfer: model.transfer_caption(),
                     transfer_only: model.job() == Job::Operation
                         && model

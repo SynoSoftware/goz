@@ -110,6 +110,7 @@ pub(crate) struct Model {
     operation: Option<StatusOperation>,
     /// The jobs in the order they last started, the newest last.
     started_jobs: Vec<(Job, u64)>,
+    job_notices: [super::status_bar::Notice; 3],
     job_moment: u64,
     /// How the latest request for the results or the status failed; `None`
     /// once the service answers.
@@ -203,6 +204,16 @@ pub(crate) enum Job {
     Fix,
     /// A file operation ([`Model::operation`]).
     Operation,
+}
+
+impl Job {
+    fn index(self) -> usize {
+        match self {
+            Job::Export => 0,
+            Job::Fix => 1,
+            Job::Operation => 2,
+        }
+    }
 }
 
 /// The formats Export results… offers, in the save dialog's order.
@@ -310,6 +321,7 @@ impl Model {
             inspector_content: super::layout::InspectorContent::Selection,
             operation: None,
             started_jobs: Vec::new(),
+            job_notices: [super::status_bar::Notice::default(); 3],
             job_moment: 0,
             failure: None,
             status_asked: None,
@@ -2229,10 +2241,30 @@ impl Model {
     }
 
     fn job_started_at(&mut self, job: Job, moment: u64) {
+        self.job_notices[job.index()] = super::status_bar::Notice::default();
         self.started_jobs.retain(|(started, _)| *started != job);
         self.started_jobs.push((job, moment));
         self.started_jobs
             .sort_unstable_by_key(|(_, moment)| *moment);
+    }
+
+    pub(crate) fn refresh_job_notice(&mut self, now: Instant) -> Option<std::time::Duration> {
+        for job in [Job::Export, Job::Fix, Job::Operation] {
+            let transient = match job {
+                Job::Export => matches!(self.export, Export::Done { .. }),
+                Job::Fix => false,
+                Job::Operation => self
+                    .operation
+                    .as_ref()
+                    .is_some_and(StatusOperation::succeeded),
+            };
+            self.job_notices[job.index()].update(transient, now);
+        }
+        self.job_notices[self.job().index()].remaining(now)
+    }
+
+    pub(crate) fn job_notice_visible(&self) -> bool {
+        self.job_notices[self.job().index()].visible()
     }
 
     /// The file operation the middle group shows ([`StatusOperation`]).
@@ -3212,8 +3244,8 @@ impl Column {
                 shown_by_default: false,
                 can_hide: true,
                 right_aligned: false,
-                can_shrink: true,
-                can_grow: true,
+                can_shrink: false,
+                can_grow: false,
                 sort_key: Some(SortKey::Extension),
                 export_column: Some(EsColumn::Extension),
             },
@@ -3243,13 +3275,13 @@ pub(crate) struct ColumnRow {
     pub(crate) shown_by_default: bool,
     pub(crate) can_hide: bool,
     pub(crate) right_aligned: bool,
-    /// A fill may make it narrower than its widest cell. Size and the dates
-    /// say no, because part of the value is a wrong value (DESIGN.md:
-    /// Results list).
+    /// A fill may make it narrower than its widest cell. Size, Extension
+    /// and the dates say no, because part of the value is a wrong value
+    /// (DESIGN.md: Results list).
     pub(crate) can_shrink: bool,
-    /// A fill may make it wider than its widest cell. Size and the dates
-    /// say no, so the room the list has left goes to the columns whose text
-    /// can use it.
+    /// A fill may make it wider than its widest cell. Size, Extension and
+    /// the dates say no, so the room the list has left goes to the columns
+    /// whose text can use it.
     pub(crate) can_grow: bool,
     /// What a click on its header sorts by.
     pub(crate) sort_key: Option<SortKey>,
@@ -3268,7 +3300,7 @@ pub(crate) mod tests {
     use crate::core::captions::{self, list_message};
     use crate::core::fetch::{SelectionRows, WriteFailure};
     use crate::core::fixer::CommandEvent;
-    use crate::core::panel::ReadEvent;
+    use crate::core::panel::{self, ReadEvent};
     use crate::core::results::CHUNK_ROWS;
     use crate::core::results::tests::chunk;
     use crate::core::text::tests::{English, english};
@@ -4197,6 +4229,24 @@ pub(crate) mod tests {
         let texts: Vec<_> = status.right.iter().map(|part| part.text.as_str()).collect();
         assert_eq!(texts, ["3 files (1 KB)", "2 folders"]);
         assert_eq!(status.right[0].connector.as_deref(), Some("and"));
+    }
+
+    #[test]
+    fn commander_status_shows_the_active_selection_size_and_free_space() {
+        let mut model = model();
+        model.show_mode(Mode::Commander);
+        let folder = panel::Entry::new("Photos".encode_utf16().collect(), 0x10, 0, 0);
+        panel::tests::list(
+            model.panels_mut(),
+            r"C:\d",
+            vec![folder, panel::tests::file("a.txt", 1024, 0)],
+        );
+        model.panels.set_selected(Side::Left, vec![1..3].into());
+        model.panels.set_free(Side::Left, r"C:\d", Some(2 << 30));
+        assert_eq!(
+            captions::StatusCaptions::new(&model, &English).view,
+            "2 of 2 selected · (1 KB, 1 unknown) · 2.00 GB free"
+        );
     }
 
     /// The model keeps the latest status while the service does not
@@ -5477,6 +5527,59 @@ pub(crate) mod tests {
         assert_eq!(
             crate::core::captions::settings_job(&model, model.strings(), &English, true),
             crate::core::captions::JobCaption::default(),
+        );
+    }
+
+    #[test]
+    fn a_completed_delete_expires_and_a_new_operation_shows() {
+        let mut model = model();
+        let ended = |id| {
+            Some(StatusOperation::Ended {
+                id: OperationId::for_tests(id),
+                request: Arc::new(Request::Delete {
+                    sources: vec![r"C:\a.txt".into()],
+                }),
+                outcome: Arc::new(gozler_fileops::Outcome::new(
+                    gozler_fileops::End::Complete,
+                    1,
+                    0,
+                    Vec::new(),
+                    gozler_fileops::RingCounts::default(),
+                )),
+                numbered: false,
+            })
+        };
+        let start = Instant::now();
+        model.set_operation(ended(1));
+        model.refresh_job_notice(start);
+        assert!(
+            !captions::StatusCaptions::new(&model, &English)
+                .job
+                .text
+                .is_empty()
+        );
+        model.refresh_job_notice(start + std::time::Duration::from_secs(5));
+        assert!(
+            captions::StatusCaptions::new(&model, &English)
+                .job
+                .text
+                .is_empty()
+        );
+        model.set_operation(ended(1));
+        model.refresh_job_notice(start + std::time::Duration::from_secs(6));
+        assert!(
+            captions::StatusCaptions::new(&model, &English)
+                .job
+                .text
+                .is_empty()
+        );
+        model.set_operation(ended(2));
+        model.refresh_job_notice(start + std::time::Duration::from_secs(7));
+        assert!(
+            !captions::StatusCaptions::new(&model, &English)
+                .job
+                .text
+                .is_empty()
         );
     }
 

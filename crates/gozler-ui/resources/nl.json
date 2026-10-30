@@ -491,6 +491,9 @@
     "one_window": "Slechts één &venster tegelijk toestaan",
     "show_icons": "P&ictogrammen tonen in menu’s, knoppen en lijsten",
     "show_memory": "Geheugengebruik tonen in de status&balk",
+    "selection": "Selectie (Num + / Num −)",
+    "select_files": "Alleen bestanden sele&cteren",
+    "select_folders": "Ook &mappen selecteren",
     "sizes": "&Groottes tonen in:",
     "dates": "Korte &datumnotatie:"
   },

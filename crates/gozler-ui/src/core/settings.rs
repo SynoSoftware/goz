@@ -64,6 +64,8 @@ pub(crate) struct Choices {
     /// The status bar's memory group (DESIGN.md: Status bar).
     #[serde(default, deserialize_with = "or_default")]
     pub(crate) show_memory: bool,
+    #[serde(default = "on", deserialize_with = "on_or_default")]
+    pub(crate) select_folders: bool,
     #[serde(default, deserialize_with = "or_default")]
     pub(crate) size_format: SizeFormat,
     #[serde(default, deserialize_with = "or_default")]
@@ -139,6 +141,7 @@ impl Default for Choices {
             one_window: on(),
             show_icons: on(),
             show_memory: false,
+            select_folders: on(),
             size_format: SizeFormat::Kb,
             date_format: DateFormat::Full,
             open_folders: String::new(),
@@ -363,6 +366,7 @@ impl SettingsValues {
                 choices.one_window = defaults.one_window;
                 choices.show_icons = defaults.show_icons;
                 choices.show_memory = defaults.show_memory;
+                choices.select_folders = defaults.select_folders;
                 choices.size_format = defaults.size_format;
                 choices.date_format = defaults.date_format;
                 self.start_at_sign_in = false;
@@ -1230,12 +1234,13 @@ mod tests {
     #[test]
     fn a_damaged_value_falls_back_to_its_default() {
         let text = r#"{
-            "settings": { "language": 5, "copy_policy": "replace" },
+            "settings": { "language": 5, "copy_policy": "replace", "select_folders": 5 },
             "window": { "placement": { "left": 10, "top": 20, "right": 900, "bottom": 700, "maximized": true } }
         }"#;
         let settings: Settings = serde_json::from_str(text).expect("the file is an object");
         assert_eq!(settings.choices.language, LanguageChoice::Windows);
         assert_eq!(settings.choices.copy_policy, Policy::UpdateChanged);
+        assert!(settings.choices.select_folders);
         assert_eq!(
             settings.window.placement,
             Some(Placement {
@@ -1251,6 +1256,7 @@ mod tests {
             r#"{ "settings": { "language": "de" }, "window": { "placement": { "left": "x" } } }"#;
         let settings: Settings = serde_json::from_str(text).expect("the file is an object");
         assert_eq!(settings.choices.language, LanguageChoice::Tag("de".into()));
+        assert!(settings.choices.select_folders);
         assert_eq!(settings.window.placement, None);
 
         // A width that overflows `i32` would panic where the window

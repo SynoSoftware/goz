@@ -195,6 +195,12 @@ pub enum Test {
     NameStart(String),
     /// The full path starts with this text. From protocol 7.
     PathStart(String),
+    /// Positive text terms in their typed order, without overlapping matches.
+    Ordered {
+        terms: Vec<String>,
+        term_match: TermMatch,
+        match_path: bool,
+    },
     /// The extension is one of these, without the dot, compared ignoring case
     /// whatever the query's case.
     Extension(Vec<String>),
@@ -213,6 +219,56 @@ pub enum Test {
 }
 
 impl ParsedQuery {
+    /// Keeps positive literal terms in order. Path terms retain their
+    /// individual clauses for the path-component prefilters.
+    pub fn order_terms(&mut self, term_match: TermMatch) {
+        for match_path in [false, true] {
+            let mut positions = Vec::new();
+            let terms: Vec<_> = self
+                .clauses
+                .iter()
+                .enumerate()
+                .filter_map(|(index, clause)| {
+                    let [
+                        Term {
+                            negated: false,
+                            test,
+                        },
+                    ] = clause.terms.as_slice()
+                    else {
+                        return None;
+                    };
+                    match (test, term_match, match_path) {
+                        (Test::Name(text), TermMatch::Anywhere, false)
+                        | (Test::Path(text), TermMatch::Anywhere, true)
+                        | (Test::NameWordStart(text), TermMatch::WordStart, false)
+                        | (Test::PathWordStart(text), TermMatch::WordStart, true)
+                        | (Test::NameWholeWord(text), TermMatch::WholeWords, false)
+                        | (Test::PathWholeWord(text), TermMatch::WholeWords, true)
+                        | (Test::NameStart(text), TermMatch::NameStart, false)
+                        | (Test::PathStart(text), TermMatch::NameStart, true) => {
+                            positions.push(index);
+                            Some(text.clone())
+                        }
+                        _ => None,
+                    }
+                })
+                .collect();
+            if terms.len() > 1 {
+                if !match_path {
+                    for index in positions.into_iter().rev() {
+                        self.clauses.remove(index);
+                    }
+                }
+                self.clauses.push(Clause::single(Test::Ordered {
+                    terms,
+                    term_match,
+                    match_path,
+                }));
+            }
+        }
+    }
+
     /// Whether a term tests the size or a date, so an answer from a volume
     /// whose sizes and dates could not be read may leave files out.
     pub fn tests_size_or_date(&self) -> bool {
@@ -252,6 +308,7 @@ impl ParsedQuery {
                     | Test::PathWordStart(_)
                     | Test::NameStart(_)
                     | Test::PathStart(_)
+                    | Test::Ordered { .. }
             )
         })
     }
@@ -496,6 +553,9 @@ pub struct ParseOptions<'a> {
     /// as `path:` values do, instead of the name. `nopath:` still matches the
     /// name.
     pub match_path: bool,
+    /// Wildcards without a separator test the name even with `match_path`.
+    /// Explicit `path:` patterns keep testing the full path.
+    pub name_wildcards: bool,
     /// How text terms without a wildcard match: es `-ww` asks for whole
     /// words, as `ww:` values match, and the window passes its match mode.
     pub term_match: TermMatch,
@@ -512,7 +572,7 @@ pub struct ParseOptions<'a> {
 /// Where a text term's text must lie in the name, or in the full path for a
 /// path term. A wildcard already matches the whole name or path, so it
 /// ignores this.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum TermMatch {
     /// Anywhere, as a substring.
     #[default]
@@ -891,7 +951,7 @@ fn text_test(
     };
     Ok(text_of(
         text,
-        is_path || options.match_path,
+        is_path || options.match_path && !(wildcard && options.name_wildcards),
         Form::of(
             wildcard,
             if is_path {

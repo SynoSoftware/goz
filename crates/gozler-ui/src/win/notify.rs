@@ -24,9 +24,9 @@ use windows::Win32::UI::Controls::{
     HDN_DIVIDERDBLCLICKW, HDN_ENDDRAG, HDN_ITEMCHANGEDW, LVIF_IMAGE, LVIF_STATE, LVIF_TEXT,
     LVIR_BOUNDS, LVIR_ICON, LVIR_LABEL, LVIS_DROPHILITED, LVIS_FOCUSED, LVIS_SELECTED, LVITEMW,
     LVM_GETITEMRECT, LVM_GETITEMW, LVM_GETSUBITEMRECT, LVN_BEGINDRAG, LVN_BEGINRDRAG,
-    LVN_COLUMNCLICK, LVN_GETDISPINFOW, LVN_GETINFOTIPW, LVN_ITEMACTIVATE, LVN_ITEMCHANGED,
-    LVN_ODCACHEHINT, LVN_ODFINDITEMW, LVN_ODSTATECHANGED, NM_CLICK, NM_CUSTOMDRAW, NM_DBLCLK,
-    NM_KILLFOCUS, NM_RCLICK, NM_SETFOCUS, NMHDR, NMHEADERW, NMLISTVIEW, NMLVCACHEHINT,
+    LVN_COLUMNCLICK, LVN_ENDSCROLL, LVN_GETDISPINFOW, LVN_GETINFOTIPW, LVN_ITEMACTIVATE,
+    LVN_ITEMCHANGED, LVN_ODCACHEHINT, LVN_ODFINDITEMW, LVN_ODSTATECHANGED, NM_CLICK, NM_CUSTOMDRAW,
+    NM_DBLCLK, NM_KILLFOCUS, NM_RCLICK, NM_SETFOCUS, NMHDR, NMHEADERW, NMLISTVIEW, NMLVCACHEHINT,
     NMLVCUSTOMDRAW, NMLVDISPINFOW, NMLVGETINFOTIPW, NMLVODSTATECHANGE, NMMOUSE,
 };
 use windows::Win32::UI::WindowsAndMessaging::SendMessageW;
@@ -105,6 +105,8 @@ pub(crate) enum ListNotify<'a> {
     GetDispInfo(DispInfo<'a>),
     /// The rows the list is about to show.
     CacheHint(Range<u64>),
+    /// The list finished scrolling, so its visible rows can be measured.
+    ScrollEnded,
     /// A click on the header of the column at this index.
     ColumnClick(usize),
     CustomDraw(CustomDraw<'a>),
@@ -205,6 +207,7 @@ impl ListView {
         let list = unsafe {
             match header.code {
                 LVN_GETDISPINFOW => ListNotify::GetDispInfo(DispInfo(&mut *pointer.cast())),
+                LVN_ENDSCROLL => ListNotify::ScrollEnded,
                 LVN_ODCACHEHINT => {
                     let hint = &*pointer.cast::<NMLVCACHEHINT>();
                     let from = u64::try_from(hint.iFrom).unwrap_or(0);

@@ -31,21 +31,11 @@ impl PanelCaptions {
         let strings = model.strings();
         let panel = model.panels().panel(side);
         let quick = panel.quick_text();
-        let counts = match (quick, panel.view()) {
-            (Some(typed), _) => strings.format("panel.find", &[typed]),
-            (None, View::Folder) => panel_counts(strings, numbers, panel.counts()),
-            (None, View::Search(search)) => search_counts(strings, numbers, panel, search),
-            (None, View::Reading | View::Cancelled | View::NotReady { .. }) => String::new(),
-        };
+        let (counts, free) = Self::status(model, side, numbers);
+        let counts = quick.map_or(counts, |typed| strings.format("panel.find", &[typed]));
         let all_drives = panel
             .search()
             .is_some_and(|search| search.look_in == LookIn::AllDrives);
-        let free = match (panel.view(), panel.free()) {
-            (View::Folder | View::Search(_), Some(free)) if !all_drives => {
-                strings.format("panel.free", &[&text::bytes(strings, numbers, free)])
-            }
-            _ => String::new(),
-        };
         let focused = panel
             .focused()
             .and_then(|row| model.panels().row(side, row));
@@ -65,6 +55,26 @@ impl PanelCaptions {
             free,
             folder,
         }
+    }
+
+    pub(super) fn status(model: &Model, side: Side, numbers: &dyn Numbers) -> (String, String) {
+        let strings = model.strings();
+        let panel = model.panels().panel(side);
+        let counts = match panel.view() {
+            View::Folder => panel_counts(strings, numbers, panel.counts()),
+            View::Search(search) => search_counts(strings, numbers, panel, search),
+            View::Reading | View::Cancelled | View::NotReady { .. } => String::new(),
+        };
+        let all_drives = panel
+            .search()
+            .is_some_and(|search| search.look_in == LookIn::AllDrives);
+        let free = match (panel.view(), panel.free()) {
+            (View::Folder | View::Search(_), Some(free)) if !all_drives => {
+                strings.format("panel.free", &[&text::bytes(strings, numbers, free)])
+            }
+            _ => String::new(),
+        };
+        (counts, free)
     }
 }
 

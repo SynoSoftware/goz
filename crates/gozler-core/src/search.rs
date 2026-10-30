@@ -27,6 +27,9 @@ pub struct SearchInput<'a> {
     /// Name terms and regular expressions test the full path instead of
     /// the name.
     pub match_path: bool,
+    /// Wildcards without a separator test the name; `path:` still tests
+    /// the full path.
+    pub name_wildcards: bool,
     /// More query texts, such as the window's filters, each parsed on its
     /// own and every clause added to the text's, so neither can change what
     /// the other means: an unclosed `"` or a trailing `|` in the text stays
@@ -67,6 +70,7 @@ impl Search {
             ParseOptions {
                 match_case: input.match_case,
                 match_path: input.match_path,
+                name_wildcards: input.name_wildcards,
                 term_match,
                 working_dir: input.working_dir,
                 query_start: Some(input.query_start),
@@ -129,6 +133,7 @@ mod tests {
             text_match: TextMatch::Terms(TermMatch::Anywhere),
             match_case: false,
             match_path: false,
+            name_wildcards: false,
             filters: &["ext:pdf".to_owned()],
             regexes: &[],
             scope: None,
@@ -157,6 +162,7 @@ mod tests {
                 text_match: TextMatch::Regex,
                 match_case: true,
                 match_path: false,
+                name_wildcards: false,
                 filters: &[],
                 regexes: &[],
                 scope: None,

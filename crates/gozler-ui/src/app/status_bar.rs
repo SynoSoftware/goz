@@ -37,6 +37,7 @@ const APP_MEMORY: usize = 1;
 const FILES_TOTAL: usize = 2;
 const JOB_TEXT: usize = 3;
 const ACTIVITY_TEXT: usize = 4;
+const VIEW_TEXT: usize = 5;
 
 #[derive(Clone, Copy)]
 pub(super) enum Slot {
@@ -58,6 +59,7 @@ pub(super) enum Entry<'a> {
 
 pub(super) struct StatusBar {
     bar: controls::StatusBar,
+    view: Label,
     text: Label,
     indexing: RefCell<Vec<Indexing>>,
     progress: ProgressBar,
@@ -101,13 +103,14 @@ impl StatusBar {
         let bar = controls::StatusBar::create(parent, ControlId::Status.id(), size_grip)?;
         let status = StatusBar {
             bar,
+            view: Label::create_heading(bar.hwnd(), ControlId::StatusView.id())?,
             text: Label::create_line(bar.hwnd(), ControlId::StatusText.id())?,
             indexing: RefCell::new(Vec::new()),
             progress: ProgressBar::create(bar.hwnd(), ControlId::StatusProgress.id())?,
             progress_moving: Cell::new(false),
             cancel: Button::create(bar.hwnd(), ControlId::StatusCancel.id())?,
             show_details: None,
-            part_tips: Some(Tooltip::create_areas(bar.hwnd(), 5)?),
+            part_tips: Some(Tooltip::create_areas(bar.hwnd(), 6)?),
             transfer: None,
             split: Cell::new(None),
         };
@@ -130,16 +133,21 @@ impl StatusBar {
 
     /// The controls that show text in their parent's font.
     pub(super) fn text_controls(&self) -> Vec<Hwnd> {
-        [self.bar.hwnd(), self.text.hwnd(), self.cancel.hwnd()]
-            .into_iter()
-            .chain(
-                self.indexing
-                    .borrow()
-                    .iter()
-                    .flat_map(Indexing::text_controls),
-            )
-            .chain(self.transfer.into_iter().flat_map(Transfer::text_controls))
-            .collect()
+        [
+            self.bar.hwnd(),
+            self.view.hwnd(),
+            self.text.hwnd(),
+            self.cancel.hwnd(),
+        ]
+        .into_iter()
+        .chain(
+            self.indexing
+                .borrow()
+                .iter()
+                .flat_map(Indexing::text_controls),
+        )
+        .chain(self.transfer.into_iter().flat_map(Transfer::text_controls))
+        .collect()
     }
 
     pub(super) fn set_progress_captions(&self, captions: &[String; 2]) {
@@ -196,6 +204,18 @@ impl StatusBar {
     }
 
     fn place_controls(&self, layout: &StatusLayout) {
+        let inset = self.content_inset();
+        let view = Rect {
+            x: inset,
+            y: layout.middle.y,
+            width: (layout.groups[0] - inset - inset).max(Px(0)),
+            height: layout.middle.height,
+        };
+        win::move_children(&[(self.view.hwnd(), view)]);
+        if let Some(tips) = self.part_tips {
+            tips.place_area(VIEW_TEXT, view);
+            tips.set_area(VIEW_TEXT, &self.view.hwnd().text());
+        }
         if let Some(tips) = &self.part_tips {
             // A hidden group's tips cover nothing.
             let (service, app) = layout
@@ -316,6 +336,11 @@ impl StatusBar {
         activity: &[&IndexingCaption],
         transfer: Option<&crate::core::status_transfer::Caption>,
     ) -> Option<Rect> {
+        let mut content = *layout;
+        let inset = self.content_inset();
+        content.middle.x = content.middle.x + inset;
+        content.middle.width = (content.middle.width - inset - inset).max(Px(0));
+        let layout = &content;
         let font = Font::of(self.bar.hwnd()).ok()?;
         let meter = TextMeter::new(&font);
         let dpi = self.bar.hwnd().dpi();
@@ -513,7 +538,7 @@ impl StatusBar {
                 }
             })
             .collect();
-        let view = self.bar.text(VIEW_GROUP);
+        let view = self.view.hwnd().text();
         let view = if view.is_empty() {
             Px(0)
         } else {
@@ -624,7 +649,16 @@ impl StatusBar {
     }
 
     fn show_view(&self, text: &str) {
-        self.bar.set_text(VIEW_GROUP, text);
+        self.bar.set_text(VIEW_GROUP, "");
+        self.view.hwnd().set_text(text);
+        self.view.hwnd().set_visible(!text.is_empty());
+    }
+
+    fn content_inset(&self) -> Px {
+        Px(6).rescale(
+            crate::core::layout::Dpi::new(96).expect("96 is not zero"),
+            self.bar.hwnd().dpi(),
+        )
     }
 
     /// Shows the job as `text`, with its progress bar and Cancel. Returns
