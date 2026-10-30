@@ -197,7 +197,7 @@ pub(crate) enum Export {
     },
 }
 
-/// A job that the status bar's middle group shows ([`Model::job`]).
+/// A job with its own status entry and cancellation.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Job {
     Export,
@@ -2211,8 +2211,8 @@ impl Model {
             || (self.settings.choices.show_memory && on_screen)
     }
 
-    /// The job the status bar's middle group shows: the newest running
-    /// one, or the one started last when none runs (DESIGN.md: Status bar).
+    /// File > Cancel targets the newest running job, or the last started
+    /// job when none runs; status buttons target their individual jobs.
     pub(crate) fn job(&self) -> Job {
         let runs = |job: &Job| match job {
             Job::Export => self.exporting(),
@@ -2260,11 +2260,14 @@ impl Model {
             };
             self.job_notices[job.index()].update(transient, now);
         }
-        self.job_notices[self.job().index()].remaining(now)
+        self.job_notices
+            .iter()
+            .filter_map(|notice| notice.remaining(now))
+            .min()
     }
 
-    pub(crate) fn job_notice_visible(&self) -> bool {
-        self.job_notices[self.job().index()].visible()
+    pub(crate) fn job_notice_visible(&self, job: Job) -> bool {
+        self.job_notices[job.index()].visible()
     }
 
     /// The file operation the middle group shows ([`StatusOperation`]).
@@ -2287,10 +2290,13 @@ impl Model {
         self.operation = operation;
     }
 
-    /// Whether File > Cancel, and the status bar's Cancel, can stop the job
-    /// that [`Self::job`] says the status bar shows.
+    /// Whether File > Cancel can stop the job named by [`Self::job`].
     pub(crate) fn can_cancel_job(&self) -> bool {
-        match self.job() {
+        self.can_cancel(self.job())
+    }
+
+    pub(crate) fn can_cancel(&self, job: Job) -> bool {
+        match job {
             Job::Export => self.exporting(),
             Job::Fix => self.fix.can_cancel(),
             Job::Operation => self
@@ -2300,9 +2306,13 @@ impl Model {
         }
     }
 
-    /// Stops the job that the status bar shows, if it can stop.
+    /// Stops the job named by [`Self::job`], if it can stop.
     pub(crate) fn cancel_job(&mut self) -> Accepted {
-        match self.job() {
+        self.cancel(self.job())
+    }
+
+    pub(crate) fn cancel(&mut self, job: Job) -> Accepted {
+        match job {
             Job::Export => self.cancel_export(),
             Job::Fix => self.cancel_fix(),
             Job::Operation => match &self.operation {
@@ -5301,7 +5311,11 @@ pub(crate) mod tests {
         );
         model.accept(status(&ask, VolumePhase::Live));
         assert!(!model.polls_status(false));
-        assert_eq!(captions::StatusCaptions::new(&model, &English).job.text, "");
+        assert!(
+            captions::StatusCaptions::new(&model, &English)
+                .jobs
+                .is_empty()
+        );
     }
 
     /// S6, and C6's search as you type: with them off, the empty search and
@@ -5489,12 +5503,10 @@ pub(crate) mod tests {
         }
     }
 
-    /// The middle group shows one job: the newest of the running ones, so
-    /// an export started during a copy shows, and the copy shows again
-    /// when the export ends only if it started later (DESIGN.md: Status
-    /// bar; DESIGN.md: File operations).
+    /// File > Cancel follows receipt order, even when a delayed operation
+    /// calculation arrives after another job started.
     #[test]
-    fn the_newest_running_job_shows() {
+    fn file_cancel_follows_the_newest_running_job() {
         let mut model = showing(10);
         let running = |id| {
             Some(StatusOperation::Running {
@@ -5531,6 +5543,27 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn concurrent_jobs_keep_their_own_progress_and_cancellation() {
+        let mut model = showing(10);
+        model.start_fix(&Fix::Update);
+        export(&mut model);
+        let status = captions::StatusCaptions::new(&model, &English);
+        assert_eq!(
+            status.jobs.iter().map(|(job, _)| *job).collect::<Vec<_>>(),
+            [Job::Export, Job::Fix]
+        );
+        assert!(
+            status.jobs.iter().all(|(_, caption)| caption.cancel
+                && caption.progress == captions::JobProgress::Unmeasured)
+        );
+        model.cancel(Job::Fix);
+        assert!(!model.fix().running());
+        assert!(model.exporting());
+        model.cancel(Job::Export);
+        assert!(!model.exporting());
+    }
+
+    #[test]
     fn a_completed_delete_expires_and_a_new_operation_shows() {
         let mut model = model();
         let ended = |id| {
@@ -5554,31 +5587,27 @@ pub(crate) mod tests {
         model.refresh_job_notice(start);
         assert!(
             !captions::StatusCaptions::new(&model, &English)
-                .job
-                .text
+                .jobs
                 .is_empty()
         );
         model.refresh_job_notice(start + std::time::Duration::from_secs(5));
         assert!(
             captions::StatusCaptions::new(&model, &English)
-                .job
-                .text
+                .jobs
                 .is_empty()
         );
         model.set_operation(ended(1));
         model.refresh_job_notice(start + std::time::Duration::from_secs(6));
         assert!(
             captions::StatusCaptions::new(&model, &English)
-                .job
-                .text
+                .jobs
                 .is_empty()
         );
         model.set_operation(ended(2));
         model.refresh_job_notice(start + std::time::Duration::from_secs(7));
         assert!(
             !captions::StatusCaptions::new(&model, &English)
-                .job
-                .text
+                .jobs
                 .is_empty()
         );
     }

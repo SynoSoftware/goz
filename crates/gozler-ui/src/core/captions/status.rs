@@ -19,7 +19,8 @@ use std::path::PathBuf;
 pub(crate) struct StatusCaptions {
     /// What the view holds: the results and the selection.
     pub(crate) view: String,
-    pub(crate) job: JobCaption,
+    pub(crate) jobs: Vec<(Job, JobCaption)>,
+    pub(crate) transfer: Option<crate::core::status_transfer::Caption>,
     pub(crate) indexing: Vec<IndexingCaption>,
     /// The service and index state, followed by the search's totals, each
     /// after its icon.
@@ -106,13 +107,10 @@ impl MemoryWidest {
     }
 }
 
-/// The status bar's middle group: the running job, or the last job's
-/// result.
+/// One status entry's progress or retained result.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct JobCaption {
     pub(crate) text: String,
-    pub(crate) transfer: Option<crate::core::status_transfer::Caption>,
-    pub(crate) transfer_only: bool,
     pub(crate) progress: JobProgress,
     /// Whether the work shown here can stop now.
     pub(crate) cancel: bool,
@@ -164,34 +162,38 @@ impl StatusCaptions {
                     super::PanelCaptions::status(model, model.panels().active(), numbers);
                 joined(model.strings(), counts, free)
             },
-            job: {
-                let (text, progress) = match model.job() {
-                    Job::Export => (
-                        export_status(model, numbers),
-                        if model.exporting() {
-                            JobProgress::Unmeasured
-                        } else {
-                            JobProgress::None
+            jobs: [Job::Export, Job::Fix, Job::Operation]
+                .into_iter()
+                .filter_map(|job| {
+                    if !model.job_notice_visible(job) {
+                        return None;
+                    }
+                    let (text, progress) = match job {
+                        Job::Export => (
+                            export_status(model, numbers),
+                            if model.exporting() {
+                                JobProgress::Unmeasured
+                            } else {
+                                JobProgress::None
+                            },
+                        ),
+                        Job::Fix => fix_status(model.strings(), numbers, model.fix()),
+                        Job::Operation => operation_status(model, numbers),
+                    };
+                    if text.is_empty() {
+                        return None;
+                    }
+                    Some((
+                        job,
+                        JobCaption {
+                            text,
+                            progress,
+                            cancel: model.can_cancel(job),
                         },
-                    ),
-                    Job::Fix => fix_status(model.strings(), numbers, model.fix()),
-                    Job::Operation => operation_status(model, numbers),
-                };
-                JobCaption {
-                    text: if model.job_notice_visible() {
-                        text
-                    } else {
-                        String::new()
-                    },
-                    transfer: model.transfer_caption(),
-                    transfer_only: model.job() == Job::Operation
-                        && model
-                            .operation()
-                            .is_some_and(file_operations::StatusOperation::is_transfer),
-                    progress,
-                    cancel: model.can_cancel_job(),
-                }
-            },
+                    ))
+                })
+                .collect(),
+            transfer: model.transfer_caption(),
             right: std::iter::once(ValuePart::plain(service))
                 .filter(|part| !part.text.is_empty())
                 .chain(

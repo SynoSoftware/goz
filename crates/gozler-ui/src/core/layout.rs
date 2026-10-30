@@ -1903,13 +1903,9 @@ pub(crate) enum TextForm {
 }
 
 impl StatusLayout {
-    pub(crate) fn job_text_width(&self, wanted: Px, controls: Px, indexing: Px, dpi: Dpi) -> Px {
-        let gap = if indexing > Px(0) && wanted + controls > Px(0) {
-            Dip(6).to_px(dpi)
-        } else {
-            Px(0)
-        };
-        wanted.min((self.middle.width - controls - indexing - gap).max(Px(0)))
+    pub(crate) fn reserve_middle(mut self, width: Px) -> Self {
+        self.minimum_middle = self.minimum_middle.max(width);
+        self
     }
 
     pub(crate) fn place_entries(&self, widths: &[Px], dpi: Dpi) -> Vec<Rect> {
@@ -2211,13 +2207,25 @@ mod tests {
         let indexing = captions.status.indexing + Px(4);
         let controls = layout.progress.width + layout.cancel.width + Px(12);
         let wanted = layout.running_text + Px(4);
-        let text = layout.job_text_width(wanted, controls, indexing, dpi);
-        assert_eq!(text, Px(12));
-        let placed = layout.place_entries(&[text + controls, indexing], dpi);
+        let widths = crate::core::status_bar::work_widths(
+            layout.middle.width,
+            &[wanted + controls, indexing],
+            &[controls + Px(12), indexing],
+            Px(6),
+        );
+        let placed = layout.place_entries(&widths, dpi);
         assert!(placed[0].width > controls);
         assert!(placed[1].width >= captions.status.indexing);
         assert_eq!(placed[1].right(), layout.middle.right());
-        assert_eq!(layout.job_text_width(wanted, controls, Px(0), dpi), wanted);
+        assert_eq!(
+            crate::core::status_bar::work_widths(
+                layout.middle.width,
+                &[wanted + controls],
+                &[controls],
+                Px(6)
+            ),
+            [wanted + controls]
+        );
     }
 
     /// The main window's right group of 800 px, and the width it has room

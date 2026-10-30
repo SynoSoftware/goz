@@ -1,5 +1,36 @@
 use std::time::{Duration, Instant};
 
+use super::layout::Px;
+
+pub(crate) fn work_widths(room: Px, wanted: &[Px], minimum: &[Px], gap: Px) -> Vec<Px> {
+    let available = (room.0 - gap.0 * wanted.len().saturating_sub(1) as i32).max(0);
+    let minimum: Vec<i32> = wanted
+        .iter()
+        .zip(minimum)
+        .map(|(wanted, minimum)| wanted.0.min(minimum.0))
+        .collect();
+    let total_minimum: i32 = minimum.iter().sum();
+    let extra: i32 = wanted
+        .iter()
+        .zip(&minimum)
+        .map(|(wanted, minimum)| wanted.0 - minimum)
+        .sum();
+    let spare = (available - total_minimum).max(0).min(extra);
+    wanted
+        .iter()
+        .zip(minimum)
+        .map(|(wanted, minimum)| {
+            Px(if total_minimum > available {
+                (i64::from(minimum) * i64::from(available) / i64::from(total_minimum)) as i32
+            } else {
+                minimum
+                    + (i64::from(wanted.0 - minimum) * i64::from(spare) / i64::from(extra.max(1)))
+                        as i32
+            })
+        })
+        .collect()
+}
+
 const NOTICE_DURATION: Duration = Duration::from_secs(5);
 
 #[derive(Clone, Copy, Default)]
@@ -38,6 +69,18 @@ impl Notice {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn concurrent_work_shares_room_without_losing_its_controls() {
+        assert_eq!(
+            work_widths(Px(350), &[Px(300), Px(300)], &[Px(150), Px(150)], Px(6)),
+            [Px(172), Px(172)]
+        );
+        assert_eq!(
+            work_widths(Px(80), &[Px(300), Px(300)], &[Px(150), Px(150)], Px(6)),
+            [Px(37), Px(37)]
+        );
+    }
 
     #[test]
     fn repeated_updates_do_not_keep_a_completion_notice_alive() {

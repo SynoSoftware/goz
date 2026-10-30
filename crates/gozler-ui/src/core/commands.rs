@@ -68,10 +68,11 @@ pub(crate) enum CommandId {
     Synchronize,
     SelectFiles,
     UnselectFiles,
+    Update,
 }
 
 impl CommandId {
-    pub(crate) const ALL: [CommandId; 42] = [
+    pub(crate) const ALL: [CommandId; 43] = [
         CommandId::Open,
         CommandId::OpenFileLocation,
         CommandId::ShowInCommander,
@@ -114,6 +115,7 @@ impl CommandId {
         CommandId::Synchronize,
         CommandId::SelectFiles,
         CommandId::UnselectFiles,
+        CommandId::Update,
     ];
 
     /// The command's row; a `match`, so every command has one.
@@ -222,6 +224,16 @@ impl CommandId {
                     None,
                 ),
                 C::About => ("command.about", &[], always, None),
+                C::Update => (
+                    "command.update",
+                    &[],
+                    |s| {
+                        s.model.choices().check_for_updates
+                            && s.model.newer_release().is_some()
+                            && !s.model.fix().running()
+                    },
+                    None,
+                ),
                 C::ShowSearch => ("command.show_search", &[], always, None),
                 C::ShowCommander => ("command.show_commander", &[], always, None),
                 // Delete, Cut and Paste are keys of the list (control_key).
@@ -299,6 +311,7 @@ impl CommandId {
             C::Refresh => Glyph::Refresh,
             C::SearchSyntax => Glyph::Help,
             C::About => Glyph::Info,
+            C::Update => Glyph::Refresh,
             C::ShowSearch | C::ShowCommander => Glyph::BackToWindow,
             C::CopyToFolder => Glyph::CopyTo,
             C::MoveToFolder => Glyph::MoveToFolder,
@@ -336,6 +349,7 @@ impl CommandId {
             | C::Language
             | C::SearchSyntax
             | C::About
+            | C::Update
             | C::ShowSearch
             | C::ShowCommander
             | C::FileOperations
@@ -1571,7 +1585,10 @@ fn every_menu() -> Vec<Menu> {
                 run(&[C::FileOperations]),
             ],
         ),
-        menu("menu.help", vec![run(&[C::SearchSyntax]), run(&[C::About])]),
+        menu(
+            "menu.help",
+            vec![run(&[C::SearchSyntax]), run(&[C::Update, C::About])],
+        ),
         Menu {
             label: C::Language.row().label,
             groups: vec![
@@ -2259,6 +2276,21 @@ mod tests {
         model.start_export(r"D:\results.csv".into(), ExportFormat::Csv, &order);
         assert!(!enabled(&model, CommandId::ExportResults));
         assert!(enabled(&model, CommandId::Cancel));
+    }
+
+    #[test]
+    fn update_requires_a_newer_release_and_waits_for_the_running_installer() {
+        let mut model = showing(10);
+        assert!(!enabled(&model, CommandId::Update));
+        let mut choices = model.choices().clone();
+        choices.check_for_updates = true;
+        model.set_choices(choices);
+        model.set_newer_release("0.6.0".into());
+        assert!(enabled(&model, CommandId::Update));
+        model.start_fix(&Fix::Update);
+        assert!(!enabled(&model, CommandId::Update));
+        model.cancel_fix();
+        assert!(enabled(&model, CommandId::Update));
     }
 
     /// T11: a context menu stays open while new results arrive, and its

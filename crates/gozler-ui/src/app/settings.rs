@@ -1447,7 +1447,6 @@ impl<'a> SettingsDialog<'a> {
                             text: work::waiting(&self.strings, None),
                             progress: JobProgress::Unmeasured,
                             cancel: true,
-                            ..JobCaption::default()
                         };
                     }
                     (
@@ -1472,7 +1471,10 @@ impl<'a> SettingsDialog<'a> {
                     StatusSlot::Left,
                     StatusEntry::Text(captions::settings_status_view(&self.strings, changed)),
                 ),
-                (StatusSlot::Center, StatusEntry::Work(&job)),
+                (
+                    StatusSlot::Center,
+                    StatusEntry::Work(super::status_bar::WorkId::Waiting, &job),
+                ),
             ],
             self.status_layout.get().as_ref(),
         ) && let Some(pages) = dialog::item(dialog, ControlId::SettingsPages.id())

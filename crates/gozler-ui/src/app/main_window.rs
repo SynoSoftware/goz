@@ -19,7 +19,7 @@ use super::file_operations::{FileOperations, FilesSource};
 use super::icons::Icons;
 use super::include::{Elevated, NotSaved};
 use super::settings::SettingsDialog;
-use super::status_bar::{Entry as StatusEntry, Slot as StatusSlot, StatusBar};
+use super::status_bar::{Entry as StatusEntry, Slot as StatusSlot, StatusBar, WorkId};
 use super::viewer::Viewers;
 use super::work::{
     Awaited, CopyFailure, CopyNotice, OpenTarget, Opened, PathAction, PathPurpose, PreparedPaths,
@@ -843,38 +843,34 @@ impl MainWindow {
 
     fn show_status(&self, status: &StatusCaptions) {
         let controls = self.controls();
-        let mut job = status.job.clone();
-        let settings_fix = self.settings.open.get().is_some_and(|open| open.follow_fix)
-            && self.model.borrow().job() == Job::Fix;
-        if settings_fix {
-            job = JobCaption {
-                transfer: job.transfer,
-                transfer_only: true,
-                ..JobCaption::default()
-            };
-        } else {
-            let now = Instant::now();
+        let mut jobs = status.jobs.clone();
+        let settings_fix = self.settings.open.get().is_some_and(|open| open.follow_fix);
+        let now = Instant::now();
+        {
             let model = self.model.borrow();
-            match model.job() {
-                Job::Fix if self.fix_waiting(now) == Some(Waiting::Slow) => {
-                    job.text = crate::core::work::waiting(model.strings(), None);
-                }
-                Job::Export
-                    if self.request_waiting(Purpose::Export, now) == Some(Waiting::Slow) =>
-                {
-                    if let crate::core::model::Export::Running { path, .. } = model.export() {
-                        job.text = crate::core::work::waiting(model.strings(), path.to_str());
+            jobs.retain(|(job, _)| *job != Job::Fix || !settings_fix);
+            for (job, caption) in &mut jobs {
+                match job {
+                    Job::Fix if self.fix_waiting(now) == Some(Waiting::Slow) => {
+                        caption.text = crate::core::work::waiting(model.strings(), None);
                     }
+                    Job::Export
+                        if self.request_waiting(Purpose::Export, now) == Some(Waiting::Slow) =>
+                    {
+                        if let crate::core::model::Export::Running { path, .. } = model.export() {
+                            caption.text =
+                                crate::core::work::waiting(model.strings(), path.to_str());
+                        }
+                    }
+                    _ => {}
                 }
-                _ => {}
-            }
-            if let Some(awaited) = self.main_waiting() {
-                job.text = crate::core::work::waiting(model.strings(), None);
-                job.progress = captions::JobProgress::Unmeasured;
-                job.cancel = awaited.can_cancel();
-                job.transfer_only = false;
             }
         }
+        let waiting = self.main_waiting().map(|awaited| JobCaption {
+            text: crate::core::work::waiting(self.model.borrow().strings(), None),
+            progress: captions::JobProgress::Unmeasured,
+            cancel: awaited.can_cancel(),
+        });
         let cancel = self
             .model
             .borrow()
@@ -900,8 +896,17 @@ impl MainWindow {
                 },
             ),
         ];
-        if !job.transfer_only {
-            entries.push((StatusSlot::Center, StatusEntry::Work(&job)));
+        for (id, caption) in &jobs {
+            entries.push((
+                StatusSlot::Center,
+                StatusEntry::Work(WorkId::Job(*id), caption),
+            ));
+        }
+        if let Some(caption) = &waiting {
+            entries.push((
+                StatusSlot::Center,
+                StatusEntry::Work(WorkId::Waiting, caption),
+            ));
         }
         entries.extend(
             status
@@ -909,7 +914,7 @@ impl MainWindow {
                 .iter()
                 .map(|caption| (StatusSlot::Center, StatusEntry::Indexing(caption))),
         );
-        if let Some(transfer) = &job.transfer {
+        if let Some(transfer) = &status.transfer {
             entries.push((StatusSlot::Center, StatusEntry::Transfer(transfer)));
         }
         if controls.status.render(&entries, layout.as_ref()) {
@@ -1755,6 +1760,7 @@ impl MainWindow {
                     self.open_dialog(hwnd, DialogId::About, &about);
                     return;
                 }
+                CommandId::Update => return self.run_fix(hwnd, Fix::Update),
                 CommandId::Open => {
                     if let Some(entries) = self.selected_source(list) {
                         self.open_chosen(list, entries);
@@ -2810,8 +2816,14 @@ impl MainWindow {
         {
             return;
         }
-        if controls.status.cancel_clicked(event) {
-            self.cancel_job(hwnd);
+        if let Some(id) = controls.status.cancelled(event) {
+            match id {
+                WorkId::Job(job) => {
+                    let accepted = self.model.borrow_mut().cancel(job);
+                    self.apply(hwnd, accepted);
+                }
+                WorkId::Waiting => self.cancel_job(hwnd),
+            }
         } else if controls
             .status
             .show_details()

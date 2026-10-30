@@ -241,13 +241,14 @@ impl SetupStep {
         })
     }
 
-    /// Whether Cancel stops the fix in this step. The question is the
-    /// window's to close, the check takes under a second, and the setup is
-    /// Windows' to start.
+    /// The question is the window's to close, and the setup is Windows'
+    /// to start; cancellation during hashing prevents the setup starting.
     pub(crate) fn can_cancel(&self) -> bool {
         matches!(
             self,
-            SetupStep::FindingRelease | SetupStep::Downloading { .. }
+            SetupStep::FindingRelease
+                | SetupStep::Downloading { .. }
+                | SetupStep::CheckingFile { .. }
         )
     }
 }
@@ -579,7 +580,10 @@ mod tests {
             })
         );
         assert!(fix.accept(setup_event(SetupEvent::Checking)));
-        assert!(!fix.cancel(), "the check runs to its end");
+        let mut cancelled = fix.clone();
+        assert!(cancelled.cancel());
+        assert!(!cancelled.accept(setup_event(SetupEvent::Ready("cancelled.exe".into()))));
+        assert_eq!(cancelled.starting_setup(), None);
         let ready = SetupEvent::Ready(PathBuf::from("setup.exe"));
         assert!(fix.accept(setup_event(ready)));
         assert_eq!(fix.starting_setup(), Some(Path::new("setup.exe")));

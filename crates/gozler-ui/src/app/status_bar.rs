@@ -7,16 +7,16 @@
 //! every control.
 
 mod indexing;
+mod work;
 
 use self::indexing::Indexing;
-use crate::core::captions::{
-    ButtonIcon, IndexingCaption, JobCaption, JobProgress, MemoryCaptions, ValuePart,
-};
+use self::work::Work;
+use crate::core::captions::{IndexingCaption, JobCaption, JobProgress, MemoryCaptions, ValuePart};
 use crate::core::glyph::Glyph;
 use crate::core::ids::ControlId;
 use crate::core::layout::{Px, Rect, RightWidth, StatusLayout, TextForm};
 use crate::core::status_transfer::Input;
-use crate::win::controls::{self, Button, Label, ProgressBar, Tooltip};
+use crate::win::controls::{self, Label, Tooltip};
 use crate::win::gdi::{Font, TextMeter};
 use crate::win::notify::{ControlEvent, Notification};
 use crate::win::status_transfer::Transfer;
@@ -35,9 +35,8 @@ const RIGHT_GROUP: usize = 2;
 const SERVICE_MEMORY: usize = 0;
 const APP_MEMORY: usize = 1;
 const FILES_TOTAL: usize = 2;
-const JOB_TEXT: usize = 3;
-const ACTIVITY_TEXT: usize = 4;
-const VIEW_TEXT: usize = 5;
+const ACTIVITY_TEXT: usize = 3;
+const VIEW_TEXT: usize = 4;
 
 #[derive(Clone, Copy)]
 pub(super) enum Slot {
@@ -46,10 +45,16 @@ pub(super) enum Slot {
     Right,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum WorkId {
+    Job(crate::core::model::Job),
+    Waiting,
+}
+
 pub(super) enum Entry<'a> {
     Text(&'a str),
     Indexing(&'a IndexingCaption),
-    Work(&'a JobCaption),
+    Work(WorkId, &'a JobCaption),
     Transfer(&'a crate::core::status_transfer::Caption),
     Values {
         parts: &'a [ValuePart],
@@ -60,17 +65,15 @@ pub(super) enum Entry<'a> {
 pub(super) struct StatusBar {
     bar: controls::StatusBar,
     view: Label,
-    text: Label,
+    work: Vec<(WorkId, Work)>,
     indexing: RefCell<Vec<Indexing>>,
-    progress: ProgressBar,
-    progress_moving: Cell<bool>,
-    cancel: Button,
     /// The main window's Show details, a toolbar of its one icon.
     show_details: Option<Toolbar>,
     /// The tooltips of the main window's memory figures and files total.
     part_tips: Option<Tooltip>,
     transfer: Option<Transfer>,
     split: Cell<Option<Px>>,
+    work_width: Cell<Px>,
 }
 
 impl StatusBar {
@@ -104,18 +107,22 @@ impl StatusBar {
         let status = StatusBar {
             bar,
             view: Label::create_heading(bar.hwnd(), ControlId::StatusView.id())?,
-            text: Label::create_line(bar.hwnd(), ControlId::StatusText.id())?,
+            work: [
+                WorkId::Job(crate::core::model::Job::Export),
+                WorkId::Job(crate::core::model::Job::Fix),
+                WorkId::Job(crate::core::model::Job::Operation),
+                WorkId::Waiting,
+            ]
+            .into_iter()
+            .map(|id| Work::create(bar.hwnd()).map(|work| (id, work)))
+            .collect::<windows::core::Result<_>>()?,
             indexing: RefCell::new(Vec::new()),
-            progress: ProgressBar::create(bar.hwnd(), ControlId::StatusProgress.id())?,
-            progress_moving: Cell::new(false),
-            cancel: Button::create(bar.hwnd(), ControlId::StatusCancel.id())?,
             show_details: None,
-            part_tips: Some(Tooltip::create_areas(bar.hwnd(), 6)?),
+            part_tips: Some(Tooltip::create_areas(bar.hwnd(), 5)?),
             transfer: None,
             split: Cell::new(None),
+            work_width: Cell::new(Px(0)),
         };
-        status.progress.hwnd().set_visible(false);
-        status.cancel.hwnd().set_visible(false);
         Ok(status)
     }
 
@@ -133,35 +140,36 @@ impl StatusBar {
 
     /// The controls that show text in their parent's font.
     pub(super) fn text_controls(&self) -> Vec<Hwnd> {
-        [
-            self.bar.hwnd(),
-            self.view.hwnd(),
-            self.text.hwnd(),
-            self.cancel.hwnd(),
-        ]
-        .into_iter()
-        .chain(
-            self.indexing
-                .borrow()
-                .iter()
-                .flat_map(Indexing::text_controls),
-        )
-        .chain(self.transfer.into_iter().flat_map(Transfer::text_controls))
-        .collect()
+        [self.bar.hwnd(), self.view.hwnd()]
+            .into_iter()
+            .chain(self.work.iter().flat_map(|(_, work)| work.text_controls()))
+            .chain(
+                self.indexing
+                    .borrow()
+                    .iter()
+                    .flat_map(Indexing::text_controls),
+            )
+            .chain(self.transfer.into_iter().flat_map(Transfer::text_controls))
+            .collect()
     }
 
     pub(super) fn set_progress_captions(&self, captions: &[String; 2]) {
-        self.progress.hwnd().set_text(&captions[1]);
+        for (_, work) in &self.work {
+            work.set_progress_caption(&captions[1]);
+        }
     }
 
     pub(super) fn set_cancel_caption(&self, caption: &str) {
-        self.cancel.hwnd().set_text(caption);
-        self.show_cancel_icon();
+        for (_, work) in &self.work {
+            work.set_cancel_caption(caption);
+        }
     }
 
     /// Gives Cancel its icon, again when icons are shown or hidden.
     pub(super) fn show_cancel_icon(&self) {
-        self.cancel.set_icon(ButtonIcon::of("button.cancel", false));
+        for (_, work) in &self.work {
+            work.show_cancel_icon();
+        }
     }
 
     /// Fits the status bar to its parent's new size, with a drawing area
@@ -244,7 +252,7 @@ impl StatusBar {
     ) -> bool {
         let mut view = Vec::new();
         let mut activity = Vec::new();
-        let mut work = None;
+        let mut work = Vec::new();
         let mut transfer_caption = None;
         let mut right = Vec::new();
         let mut memory = None;
@@ -252,12 +260,7 @@ impl StatusBar {
             match (slot, entry) {
                 (Slot::Left, Entry::Text(text)) => view.push(*text),
                 (Slot::Center, Entry::Indexing(caption)) => activity.push(*caption),
-                (Slot::Center, Entry::Work(caption)) => {
-                    assert!(
-                        work.replace(*caption).is_none(),
-                        "the generic job has one owner"
-                    );
-                }
+                (Slot::Center, Entry::Work(id, caption)) => work.push((*id, *caption)),
                 (Slot::Center, Entry::Transfer(caption)) => {
                     assert!(
                         transfer_caption.replace(*caption).is_none(),
@@ -283,94 +286,78 @@ impl StatusBar {
             }
         }
         self.show_view(&view.join(" · "));
-        let empty = JobCaption::default();
-        let job = work.unwrap_or(&empty);
-        let job_text = if job.progress != JobProgress::None {
-            layout
-                .and_then(|layout| {
-                    crate::win::gdi::Font::of(self.bar.hwnd()).ok().map(|font| {
-                        crate::win::gdi::TextMeter::new(&font)
-                            .compact_path(&job.text, layout.running_text)
-                    })
-                })
-                .unwrap_or_else(|| job.text.clone())
+        let Some(layout) = layout else { return false };
+        let dpi = self.bar.hwnd().dpi();
+        let base = crate::core::layout::Dpi::new(96).expect("96 is not zero");
+        let minimum = work.iter().fold(Px(0), |width, (_, job)| {
+            width
+                + Px(48).rescale(base, dpi)
+                + if job.progress != JobProgress::None {
+                    layout.progress.width + Px(6).rescale(base, dpi)
+                } else {
+                    Px(0)
+                }
+                + if job.cancel {
+                    layout.cancel.width + Px(6).rescale(base, dpi)
+                } else {
+                    Px(0)
+                }
+        }) + Px(if transfer_caption.is_some() { 240 } else { 0 }).rescale(base, dpi)
+            + Px(6 * work.len() as i32 + 12).rescale(base, dpi);
+        self.work_width.set(minimum);
+        let layout = if self.transfer.is_some() {
+            self.show_window_end(layout, &right, memory)
         } else {
-            job.text.clone()
-        };
-        let job_text = job_text.as_str();
-        if let Some(transfer) = self.transfer {
-            if let (Some(caption), Some(layout)) = (transfer_caption, layout) {
-                let layout = self.show_window_end(layout, &right, memory);
-                let transfer_rect =
-                    self.place_activity(&layout, job, job_text, &activity, Some(caption));
-                let only = activity.is_empty()
-                    && job_text.is_empty()
-                    && job.progress == JobProgress::None
-                    && !job.cancel;
-                let lost = self.show_job(job, job_text);
-                let start = transfer_rect.map_or(layout.middle.right(), |rect| rect.x);
-                self.split.set((!only).then_some(start));
-                self.show_window_end(&layout, &right, memory);
-                return transfer.show(caption, transfer_rect.unwrap_or_default()) || lost;
-            }
-            self.split.set(None);
-            let lost = transfer.hide();
-            if let Some(layout) = layout {
-                let layout = self.show_window_end(layout, &right, memory);
-                self.place_activity(&layout, job, job_text, &activity, None);
-            }
-            return self.show_job(job, job_text) || lost;
-        }
-        if let Some(layout) = layout {
             self.place(layout);
-            self.place_activity(layout, job, job_text, &activity, None);
+            *layout
+        };
+        let (transfer_rect, mut lost) =
+            self.place_activity(&layout, &work, &activity, transfer_caption);
+        if let Some(transfer) = self.transfer {
+            self.split.set(
+                transfer_rect
+                    .filter(|_| !work.is_empty() || !activity.is_empty())
+                    .map(|rect| rect.x),
+            );
+            self.show_window_end(&layout, &right, memory);
+            lost |= match (transfer_caption, transfer_rect) {
+                (Some(caption), Some(rect)) => transfer.show(caption, rect),
+                _ => transfer.hide(),
+            };
         }
-        self.show_job(job, job_text)
+        lost
     }
 
     fn place_activity(
         &self,
         layout: &StatusLayout,
-        job: &JobCaption,
-        text: &str,
+        jobs: &[(WorkId, &JobCaption)],
         activity: &[&IndexingCaption],
         transfer: Option<&crate::core::status_transfer::Caption>,
-    ) -> Option<Rect> {
+    ) -> (Option<Rect>, bool) {
         let mut content = *layout;
         let inset = self.content_inset();
         content.middle.x = content.middle.x + inset;
         content.middle.width = (content.middle.width - inset - inset).max(Px(0));
         let layout = &content;
-        let font = Font::of(self.bar.hwnd()).ok()?;
+        let Ok(font) = Font::of(self.bar.hwnd()) else {
+            return (None, false);
+        };
         let meter = TextMeter::new(&font);
         let dpi = self.bar.hwnd().dpi();
         let base = crate::core::layout::Dpi::new(96).expect("96 is not zero");
         let gap = Px(6).rescale(base, dpi);
         let padding = Px(4).rescale(base, dpi);
-        let wanted_text = if text.is_empty() {
-            Px(0)
-        } else {
-            meter.plain_width(text).min(layout.running_text) + padding
-        };
-        let progress = job.progress != JobProgress::None;
-        let job_controls = if progress {
-            gap + layout.progress.width
-        } else {
-            Px(0)
-        } + if job.cancel {
-            gap + layout.cancel.width
-        } else {
-            Px(0)
-        };
         let indexing_minimum = activity.first().map_or(Px(0), |caption| {
             meter.plain_width(&caption.compact) + padding
         });
-        let text_width = layout.job_text_width(wanted_text, job_controls, indexing_minimum, dpi);
-        let job_width = text_width + job_controls;
         let mut indexing = self.indexing.borrow_mut();
         indexing.truncate(activity.len());
         while indexing.len() < activity.len() {
-            indexing.push(Indexing::create(self.bar.hwnd()).ok()?);
+            let Ok(control) = Indexing::create(self.bar.hwnd()) else {
+                return (None, false);
+            };
+            indexing.push(control);
         }
         let activity_widths: Vec<_> = activity
             .iter()
@@ -386,56 +373,68 @@ impl StatusBar {
             .iter()
             .fold(Px(0), |sum, width| sum + *width)
             + Px(gap.0 * activity.len().saturating_sub(1) as i32);
+        let entries = jobs.len() + usize::from(transfer.is_some());
         let activity_reserved = activity_wanted
             .min(Px(150).rescale(base, dpi))
             .max(indexing_minimum)
-            .min((layout.middle.width - job_width - gap).max(Px(0)));
-        let transfer_width = transfer
-            .zip(self.transfer)
-            .map_or(Px(0), |(caption, control)| {
-                control.width(
-                    caption,
-                    Rect {
-                        width: (layout.middle.width
-                            - job_width
-                            - activity_reserved
-                            - if activity_reserved > Px(0) {
-                                gap
-                            } else {
-                                Px(0)
-                            }
-                            - if job_width > Px(0) { gap } else { Px(0) })
-                        .max(Px(0)),
-                        ..layout.middle
-                    },
-                )
-            });
-        let gaps = usize::from(job_width > Px(0)) + usize::from(transfer_width > Px(0));
+            .min(
+                (layout.middle.width - Px(150 * entries as i32).rescale(base, dpi) - gap)
+                    .max(Px(0)),
+            );
+        let mut wanted = Vec::new();
+        let mut minimum = Vec::new();
+        for (_, job) in jobs {
+            let controls = if job.progress != JobProgress::None {
+                layout.progress.width + gap
+            } else {
+                Px(0)
+            } + if job.cancel {
+                layout.cancel.width + gap
+            } else {
+                Px(0)
+            };
+            wanted.push(meter.plain_width(&job.text).min(layout.running_text) + padding + controls);
+            minimum.push(Px(48).rescale(base, dpi) + controls);
+        }
+        if let Some((caption, control)) = transfer.zip(self.transfer) {
+            wanted.push(control.width(caption, layout.middle));
+            minimum.push(Px(240).rescale(base, dpi));
+        }
+        let room = (layout.middle.width
+            - activity_reserved
+            - if activity_reserved > Px(0) && entries > 0 {
+                gap
+            } else {
+                Px(0)
+            })
+        .max(Px(0));
+        let widths = crate::core::status_bar::work_widths(room, &wanted, &minimum, gap);
+        let used = widths.iter().fold(Px(0), |sum, width| sum + *width)
+            + Px(gap.0 * widths.len().saturating_sub(1) as i32);
         let activity_available =
-            (layout.middle.width - job_width - transfer_width - Px(gap.0 * gaps as i32)).max(Px(0));
+            (layout.middle.width - used - if used > Px(0) { gap } else { Px(0) }).max(Px(0));
         let compact = activity_available < activity_wanted;
         let activity_width = if compact {
             indexing_minimum.min(activity_available)
         } else {
             activity_wanted
         };
-        let widths: Vec<_> = [job_width, transfer_width, activity_width]
-            .into_iter()
-            .filter(|width| *width > Px(0))
-            .collect();
-        let placed = layout.place_entries(&widths, dpi);
-        let mut placed = placed.into_iter();
-        let job_rect =
-            (job_width > Px(0)).then(|| placed.next().expect("the visible job has an entry width"));
-        let transfer_rect = (transfer_width > Px(0)).then(|| {
-            placed
-                .next()
-                .expect("the visible transfer has an entry width")
-        });
+        let mut all_widths = widths;
+        if activity_width > Px(0) {
+            all_widths.push(activity_width);
+        }
+        let placed = layout.place_entries(&all_widths, dpi);
+        let mut lost = false;
+        for (id, control) in &self.work {
+            if let Some(index) = jobs.iter().position(|(shown, _)| shown == id) {
+                lost |= control.show(jobs[index].1, placed[index], layout, &meter, gap);
+            } else {
+                lost |= control.hide();
+            }
+        }
+        let transfer_rect = transfer.and_then(|_| placed.get(jobs.len()).copied());
         let activity_rect = if activity_width > Px(0) {
-            placed
-                .next()
-                .expect("the visible activity has an entry width")
+            *placed.last().expect("visible indexing has an entry width")
         } else {
             Rect::default()
         };
@@ -471,39 +470,7 @@ impl StatusBar {
                 .join(" ");
             tips.set_area(ACTIVITY_TEXT, &text);
         }
-        if job_width == Px(0)
-            && let Some(tips) = self.part_tips
-        {
-            tips.place_area(JOB_TEXT, Rect::default());
-            tips.set_area(JOB_TEXT, "");
-        }
-        if let Some(area) = job_rect {
-            let text_rect = Rect {
-                x: area.x,
-                y: area.y + Px((area.height - meter.height()).0 / 2),
-                width: text_width,
-                height: meter.height(),
-            };
-            let mut x = text_rect.right() + gap;
-            let bar = Rect {
-                x,
-                ..layout.progress
-            };
-            if progress {
-                x = x + layout.progress.width + gap;
-            }
-            let cancel = Rect { x, ..layout.cancel };
-            win::move_children(&[
-                (self.text.hwnd(), text_rect),
-                (self.progress.hwnd(), bar),
-                (self.cancel.hwnd(), cancel),
-            ]);
-            if let Some(tips) = self.part_tips {
-                tips.place_area(JOB_TEXT, text_rect);
-                tips.set_area(JOB_TEXT, &job.text);
-            }
-        }
-        transfer_rect
+        (transfer_rect, lost)
     }
 
     /// Makes a part of the main window's status bar for each item of
@@ -547,7 +514,9 @@ impl StatusBar {
         let dpi = self.bar.hwnd().dpi();
         let width = self.bar.hwnd().client_size().width;
         let wanted = widths.iter().fold(Px(0), |sum, width| sum + width.whole);
-        let layout = layout.fit_groups(view, wanted, width, dpi);
+        let layout = layout
+            .reserve_middle(self.work_width.get())
+            .fit_groups(view, wanted, width, dpi);
         let forms = layout.right_parts_shown(&widths);
         let shown = forms.len();
         let shown_widths: Vec<Px> = (widths.iter().zip(&forms))
@@ -661,37 +630,10 @@ impl StatusBar {
         )
     }
 
-    /// Shows the job as `text`, with its progress bar and Cancel. Returns
-    /// whether Cancel had the focus when it was hidden, so the parent gives
-    /// the focus to another control.
-    fn show_job(&self, job: &JobCaption, text: &str) -> bool {
-        self.bar.set_text(JOB_GROUP, "");
-        self.text.hwnd().set_text(text);
-        self.text.hwnd().set_visible(!text.is_empty());
-        // A long result ends in an ellipsis, so the tooltip shows it whole.
-        self.bar.set_tip(JOB_GROUP, &job.text);
-        match job.progress {
-            JobProgress::None | JobProgress::Unmeasured => {
-                let moving = job.progress == JobProgress::Unmeasured;
-                if self.progress_moving.replace(moving) != moving {
-                    self.progress.set_moving(moving);
-                }
-            }
-            JobProgress::Measured { done, total } => {
-                self.progress_moving.set(false);
-                self.progress.set_measured(done, total);
-            }
-        }
-        self.progress
-            .hwnd()
-            .set_visible(job.progress != JobProgress::None);
-        let focus_lost = !job.cancel && Hwnd::focused() == Some(self.cancel.hwnd());
-        self.cancel.hwnd().set_visible(job.cancel);
-        focus_lost
-    }
-
-    pub(super) fn cancel_clicked(&self, event: ControlEvent) -> bool {
-        self.cancel.clicked(event)
+    pub(super) fn cancelled(&self, event: ControlEvent) -> Option<WorkId> {
+        self.work
+            .iter()
+            .find_map(|(id, work)| work.cancel_clicked(event).then_some(*id))
     }
 
     pub(super) fn transfer_input(&self, event: ControlEvent) -> Option<Input> {
