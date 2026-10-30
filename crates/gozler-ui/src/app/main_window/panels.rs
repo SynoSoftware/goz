@@ -153,6 +153,7 @@ impl PanelControls {
             folder: Label::create_right_path(parent, folder)?,
             kind: Cell::new(None),
         };
+        controls.list.focus_on_click()?;
         // The panel's fills give the widths.
         for (index, column) in PanelColumn::FOLDER.into_iter().enumerate() {
             controls.list.insert_column(
@@ -1120,10 +1121,16 @@ impl Panels {
                 window.created().work.borrow_mut().lists.mark(list, input);
             }
         }
-        if listed || update.sizes {
+        if listed && window.model.borrow().panels().panel(side).sort().key != SortKey::Size
+            || update.sizes
+        {
             self.ask_panel_sizes(window, side);
         }
-        let scroll = if matches!(update.kind, UpdatedKind::Listed { again: false }) {
+        let scroll = if matches!(update.kind, UpdatedKind::Listed { again: false })
+            || shown
+                .focused
+                .is_some_and(|row| self.panel(side).list.visible_rows().contains(&row))
+        {
             Scroll::ToFocus
         } else {
             Scroll::Keep
@@ -1136,9 +1143,6 @@ impl Panels {
             scroll,
             !matches!(update.kind, UpdatedKind::Listed { again: false }),
         );
-        if listed || matches!(update.kind, UpdatedKind::Sizes) {
-            self.fill_panel(window, side);
-        }
         if matches!(
             update.kind,
             UpdatedKind::Listed { .. } | UpdatedKind::Watch | UpdatedKind::Await
@@ -1867,7 +1871,7 @@ impl Panels {
                 Some(LRESULT(0))
             }
             ListNotify::ScrollEnded => {
-                window.grow_extension(List::Panel(side));
+                self.fill_panel(window, side);
                 Some(LRESULT(0))
             }
             ListNotify::ColumnClick(index) => {
@@ -1986,6 +1990,12 @@ impl Panels {
             return false;
         }
         let list = self.panel(side).list;
+        let anchor = list.selection_mark();
+        window
+            .model
+            .borrow_mut()
+            .panels_mut()
+            .set_anchor(side, anchor);
         match self.panel(side).changed.replace(ListChanged::Nothing) {
             ListChanged::Nothing => return true,
             ListChanged::Focus => {

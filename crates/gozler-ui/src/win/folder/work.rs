@@ -3,7 +3,10 @@
 use super::{
     PanelEvent, ReadAsk, ReadEvent, Reading, Register, Registration, Side, Stop, reason, verbatim,
 };
-use crate::core::panel::{Entry, FolderChange, ReadFailure, give_sizes, join, sort_listing};
+use crate::core::fetch::Chunk;
+use crate::core::panel::{
+    Entry, FolderChange, ReadFailure, give_indexed_sizes, give_sizes, join, sort_listing,
+};
 use crate::win::work::OffThread;
 use gozler_client::CancelToken;
 use gozler_core::layout::{NotifyAction, walk_full_listing_buffer, walk_notify_buffer};
@@ -48,17 +51,22 @@ const ERROR_NO_MEDIA_IN_DRIVE: u32 = 1112;
 const ERROR_DEVICE_NOT_CONNECTED: u32 = 1167;
 const FILE_ATTRIBUTE_DIRECTORY: u32 = 0x10;
 
-pub(crate) fn read(reading: Reading, _worker: &OffThread, cancel: &CancelToken) -> Registration {
+pub(crate) fn read(
+    reading: Reading,
+    _worker: &OffThread,
+    cancel: &CancelToken,
+    sizes: &dyn Fn(&str) -> Option<Chunk>,
+) -> Registration {
     let registration = Registration(Arc::clone(&reading.notification));
     let closed = Arc::clone(&reading.closed);
     closed.store(false, Ordering::Release);
-    read_and_watch(reading, cancel);
+    read_and_watch(reading, cancel, sizes);
     // All listing/watch handles have dropped before removal can be granted.
     closed.store(true, Ordering::Release);
     registration
 }
 
-fn read_and_watch(reading: Reading, cancel: &CancelToken) {
+fn read_and_watch(reading: Reading, cancel: &CancelToken, sizes: &dyn Fn(&str) -> Option<Chunk>) {
     let Reading {
         side,
         ask,
@@ -100,6 +108,7 @@ fn read_and_watch(reading: Reading, cancel: &CancelToken) {
         &stop,
         &|event| deliver(PanelEvent::Read { side, event }),
         &armed,
+        sizes,
     ) else {
         return;
     };
@@ -169,6 +178,7 @@ fn read_folder(
     stop: &Stop,
     deliver: &dyn Fn(ReadEvent) -> bool,
     armed: &dyn Fn(&FolderWatch) -> bool,
+    sizes: &dyn Fn(&str) -> Option<Chunk>,
 ) -> Option<(String, Option<FileIdentity>, FolderWatch)> {
     let generation = ask.generation;
     let failed = |error: &WinError, path: &str| {
@@ -267,6 +277,15 @@ fn read_folder(
     drop(folder);
     if path == ask.path {
         give_sizes(&mut entries, &ask.sizes.values());
+    }
+    if ask.sort.key == gozler_core::types::SortKey::Size
+        && entries.iter().any(Entry::is_folder)
+        && let Some(chunk) = sizes(&path)
+    {
+        give_indexed_sizes(&mut entries, &chunk.rows);
+    }
+    if stop.stopped() {
+        return None;
     }
     sort_listing(&mut entries, ask.sort);
     if !deliver(ReadEvent::Listed {

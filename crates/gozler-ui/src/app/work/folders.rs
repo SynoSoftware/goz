@@ -6,6 +6,8 @@ use crate::core::work::{INLINE_ITEMS, Replacement, Retirement, Waiting};
 use crate::win::folder::{self, PanelEvent, ReadBack, Reading, Registration, Removal};
 use crate::win::wake::OpenWaker;
 use crate::win::work::Task;
+use gozler_client::{CancelToken, Client};
+use gozler_core::proto::PIPE_NAME;
 use std::time::Instant;
 
 struct Watching {
@@ -30,8 +32,7 @@ impl Work {
     pub(crate) fn new(waker: OpenWaker) -> Self {
         Self {
             readings: std::array::from_fn(|_| {
-                Task::new(waker.clone(), Replacement::Cancel, folder::read)
-                    .with_size(|_| INLINE_ITEMS + 1)
+                Task::new(waker.clone(), Replacement::Cancel, read).with_size(|_| INLINE_ITEMS + 1)
             }),
             watching: Default::default(),
             closing: Default::default(),
@@ -209,7 +210,7 @@ impl Work {
                 watching.suspended = true;
                 watching.waiting = false;
                 watching.back.stop();
-                self.readings[side.index()].interrupt_io();
+                self.readings[side.index()].cancel();
                 allowed = watching.back.closed();
                 watching.vetoed = !allowed;
             }
@@ -281,4 +282,16 @@ impl Work {
         }
         self.take_retired()
     }
+}
+
+fn read(
+    reading: Reading,
+    worker: &crate::win::work::OffThread,
+    cancel: &CancelToken,
+) -> Registration {
+    folder::read(reading, worker, cancel, &|folder| {
+        let ask = crate::core::panel::size_query(folder)?;
+        let mut client = Client::connect(PIPE_NAME, true, cancel.clone()).ok()?;
+        super::requests::rows(&mut client, &ask, None).ok()
+    })
 }

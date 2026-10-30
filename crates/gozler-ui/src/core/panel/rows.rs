@@ -144,6 +144,15 @@ pub(crate) fn give_sizes(entries: &mut [Entry], sizes: &[(Box<[u16]>, u64)]) {
     }
 }
 
+pub(crate) fn give_indexed_sizes(entries: &mut [Entry], rows: &[gozler_core::proto::ResultItem]) {
+    let sizes: Vec<(Box<[u16]>, u64)> = rows
+        .iter()
+        .filter(|row| row.is_dir)
+        .filter_map(|row| Some((last_name(&row.path).encode_utf16().collect(), row.size?)))
+        .collect();
+    give_sizes(entries, &sizes);
+}
+
 #[derive(Clone, Debug)]
 pub(super) struct FolderRows {
     /// Sorted by [`compare`] with `order`.
@@ -229,12 +238,7 @@ impl FolderRows {
             Outcome::Rows(chunk) => chunk.rows.as_ref(),
             _ => &[],
         };
-        let sizes: Vec<(Box<[u16]>, u64)> = entries
-            .iter()
-            .filter(|row| row.is_dir)
-            .filter_map(|row| Some((last_name(&row.path).encode_utf16().collect(), row.size?)))
-            .collect();
-        give_sizes(&mut self.entries, &sizes);
+        give_indexed_sizes(&mut self.entries, entries);
         if self.order.key == SortKey::Size {
             sort_listing(&mut self.entries, self.order);
         }

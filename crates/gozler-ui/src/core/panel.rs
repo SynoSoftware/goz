@@ -49,7 +49,7 @@ pub(crate) use counting::{Counted, Counting};
 use quick::Quick;
 pub(crate) use quick::{Finding, Found, QuickAction};
 use rows::{FolderRows, Name, name_hash, name_key, same_name};
-pub(crate) use rows::{give_sizes, sort_listing};
+pub(crate) use rows::{give_indexed_sizes, give_sizes, sort_listing};
 pub(crate) use selecting::{Selected, Selecting};
 
 const PENDING_ROWS: usize = 32;
@@ -63,6 +63,31 @@ const SIZE_ROWS: u64 = 100_000;
 const FILE_ATTRIBUTE_HIDDEN: u32 = 0x2;
 const FILE_ATTRIBUTE_SYSTEM: u32 = 0x4;
 const FILE_ATTRIBUTE_DIRECTORY: u32 = 0x10;
+
+pub(crate) fn size_query(folder: &str) -> Option<ChunkAsk> {
+    let filters = Filters {
+        location: Some(folder.to_owned()),
+        only_directly: true,
+        ..Filters::default()
+    };
+    let search = query::search(
+        "folder:",
+        Matching::default(),
+        &filters,
+        &QueryStart {
+            now: jiff::Timestamp::UNIX_EPOCH,
+            time_zone: jiff::tz::TimeZone::UTC,
+        },
+    )
+    .ok()?;
+    Some(ChunkAsk {
+        search,
+        sort: SortSpec::default(),
+        start: 0,
+        len: SIZE_ROWS,
+        snapshot: FromSnapshot::No,
+    })
+}
 
 /// One of the two panels. Its names are `ui.json`'s.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -444,7 +469,8 @@ pub(crate) struct ReadAsk {
     /// it that exists, as for the shown folder and the saved one.
     pub(crate) nearest: bool,
     /// The panel's sort, which the reading thread sorts the listing by, so
-    /// a large folder is never sorted on the window's thread.
+    /// a large folder is never sorted on the window's thread. Size order
+    /// asks for indexed folder sizes before publishing the listing.
     pub(crate) sort: SortSpec,
     /// The folder sizes the panel knows, when it reads its shown folder
     /// again: the reading thread gives them to the listing before it sorts,
@@ -686,6 +712,7 @@ pub(crate) struct Panel {
     /// The list's focused row as it last told it, which the commands act
     /// on when no entry is selected.
     focused: Option<u64>,
+    anchor: Option<u64>,
     /// The name that Gozler's own New folder or rename gives an entry in
     /// the shown folder, which the focus goes to when a row shows it.
     awaited: Option<Awaited>,
@@ -785,6 +812,7 @@ impl Panel {
             saved: saved.folder.clone(),
             gone_focus: None,
             focused: None,
+            anchor: None,
             awaited: None,
             awaited_place: None,
             interaction_revision: 0,
@@ -1083,6 +1111,7 @@ impl Panel {
         self.omitted_end = None;
         self.reread = false;
         self.sized = false;
+        self.anchor = None;
     }
 
     /// The folder `ui.json` saves: the shown one, or the saved one while
@@ -1131,6 +1160,7 @@ impl Panel {
             revision: self.interaction_revision,
             selected: Arc::clone(&self.selected),
             focused: self.focused,
+            anchor: self.anchor,
             gone: self.gone_focus.clone(),
             awaited: self.awaited.clone(),
         }
@@ -1281,6 +1311,7 @@ impl Panel {
         if matches!(update.kind, UpdatedKind::Listed { .. }) {
             self.folder.clone_from(&answer.folder);
             self.set_view(View::Folder);
+            self.sized = self.rows.order().key == SortKey::Size;
             self.read = None;
             self.saved = None;
             self.omitted_end = None;
@@ -1288,6 +1319,7 @@ impl Panel {
         }
         self.select_shared(answer.selected.clone());
         self.focused = update.place.focused;
+        self.anchor = answer.anchor;
         self.gone_focus = answer.interaction.gone.take();
         self.set_awaited(answer.interaction.awaited.take());
         self.awaited_place = answer.awaited_place.take();
@@ -2258,6 +2290,18 @@ impl Panels {
         }
     }
 
+    pub(crate) fn anchor(&self, side: Side) -> Option<u64> {
+        self.panel(side).anchor
+    }
+
+    pub(crate) fn set_anchor(&mut self, side: Side, anchor: Option<u64>) {
+        let panel = self.panel_mut(side);
+        if panel.anchor != anchor {
+            panel.anchor = anchor;
+            panel.interaction_revision += 1;
+        }
+    }
+
     /// How many entries `side`'s file commands act on
     /// ([`Panels::chosen_source`]), without a pass over them: none while a search
     /// panel's selection is read.
@@ -2569,32 +2613,9 @@ impl Panels {
             panel.sizes_asked = None;
             return None;
         }
-        let filters = Filters {
-            location: Some(panel.folder.clone()),
-            only_directly: true,
-            ..Filters::default()
-        };
-        let search = query::search(
-            "folder:",
-            Matching::default(),
-            &filters,
-            &QueryStart {
-                now: jiff::Timestamp::UNIX_EPOCH,
-                time_zone: jiff::tz::TimeZone::UTC,
-            },
-        )
-        .ok()?;
+        let ask = size_query(&panel.folder)?;
         panel.sizes_asked = Some(generation);
-        Some(Ask::FolderSizes(
-            side,
-            ChunkAsk {
-                search,
-                sort: SortSpec::default(),
-                start: 0,
-                len: SIZE_ROWS,
-                snapshot: FromSnapshot::No,
-            },
-        ))
+        Some(Ask::FolderSizes(side, ask))
     }
 
     /// gozlerd's answer to `side`'s folder sizes: each subfolder's size,
@@ -4052,11 +4073,13 @@ pub(crate) mod tests {
         let ask = panels.sort(Side::Left, sort).expect("a folder shows");
         complete(&mut panels, &ask, r"C:\d", entries());
         panels.set_focused(Side::Left, Some(1));
+        panels.set_anchor(Side::Left, Some(2));
         give_sizes(&mut panels, &[(r"C:\d\a", 10), (r"C:\d\b", 90)]);
         let update = panels
             .take_update(Side::Left)
             .expect("sizes and order publish together");
         assert_eq!(update.place.focused, Some(2));
+        assert_eq!(panels.anchor(Side::Left), Some(1));
         assert_eq!(names(&panels, Side::Left), ["..", "b", "a", "f"]);
         assert_eq!(folder_sizes(&panels), [Some(90), Some(10), None]);
 

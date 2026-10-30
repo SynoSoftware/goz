@@ -263,7 +263,7 @@ fn run(
 /// Every page of one chunk. With `first`, the first page also goes there
 /// as soon as it arrives, when more pages follow, so the list shows rows
 /// before the whole chunk has arrived.
-fn rows(
+pub(super) fn rows(
     client: &mut Client,
     ask: &ChunkAsk,
     first: Option<&dyn Fn(Outcome)>,

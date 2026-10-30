@@ -11,6 +11,7 @@ pub(super) struct Interaction {
     pub(super) revision: u64,
     pub(super) selected: Arc<Vec<Range<u64>>>,
     pub(super) focused: Option<u64>,
+    pub(super) anchor: Option<u64>,
     pub(super) gone: Option<GoneFocus>,
     pub(super) awaited: Option<Awaited>,
 }
@@ -116,6 +117,7 @@ pub(crate) struct Calculated {
     pub(super) end_revision: u64,
     pub(super) interaction: Interaction,
     pub(super) place: Place,
+    pub(super) anchor: Option<u64>,
     pub(super) selected: RowSelection,
     pub(super) awaited_place: Option<(Place, RowSelection)>,
     mapping: Mapping,
@@ -285,6 +287,17 @@ impl Calculation {
         if place.selected.as_ref() == interaction.selected.as_ref() {
             place.selected = Arc::clone(&interaction.selected);
         }
+        let anchor = if mapping.same {
+            interaction
+                .anchor
+                .and_then(|row| match before.row(row, before_up)? {
+                    Row::Up => (up != 0).then_some(0),
+                    Row::Entry(entry) => rows.row_of(&entry.name(), None, up),
+                    Row::Result(_) => None,
+                })
+        } else {
+            place.focused
+        };
         if matches!(mapping.kind, UpdatedKind::Watch) {
             let shows = |name: &Name| {
                 place
@@ -348,6 +361,7 @@ impl Calculation {
             end_revision,
             interaction,
             place,
+            anchor,
             selected,
             awaited_place,
             mapping,

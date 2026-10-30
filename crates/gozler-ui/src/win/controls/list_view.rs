@@ -5,8 +5,9 @@ use crate::win::gdi::ImageList;
 use crate::win::present::{self, Repaint};
 use crate::win::{Hwnd, wide};
 use std::ops::Range;
-use windows::Win32::Foundation::{HWND, POINT, RECT};
+use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::{ClientToScreen, MapWindowPoints, ScreenToClient};
+use windows::Win32::System::SystemServices::{MK_CONTROL, MK_SHIFT};
 use windows::Win32::UI::Controls::{
     HDF_SORTDOWN, HDF_SORTUP, HDHITTESTINFO, HDI_FORMAT, HDITEMW, HDM_GETITEMRECT, HDM_GETITEMW,
     HDM_HITTEST, HDM_SETITEMW, LIST_VIEW_ITEM_STATE_FLAGS, LVCF_FMT, LVCF_TEXT, LVCF_WIDTH,
@@ -14,16 +15,20 @@ use windows::Win32::UI::Controls::{
     LVIS_FOCUSED, LVIS_SELECTED, LVITEMW, LVM_DELETECOLUMN, LVM_ENSUREVISIBLE,
     LVM_GETCOLUMNORDERARRAY, LVM_GETCOLUMNW, LVM_GETCOLUMNWIDTH, LVM_GETCOUNTPERPAGE,
     LVM_GETHEADER, LVM_GETITEMCOUNT, LVM_GETITEMRECT, LVM_GETITEMSTATE, LVM_GETNEXTITEM,
-    LVM_GETSELECTEDCOUNT, LVM_GETSTRINGWIDTHW, LVM_GETTOPINDEX, LVM_HITTEST, LVM_INSERTCOLUMNW,
-    LVM_REDRAWITEMS, LVM_SETCALLBACKMASK, LVM_SETCOLUMNORDERARRAY, LVM_SETCOLUMNW,
-    LVM_SETCOLUMNWIDTH, LVM_SETEXTENDEDLISTVIEWSTYLE, LVM_SETIMAGELIST, LVM_SETITEMCOUNT,
-    LVM_SETITEMSTATE, LVM_SETSELECTIONMARK, LVNI_FOCUSED, LVNI_SELECTED, LVS_EX_DOUBLEBUFFER,
-    LVS_EX_FULLROWSELECT, LVS_EX_HEADERDRAGDROP, LVS_EX_INFOTIP, LVS_EX_LABELTIP, LVS_OWNERDATA,
-    LVS_REPORT, LVS_SHAREIMAGELISTS, LVS_SHOWSELALWAYS, LVSICF_NOSCROLL, LVSIL_SMALL, WC_LISTVIEWW,
+    LVM_GETSELECTEDCOUNT, LVM_GETSELECTIONMARK, LVM_GETSTRINGWIDTHW, LVM_GETTOPINDEX, LVM_HITTEST,
+    LVM_INSERTCOLUMNW, LVM_REDRAWITEMS, LVM_SETCALLBACKMASK, LVM_SETCOLUMNORDERARRAY,
+    LVM_SETCOLUMNW, LVM_SETCOLUMNWIDTH, LVM_SETEXTENDEDLISTVIEWSTYLE, LVM_SETIMAGELIST,
+    LVM_SETITEMCOUNT, LVM_SETITEMSTATE, LVM_SETSELECTIONMARK, LVN_BEGINDRAG, LVN_ITEMACTIVATE,
+    LVNI_FOCUSED, LVNI_SELECTED, LVS_EX_DOUBLEBUFFER, LVS_EX_FULLROWSELECT, LVS_EX_HEADERDRAGDROP,
+    LVS_EX_INFOTIP, LVS_EX_LABELTIP, LVS_OWNERDATA, LVS_REPORT, LVS_SHAREIMAGELISTS,
+    LVS_SHOWSELALWAYS, LVSICF_NOSCROLL, LVSIL_SMALL, NM_CLICK, NMHDR, NMITEMACTIVATE, NMLISTVIEW,
+    WC_LISTVIEWW,
 };
+use windows::Win32::UI::Input::KeyboardAndMouse::DragDetect;
+use windows::Win32::UI::Shell::{DefSubclassProc, RemoveWindowSubclass, SetWindowSubclass};
 use windows::Win32::UI::WindowsAndMessaging::{
-    GWL_STYLE, GetWindowLongPtrW, SB_LINEDOWN, SB_LINEUP, WINDOW_EX_STYLE, WM_VSCROLL, WS_TABSTOP,
-    WS_VSCROLL,
+    GWL_STYLE, GetDlgCtrlID, GetWindowLongPtrW, IsWindow, SB_LINEDOWN, SB_LINEUP, WINDOW_EX_STYLE,
+    WM_LBUTTONDBLCLK, WM_LBUTTONDOWN, WM_NCDESTROY, WM_NOTIFY, WM_VSCROLL, WS_TABSTOP, WS_VSCROLL,
 };
 use windows::core::PWSTR;
 
@@ -47,6 +52,16 @@ pub(crate) struct ListColumn<'a> {
 }
 
 impl ListView {
+    pub(crate) fn focus_on_click(self) -> windows::core::Result<()> {
+        // SAFETY: this thread owns the control; the stateless subclass is
+        // removed when the control is destroyed.
+        if unsafe { SetWindowSubclass(self.0.0, Some(cursor_mouse), 0, 0) }.as_bool() {
+            Ok(())
+        } else {
+            Err(windows::core::Error::from_thread())
+        }
+    }
+
     pub(crate) fn show_info_tips(self) {
         send(
             self.0,
@@ -344,13 +359,13 @@ impl ListView {
     /// a `Shift`+click starts.
     pub(crate) fn set_focused(self, row: Option<u64>) {
         self.focus_in_place(row);
+        self.set_selection_mark(row);
         if let Some(row) = row {
             self.ensure_visible(row);
         }
     }
 
-    /// As [`ListView::set_focused`], without scrolling, so the rows stay
-    /// where the person sees them.
+    /// Restores focus without scrolling or changing the Shift-click anchor.
     pub(crate) fn focus_in_place(self, row: Option<u64>) {
         // A virtual list does not draw again the row that loses the focus
         // to another row, which keeps its focus rectangle on the screen, so
@@ -362,8 +377,20 @@ impl ListView {
         }
         if let Some(row) = row {
             self.set_state(row as usize, LVIS_FOCUSED, LVIS_FOCUSED);
-            send(self.0, LVM_SETSELECTIONMARK, 0, row as isize);
         }
+    }
+
+    pub(crate) fn selection_mark(self) -> Option<u64> {
+        u64::try_from(send(self.0, LVM_GETSELECTIONMARK, 0, 0)).ok()
+    }
+
+    pub(crate) fn set_selection_mark(self, row: Option<u64>) {
+        send(
+            self.0,
+            LVM_SETSELECTIONMARK,
+            0,
+            row.map_or(-1, |row| row as isize),
+        );
     }
 
     /// Whether `row` is focused, and whether it is selected.
@@ -630,6 +657,87 @@ impl ListView {
         let column = unsafe { send_pointer(header, HDM_HITTEST, 0, &raw mut hit) };
         usize::try_from(column).ok()
     }
+}
+
+unsafe extern "system" fn cursor_mouse(
+    hwnd: HWND,
+    message: u32,
+    wparam: WPARAM,
+    lparam: LPARAM,
+    _id: usize,
+    _data: usize,
+) -> LRESULT {
+    // MK_SHIFT and MK_CONTROL leave range selection and toggling to Windows.
+    if matches!(message, WM_LBUTTONDOWN | WM_LBUTTONDBLCLK)
+        && wparam.0 & (MK_SHIFT.0 | MK_CONTROL.0) as usize == 0
+    {
+        let point = POINT {
+            x: lparam.0 as i16 as i32,
+            y: (lparam.0 >> 16) as i16 as i32,
+        };
+        let mut screen = point;
+        // SAFETY: the point is local and the message targets this live control.
+        let _ = unsafe { ClientToScreen(hwnd, &mut screen) };
+        let list = ListView(Hwnd(hwnd));
+        list.hwnd().focus();
+        list.hwnd().parent().show_focus_cues();
+        let row = list.row_at((screen.x, screen.y));
+        if let Some(row) = row {
+            list.set_focused(Some(row));
+        }
+        // SAFETY: Windows tracks the gesture using its system drag threshold.
+        let drag = row.is_some()
+            && message == WM_LBUTTONDOWN
+            && unsafe { DragDetect(hwnd, screen) }.as_bool();
+        // Drag tracking dispatches messages, including destruction of the list.
+        // SAFETY: IsWindow accepts a handle that may have been destroyed.
+        if !unsafe { IsWindow(Some(hwnd)) }.as_bool() {
+            return LRESULT(0);
+        }
+        // SAFETY: the control is still live on its owning thread.
+        let id = unsafe { GetDlgCtrlID(hwnd) } as usize;
+        let hdr = NMHDR {
+            hwndFrom: hwnd,
+            idFrom: id,
+            code: if drag {
+                LVN_BEGINDRAG
+            } else if message == WM_LBUTTONDBLCLK && row.is_some() {
+                LVN_ITEMACTIVATE
+            } else {
+                NM_CLICK
+            },
+        };
+        if drag {
+            let notification = NMLISTVIEW {
+                hdr,
+                iItem: row.map_or(-1, |row| row as i32),
+                ptAction: point,
+                ..Default::default()
+            };
+            // SAFETY: the notification outlives the synchronous WM_NOTIFY.
+            unsafe {
+                send_pointer(list.hwnd().parent(), WM_NOTIFY, id, &raw const notification);
+            }
+        } else {
+            let notification = NMITEMACTIVATE {
+                hdr,
+                iItem: row.map_or(-1, |row| row as i32),
+                ptAction: point,
+                ..Default::default()
+            };
+            // SAFETY: the notification outlives the synchronous WM_NOTIFY.
+            unsafe {
+                send_pointer(list.hwnd().parent(), WM_NOTIFY, id, &raw const notification);
+            }
+        }
+        return LRESULT(0);
+    }
+    if message == WM_NCDESTROY {
+        // SAFETY: this control owns the stateless subclass until destruction.
+        let _ = unsafe { RemoveWindowSubclass(hwnd, Some(cursor_mouse), 0) };
+    }
+    // SAFETY: the original parameters are forwarded unchanged.
+    unsafe { DefSubclassProc(hwnd, message, wparam, lparam) }
 }
 
 #[cfg(test)]

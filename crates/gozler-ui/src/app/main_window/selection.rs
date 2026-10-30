@@ -69,6 +69,7 @@ struct NativeUpdate {
     shown: Option<Arc<Vec<Range<u64>>>>,
     changes: Option<Changes>,
     focused: Option<u64>,
+    anchor: Option<u64>,
     to_focus: bool,
 }
 
@@ -979,6 +980,11 @@ impl MainWindow {
             }
             List::Search => (self.list_control(list).count(), row_count(&place.selected)),
         };
+        let anchor = match list {
+            List::Panel(side) => self.model.borrow().panels().anchor(side),
+            List::Search if keep_action => self.list_control(list).selection_mark(),
+            List::Search => place.focused,
+        };
         let mut retired = Retirement::default();
         {
             let mut native = self.native_selection(list).borrow_mut();
@@ -1005,6 +1011,7 @@ impl MainWindow {
                 shown,
                 changes: None,
                 focused: place.focused,
+                anchor,
                 to_focus,
             });
         }
@@ -1091,10 +1098,12 @@ impl MainWindow {
             self.set_selection_enabled(list, false);
             return;
         }
-        if update.to_focus {
-            control.set_focused(update.focused);
-        } else {
-            control.focus_in_place(update.focused);
+        control.focus_in_place(update.focused);
+        control.set_selection_mark(update.anchor);
+        if update.to_focus
+            && let Some(row) = update.focused
+        {
+            control.ensure_visible(row);
         }
         if !current() {
             self.retire_selection(update);
@@ -1134,6 +1143,7 @@ impl MainWindow {
         self.retire_selection(update);
         control.redraw_visible();
         if let List::Panel(side) = list {
+            self.controls().panels.fill_panel(self, side);
             self.controls().panels.show_panel(self, side);
         }
         self.controls().key_bar.update_key_bar(self);
