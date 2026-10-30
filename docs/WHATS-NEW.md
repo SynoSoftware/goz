@@ -1,6 +1,6 @@
 # What's new
 
-## Gozler 0.5.8 — Improved usability and rendering, plus in-app updates
+## Gozler 0.5.8 — Improved usability and rendering, plus an in-app updater
 
 Update Gozler from the app, follow several jobs at once, and choose how Commander selection masks work.
 
