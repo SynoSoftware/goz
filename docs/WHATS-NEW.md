@@ -2,7 +2,7 @@
 
 ## Gozler 0.5.8
 
-### Improved usability and rendering, plus in-app updates
+### Improved usability and rendering, plus an app updater
 
 #### Progress for several jobs at once
 
