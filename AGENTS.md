@@ -106,16 +106,36 @@ button says what it does when the caption alone cannot. People click a
 familiar word without reading it, and a longer caption also widens every
 button that shares its row.
 
-## Writing code
+## Code style
+
+The best code is the simplest correct code whose intent and ownership are
+obvious on first reading. An engineer new to the feature can find what an
+operation does, where its rules live and how its data changes by reading
+the code. Correctness, security and reliability come first; simplicity
+never justifies weaker behavior.
 
 - **Fit the code around you.** Solve the problem the way the code beside your
   change already does. Make the smallest coherent change that solves the whole
   problem, and restructure the code you are changing when that makes its
-  ownership or flow clearer.
-- **Let the types hold the rules.** Model a state as an enum that carries its
-  data, as `VolumePhase` does, and wrap an id in a newtype when it could be
-  mixed up with another integer, as `Frn` is. Then the compiler catches the
-  misuse instead of a reviewer.
+  ownership or flow clearer. Remove the superseded implementation in that
+  change; retain compatibility only for a real contract such as saved settings.
+- **One responsibility, one owner, one implementation.** Menus, keys and
+  buttons for one operation call the same implementation. Callers request
+  work through a small interface that hides its preparation, ordering and
+  cleanup. Keep each fact and rule with its owner; the main window coordinates
+  owners rather than taking their decisions over. Store facts and derive
+  presentation, retaining a second representation only for a measured need.
+- **Let the types hold the rules.** Use booleans for independent facts,
+  enums carrying data for exclusive states, as `VolumePhase` does, and one
+  transition function when sequencing is constrained. Interacting flags and
+  repeated agreement checks call for a better representation. Wrap an id
+  in a newtype when it could be mixed up with another integer, as `Frn` is.
+  Then the compiler catches the misuse instead of a reviewer. Use a trait
+  where behavior actually varies, not to mirror every concrete type.
+- **Make effects explicit.** Pass the dependencies an owner needs at
+  construction. Names and signatures reveal operations that save, send or
+  change shared state. Use named types for domain inputs, outcomes and errors
+  whose meaning a caller would otherwise reconstruct from strings or tuples.
 - **Return errors from untrusted input.** Bytes from the disk, the journal and
   the pipe can be anything. Read them the way the existing parsers do, through
   `zerocopy` views and checked lengths, so a malformed record becomes an error,
@@ -147,8 +167,57 @@ button that shares its row.
   finishing". On Windows the benches count the bench thread's CPU cycles, not
   wall time, because other work on this machine moves wall-clock timings by
   tens of percent.
-- **Use plain code.** Use `std` and the workspace's existing dependencies. Add
-  a trait, a generic or a macro when it removes real duplication.
+- **Choose algorithms for the expected scale.** Consider time, memory and
+  established library implementations. Among comparably effective solutions,
+  choose the easiest to read; fewer lines do not justify an inferior algorithm.
+- **Use plain Rust and native Win32.** Use `std`, the existing dependencies
+  and the established safe Win32 wrappers. Each new file, layer, trait,
+  generic or macro names the current requirement or repeated rule it serves.
+  Split by responsibility, lifetime or thread ownership, not a line-count
+  target. Keep related declarations together; a forwarding layer or a new
+  filename alone does not make the code easier to maintain.
+
+## Naming
+
+Treat the codebase as a language. Use `CONTEXT.md`'s terms consistently and
+judge names where callers read them. The goal is a clear concept with only
+the distinctions the reader still needs, not the shortest possible name.
+
+- **Do not repeat the owner.** A name does not repeat context already clear
+  from its module, enclosing type, method or access path: `panel.path`,
+  `command.label` and `task.cancel()`, not `panel.panel_path`,
+  `command.command_label` or `task.cancel_task()`. Likewise, prefer
+  `work::Id` to `work::WorkId` when the module supplies the distinction.
+  Keep an object's own parts, such as `pair.key`, and words that distinguish
+  different operations, such as `find_by_name` and `find_by_id`.
+- **Let structure carry context.** Qualify or import a type at its use site
+  when that resolves an ambiguity; do not concatenate its whole ownership
+  path into its name. A bare identifier passed apart from its owner still
+  needs a clear identity: use the domain's typed id rather than an ambiguous
+  primitive. Prefer the established owner to a new wrapper made only to
+  shorten names.
+- **Use domain meaning and Rust conventions.** Types and traits use
+  `UpperCamelCase`; modules, fields, functions and locals use `snake_case`;
+  constants use `SCREAMING_SNAKE_CASE`. Types name concepts, methods name
+  actions, collections are plural, and boolean queries read affirmatively,
+  such as `is_active`, `has_selection` or `can_edit`. Use familiar words
+  instead of invented abbreviations or type prefixes.
+- **Keep platform names at their boundary.** Win32 calls, handles, constants
+  and ABI fields retain the Windows SDK's vocabulary inside the platform
+  code. Safe interfaces use clear Rust names. Add no alias or forwarding
+  wrapper whose only purpose is to disguise a native name.
+- **Every word earns its place.** Challenge `Data`, `Info`, `Manager`,
+  `Helper`, `Request` and `Result`; retain them when they name a real
+  distinction. Name enduring concepts rather than their current screen,
+  storage or transport. Add words when they preserve meaning at the use site;
+  there is no word-count quota.
+
+Before accepting a new or changed name, identify its concept, the context
+its callers already have, and the distinction each word adds. Remove
+redundancy; if qualifiers accumulate, reconsider ownership. Review public
+callers and literal consumers before renaming a contract, including saved
+JSON names, resource IDs and wire fields. Apply these rules to the change
+at hand; they do not authorize unrelated renaming.
 
 ## Tests
 

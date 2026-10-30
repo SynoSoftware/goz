@@ -132,6 +132,10 @@ unreachable_pub = "warn"
 # keeps the next one from skipping it.
 undocumented_unsafe_blocks = "deny"
 
+# Keep file and line backtraces without the cost of full debugger information.
+[profile.dev]
+debug = "line-tables-only"
+
 # Thin LTO optimises across crates on every core. Fat LTO in one codegen unit
 # ran on one core for minutes after each change. Benchmarks build with this
 # profile too, so they share target\release instead of a tree of their own.
